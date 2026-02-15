@@ -2,6 +2,8 @@ use crate::bitstream::{
     FrameHeaderConfig, ObuType, ObuWriter, SequenceHeaderConfig, write_clk_obu_payload,
     write_sequence_header,
 };
+use crate::dct;
+use crate::scan::DEFAULT_SCAN_32X32;
 use crate::tile;
 
 pub fn encode_still_image(width: u32, height: u32, base_qindex: u8) -> Vec<u8> {
@@ -48,19 +50,30 @@ pub fn encode_video_yuv(
     let seq_obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload);
     output.extend_from_slice(&seq_obu);
 
-    let dc_prediction: i32 = 128;
+    let dequant = ac_qlookup(base_qindex);
 
     for (i, (y_plane, u_plane, v_plane)) in frames.iter().enumerate() {
-        let y_dc_residual = y_plane[0] as i32 - dc_prediction;
-        let u_dc_residual = u_plane[0] as i32 - dc_prediction;
-        let v_dc_residual = v_plane[0] as i32 - dc_prediction;
+        let y_residual = compute_residual_block(y_plane, 64, 64);
+        let mut y_residual_arr = [0i32; 4096];
+        y_residual_arr.copy_from_slice(&y_residual);
+        let y_dct = dct::forward_dct2_64x64(&y_residual_arr);
+        let (y_levels, y_eob) = quantize_block(&y_dct, dequant, 2);
 
-        let dequant = ac_qlookup(base_qindex);
-        let y_dc_level = quantize_dc(y_dc_residual, 2, dequant);
-        let u_dc_level = quantize_dc(u_dc_residual, 1, dequant);
-        let v_dc_level = quantize_dc(v_dc_residual, 1, dequant);
+        let u_residual = compute_residual_block(u_plane, 32, 32);
+        let mut u_residual_arr = [0i32; 1024];
+        u_residual_arr.copy_from_slice(&u_residual);
+        let u_dct = dct::forward_dct2_32x32(&u_residual_arr);
+        let (u_levels, u_eob) = quantize_block(&u_dct, dequant, 1);
 
-        let tile_data = tile::encode_tile_data_with_dc(y_dc_level, u_dc_level, v_dc_level);
+        let v_residual = compute_residual_block(v_plane, 32, 32);
+        let mut v_residual_arr = [0i32; 1024];
+        v_residual_arr.copy_from_slice(&v_residual);
+        let v_dct = dct::forward_dct2_32x32(&v_residual_arr);
+        let (v_levels, v_eob) = quantize_block(&v_dct, dequant, 1);
+
+        let tile_data = tile::encode_tile_data_with_coeffs(
+            &y_levels, y_eob, &u_levels, u_eob, &v_levels, v_eob,
+        );
         let frame_config = FrameHeaderConfig {
             base_qindex,
             order_hint: i as u32,
@@ -73,7 +86,46 @@ pub fn encode_video_yuv(
     output
 }
 
-fn ac_qlookup(qindex: u8) -> i32 {
+pub fn compute_residual_block(pixels: &[u8], width: usize, height: usize) -> Vec<i32> {
+    let mut residual = vec![0i32; width * height];
+    for i in 0..width * height {
+        residual[i] = pixels[i] as i32 - 128;
+    }
+    residual
+}
+
+pub fn quantize_coeff(coeff: i64, log_scale: u32, dequant: i32) -> i32 {
+    let scaled = coeff << (3 + log_scale);
+    if dequant == 0 {
+        return scaled as i32;
+    }
+    let dq = dequant as i64;
+    let sign = if scaled < 0 { -1i64 } else { 1i64 };
+    (sign * ((scaled.abs() + dq / 2) / dq)) as i32
+}
+
+pub fn quantize_block(
+    dct_coeffs: &[i32; 1024],
+    dequant: i32,
+    log_scale: u32,
+) -> ([i32; 1024], u16) {
+    let mut levels = [0i32; 1024];
+    let mut eob = 0u16;
+
+    for scan_idx in 0..1024 {
+        let coeff_idx = DEFAULT_SCAN_32X32[scan_idx] as usize;
+        let coeff = dct_coeffs[coeff_idx] as i64;
+        let level = quantize_coeff(coeff, log_scale, dequant);
+        levels[scan_idx] = level;
+        if level != 0 {
+            eob = scan_idx as u16 + 1;
+        }
+    }
+
+    (levels, eob)
+}
+
+pub fn ac_qlookup(qindex: u8) -> i32 {
     #[rustfmt::skip]
     const AC_QLOOKUP_QTX: [i32; 25] = [
         64, 40, 41, 43, 44, 45, 47, 48, 49, 51, 52,
@@ -88,20 +140,14 @@ fn ac_qlookup(qindex: u8) -> i32 {
     }
 }
 
-fn quantize_dc(residual: i32, log_scale: u32, dequant: i32) -> i32 {
-    let dc_coeff = 128i64 * residual as i64;
-    let scaled = dc_coeff << (3 + log_scale);
-    if dequant == 0 {
-        return scaled as i32;
-    }
-    let dq = dequant as i64;
-    let sign = if scaled < 0 { -1i64 } else { 1i64 };
-    (sign * ((scaled.abs() + dq / 2) / dq)) as i32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quantize_dc(residual: i32, log_scale: u32, dequant: i32) -> i32 {
+        let dc_coeff = 128i64 * residual as i64;
+        quantize_coeff(dc_coeff, log_scale, dequant)
+    }
 
     #[test]
     fn bitstream_starts_with_seq_header_obu() {
@@ -200,5 +246,59 @@ mod tests {
         let val = (64 * dqcoeff + 32) >> 6;
         let pixel_residual = (64 * val + 4096) >> 13;
         assert_eq!(pixel_residual, 21);
+    }
+
+    #[test]
+    fn compute_residual_block_midgray() {
+        let pixels = vec![128u8; 64];
+        let residual = compute_residual_block(&pixels, 8, 8);
+        assert!(residual.iter().all(|&r| r == 0));
+    }
+
+    #[test]
+    fn compute_residual_block_values() {
+        let pixels = vec![200u8; 4];
+        let residual = compute_residual_block(&pixels, 2, 2);
+        assert!(residual.iter().all(|&r| r == 72));
+    }
+
+    #[test]
+    fn quantize_block_all_zero() {
+        let dct_coeffs = [0i32; 1024];
+        let (levels, eob) = quantize_block(&dct_coeffs, 164, 1);
+        assert_eq!(eob, 0);
+        assert!(levels.iter().all(|&l| l == 0));
+    }
+
+    #[test]
+    fn quantize_block_dc_only() {
+        let mut dct_coeffs = [0i32; 1024];
+        dct_coeffs[0] = 128 * 21;
+        let (levels, eob) = quantize_block(&dct_coeffs, 164, 1);
+        assert_eq!(eob, 1);
+        assert!(levels[0] != 0);
+        assert!(levels[1..].iter().all(|&l| l == 0));
+    }
+
+    #[test]
+    fn quantize_block_preserves_dc_value() {
+        let dequant = ac_qlookup(50);
+        let dc_from_old = quantize_dc(21, 2, dequant);
+        let dc_coeff = 128 * 21;
+        let dc_from_new = quantize_coeff(dc_coeff as i64, 2, dequant);
+        assert_eq!(dc_from_old, dc_from_new);
+    }
+
+    #[test]
+    fn solid_color_dct_produces_dc_only() {
+        let pixels = vec![200u8; 32 * 32];
+        let residual = compute_residual_block(&pixels, 32, 32);
+        let mut residual_arr = [0i32; 1024];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = crate::dct::forward_dct2_32x32(&residual_arr);
+        let dequant = ac_qlookup(50);
+        let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
+        assert_eq!(eob, 1);
+        assert!(levels[0] != 0);
     }
 }
