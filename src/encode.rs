@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::bitstream::{
     FrameHeaderConfig, ObuType, ObuWriter, SequenceHeaderConfig, write_clk_obu_payload,
     write_sequence_header,
@@ -5,6 +7,145 @@ use crate::bitstream::{
 use crate::dct;
 use crate::scan::DEFAULT_SCAN_32X32;
 use crate::tile;
+
+#[derive(Debug)]
+pub enum EncodeError {
+    InvalidDimensions { width: u32, height: u32 },
+    InvalidPlaneSize { plane: &'static str, expected: usize, got: usize },
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EncodeError::InvalidDimensions { width, height } => {
+                write!(f, "invalid dimensions: {}x{} (must be 64x64)", width, height)
+            }
+            EncodeError::InvalidPlaneSize { plane, expected, got } => {
+                write!(f, "{} plane size mismatch: expected {}, got {}", plane, expected, got)
+            }
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+pub struct Packet {
+    pub data: Vec<u8>,
+    pub frame_number: u64,
+}
+
+pub struct Encoder {
+    width: u32,
+    height: u32,
+    base_qindex: u8,
+    dequant: i32,
+    order_hint: u32,
+    pending_packet: Option<Packet>,
+}
+
+impl Encoder {
+    pub fn new(width: u32, height: u32, base_qindex: u8) -> Result<Self, EncodeError> {
+        if width != 64 || height != 64 {
+            return Err(EncodeError::InvalidDimensions { width, height });
+        }
+        Ok(Self {
+            width,
+            height,
+            base_qindex,
+            dequant: ac_qlookup(base_qindex),
+            order_hint: 0,
+            pending_packet: None,
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn headers(&self) -> Vec<u8> {
+        let seq_config = SequenceHeaderConfig {
+            width: self.width,
+            height: self.height,
+        };
+        let seq_payload = write_sequence_header(&seq_config);
+        ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload)
+    }
+
+    pub fn send_frame(&mut self, y: &[u8], u: &[u8], v: &[u8]) -> Result<(), EncodeError> {
+        let y_size = (self.width * self.height) as usize;
+        let uv_size = (self.width / 2 * self.height / 2) as usize;
+
+        if y.len() != y_size {
+            return Err(EncodeError::InvalidPlaneSize { plane: "Y", expected: y_size, got: y.len() });
+        }
+        if u.len() != uv_size {
+            return Err(EncodeError::InvalidPlaneSize { plane: "U", expected: uv_size, got: u.len() });
+        }
+        if v.len() != uv_size {
+            return Err(EncodeError::InvalidPlaneSize { plane: "V", expected: uv_size, got: v.len() });
+        }
+
+        let clk_obu = encode_frame_yuv(y, u, v, self.dequant, self.base_qindex, self.order_hint);
+
+        let frame_number = self.order_hint as u64;
+        self.order_hint += 1;
+        self.pending_packet = Some(Packet {
+            data: clk_obu,
+            frame_number,
+        });
+
+        Ok(())
+    }
+
+    pub fn receive_packet(&mut self) -> Option<Packet> {
+        self.pending_packet.take()
+    }
+
+    pub fn flush(&mut self) {
+        // No-op for all-intra encoder — no buffered frames
+    }
+}
+
+fn encode_frame_yuv(
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    dequant: i32,
+    base_qindex: u8,
+    order_hint: u32,
+) -> Vec<u8> {
+    let y_residual = compute_residual_block(y_plane, 64, 64);
+    let mut y_residual_arr = [0i32; 4096];
+    y_residual_arr.copy_from_slice(&y_residual);
+    let y_dct = dct::forward_dct2_64x64(&y_residual_arr);
+    let (y_levels, y_eob) = quantize_block(&y_dct, dequant, 2);
+
+    let u_residual = compute_residual_block(u_plane, 32, 32);
+    let mut u_residual_arr = [0i32; 1024];
+    u_residual_arr.copy_from_slice(&u_residual);
+    let u_dct = dct::forward_dct2_32x32(&u_residual_arr);
+    let (u_levels, u_eob) = quantize_block(&u_dct, dequant, 1);
+
+    let v_residual = compute_residual_block(v_plane, 32, 32);
+    let mut v_residual_arr = [0i32; 1024];
+    v_residual_arr.copy_from_slice(&v_residual);
+    let v_dct = dct::forward_dct2_32x32(&v_residual_arr);
+    let (v_levels, v_eob) = quantize_block(&v_dct, dequant, 1);
+
+    let tile_data = tile::encode_tile_data_with_coeffs(
+        &y_levels, y_eob, &u_levels, u_eob, &v_levels, v_eob,
+    );
+    let frame_config = FrameHeaderConfig {
+        base_qindex,
+        order_hint,
+    };
+    let clk_payload = write_clk_obu_payload(&frame_config, &tile_data);
+    ObuWriter::pack_obu(ObuType::Clk, &clk_payload)
+}
 
 pub fn encode_still_image(width: u32, height: u32, base_qindex: u8) -> Vec<u8> {
     encode_video(
@@ -53,33 +194,7 @@ pub fn encode_video_yuv(
     let dequant = ac_qlookup(base_qindex);
 
     for (i, (y_plane, u_plane, v_plane)) in frames.iter().enumerate() {
-        let y_residual = compute_residual_block(y_plane, 64, 64);
-        let mut y_residual_arr = [0i32; 4096];
-        y_residual_arr.copy_from_slice(&y_residual);
-        let y_dct = dct::forward_dct2_64x64(&y_residual_arr);
-        let (y_levels, y_eob) = quantize_block(&y_dct, dequant, 2);
-
-        let u_residual = compute_residual_block(u_plane, 32, 32);
-        let mut u_residual_arr = [0i32; 1024];
-        u_residual_arr.copy_from_slice(&u_residual);
-        let u_dct = dct::forward_dct2_32x32(&u_residual_arr);
-        let (u_levels, u_eob) = quantize_block(&u_dct, dequant, 1);
-
-        let v_residual = compute_residual_block(v_plane, 32, 32);
-        let mut v_residual_arr = [0i32; 1024];
-        v_residual_arr.copy_from_slice(&v_residual);
-        let v_dct = dct::forward_dct2_32x32(&v_residual_arr);
-        let (v_levels, v_eob) = quantize_block(&v_dct, dequant, 1);
-
-        let tile_data = tile::encode_tile_data_with_coeffs(
-            &y_levels, y_eob, &u_levels, u_eob, &v_levels, v_eob,
-        );
-        let frame_config = FrameHeaderConfig {
-            base_qindex,
-            order_hint: i as u32,
-        };
-        let clk_payload = write_clk_obu_payload(&frame_config, &tile_data);
-        let clk_obu = ObuWriter::pack_obu(ObuType::Clk, &clk_payload);
+        let clk_obu = encode_frame_yuv(y_plane, u_plane, v_plane, dequant, base_qindex, i as u32);
         output.extend_from_slice(&clk_obu);
     }
 
@@ -300,5 +415,93 @@ mod tests {
         let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
         assert_eq!(eob, 1);
         assert!(levels[0] != 0);
+    }
+
+    #[test]
+    fn encoder_new_valid_dimensions() {
+        let enc = Encoder::new(64, 64, 50);
+        assert!(enc.is_ok());
+    }
+
+    #[test]
+    fn encoder_new_invalid_dimensions() {
+        let enc = Encoder::new(128, 128, 50);
+        assert!(enc.is_err());
+    }
+
+    #[test]
+    fn encoder_headers_returns_sequence_header_obu() {
+        let enc = Encoder::new(64, 64, 50).unwrap();
+        let headers = enc.headers();
+        assert!(!headers.is_empty());
+        let obu_type = (headers[1] >> 2) & 0x1F;
+        assert_eq!(obu_type, 1, "headers should be a SequenceHeader OBU");
+    }
+
+    #[test]
+    fn encoder_send_frame_produces_packet() {
+        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        let y = vec![149u8; 64 * 64];
+        let u = vec![43u8; 32 * 32];
+        let v = vec![21u8; 32 * 32];
+        enc.send_frame(&y, &u, &v).unwrap();
+        let pkt = enc.receive_packet();
+        assert!(pkt.is_some());
+        let pkt = pkt.unwrap();
+        assert_eq!(pkt.frame_number, 0);
+        assert!(!pkt.data.is_empty());
+    }
+
+    #[test]
+    fn encoder_receive_without_send_returns_none() {
+        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        assert!(enc.receive_packet().is_none());
+    }
+
+    #[test]
+    fn encoder_multi_frame_increments_frame_number() {
+        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        let y = vec![128u8; 64 * 64];
+        let u = vec![128u8; 32 * 32];
+        let v = vec![128u8; 32 * 32];
+
+        for expected in 0..3u64 {
+            enc.send_frame(&y, &u, &v).unwrap();
+            let pkt = enc.receive_packet().unwrap();
+            assert_eq!(pkt.frame_number, expected);
+        }
+    }
+
+    #[test]
+    fn encoder_flush_is_noop() {
+        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        enc.flush();
+        assert!(enc.receive_packet().is_none());
+    }
+
+    #[test]
+    fn encoder_rejects_wrong_plane_size() {
+        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        let y = vec![128u8; 100];
+        let u = vec![128u8; 32 * 32];
+        let v = vec![128u8; 32 * 32];
+        assert!(enc.send_frame(&y, &u, &v).is_err());
+    }
+
+    #[test]
+    fn encoder_streaming_matches_batch() {
+        let y = vec![149u8; 64 * 64];
+        let u = vec![43u8; 32 * 32];
+        let v = vec![21u8; 32 * 32];
+
+        let batch_bs = encode_video_yuv(64, 64, 50, &[(y.clone(), u.clone(), v.clone())]);
+        let seq_content_size = batch_bs[0] as usize;
+        let batch_clk = &batch_bs[1 + seq_content_size..];
+
+        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        enc.send_frame(&y, &u, &v).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+
+        assert_eq!(pkt.data, batch_clk, "streaming and batch should produce identical CLK OBUs");
     }
 }

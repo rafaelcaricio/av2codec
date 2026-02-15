@@ -6,3 +6,5 @@ pub mod entropy;
 pub mod scan;
 pub mod tile;
 pub mod y4m;
+
+pub use encode::{EncodeError, Encoder, Packet};
