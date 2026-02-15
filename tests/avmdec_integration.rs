@@ -8,6 +8,22 @@ fn avmdec_available() -> bool {
         .is_ok()
 }
 
+fn decode_with_avmdec(obu_path: &str, out_path: &str) -> Vec<u8> {
+    let output = Command::new("../avm_build/avmdec")
+        .args(["--i420", "-o", out_path, obu_path])
+        .output()
+        .expect("avmdec not found");
+
+    eprintln!("avmdec stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "avmdec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::read(out_path).unwrap()
+}
+
 #[test]
 #[ignore]
 fn avmdec_decodes_single_frame_midgray() {
@@ -17,29 +33,16 @@ fn avmdec_decodes_single_frame_midgray() {
     }
 
     let bs = wav2c::encode::encode_still_image(64, 64, 50);
-    let obu_path = "/tmp/wav2c_test_single.obu";
-    let out_path = "/tmp/wav2c_test_single_out.yuv";
-    fs::write(obu_path, &bs).unwrap();
+    fs::write("/tmp/wav2c_test_single.obu", &bs).unwrap();
 
-    let output = Command::new("../avm_build/avmdec")
-        .args(["--i420", "-o", out_path, obu_path])
-        .output()
-        .expect("avmdec not found");
-
-    eprintln!("avmdec stderr: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(
-        output.status.success(),
-        "avmdec failed with exit code: {:?}",
-        output.status.code()
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_test_single.obu",
+        "/tmp/wav2c_test_single_out.yuv",
     );
 
-    let decoded = fs::read(out_path).unwrap();
     let frame_size = 64 * 64 + 32 * 32 * 2;
     assert_eq!(decoded.len(), frame_size, "Expected 1 decoded I420 frame");
-
-    let y_pixel = decoded[0];
-    eprintln!("Decoded Y pixel: {}", y_pixel);
-    assert_eq!(y_pixel, 128, "Mid-gray frame should decode to Y=128");
+    assert_eq!(decoded[0], 128, "Mid-gray frame should decode to Y=128");
 }
 
 #[test]
@@ -52,31 +55,22 @@ fn avmdec_decodes_multi_frame_midgray() {
 
     let frames: Vec<Vec<u8>> = (0..3).map(|_| vec![128; 64 * 64]).collect();
     let bs = wav2c::encode::encode_video(64, 64, 50, &frames);
+    fs::write("/tmp/wav2c_test_multi.obu", &bs).unwrap();
 
-    let obu_path = "/tmp/wav2c_test_multi.obu";
-    let out_path = "/tmp/wav2c_test_multi_out.yuv";
-    fs::write(obu_path, &bs).unwrap();
+    let decoded = decode_with_avmdec("/tmp/wav2c_test_multi.obu", "/tmp/wav2c_test_multi_out.yuv");
 
-    let output = Command::new("../avm_build/avmdec")
-        .args(["--i420", "-o", out_path, obu_path])
-        .output()
-        .expect("avmdec not found");
-
-    eprintln!("avmdec stderr: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(
-        output.status.success(),
-        "avmdec failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let decoded = fs::read(out_path).unwrap();
     let frame_size = 64 * 64 + 32 * 32 * 2;
     assert_eq!(decoded.len(), frame_size * 3, "Expected 3 decoded frames");
+
+    for f in 0..3 {
+        let y_start = f * frame_size;
+        assert_eq!(decoded[y_start], 128, "Frame {} Y should be 128", f);
+    }
 }
 
 #[test]
 #[ignore]
-fn avmdec_decodes_solid_green_with_dc() {
+fn avmdec_decodes_solid_green_all_planes() {
     if !avmdec_available() {
         eprintln!("avmdec not found, skipping");
         return;
@@ -86,29 +80,180 @@ fn avmdec_decodes_solid_green_with_dc() {
     let u_plane = vec![43u8; 32 * 32];
     let v_plane = vec![21u8; 32 * 32];
     let bs = wav2c::encode::encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)]);
+    fs::write("/tmp/wav2c_test_green.obu", &bs).unwrap();
 
-    let obu_path = "/tmp/wav2c_test_green.obu";
-    let out_path = "/tmp/wav2c_test_green_out.yuv";
-    fs::write(obu_path, &bs).unwrap();
+    let decoded = decode_with_avmdec("/tmp/wav2c_test_green.obu", "/tmp/wav2c_test_green_out.yuv");
 
-    let output = Command::new("../avm_build/avmdec")
-        .args(["--i420", "-o", out_path, obu_path])
-        .output()
-        .expect("avmdec not found");
-
-    eprintln!("avmdec stderr: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(
-        output.status.success(),
-        "avmdec failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let decoded = fs::read(out_path).unwrap();
-    let frame_size = 64 * 64 + 32 * 32 * 2;
-    assert_eq!(decoded.len(), frame_size, "Expected 1 decoded frame");
+    let y_size = 64 * 64;
+    let uv_size = 32 * 32;
+    assert_eq!(decoded.len(), y_size + 2 * uv_size);
 
     let y_pixel = decoded[0];
-    eprintln!("Input Y=149, Decoded Y={}", y_pixel);
+    let u_pixel = decoded[y_size];
+    let v_pixel = decoded[y_size + uv_size];
+
+    eprintln!(
+        "Input Y=149 U=43 V=21, Decoded Y={} U={} V={}",
+        y_pixel, u_pixel, v_pixel
+    );
+
+    assert_eq!(y_pixel, 149, "Y pixel should be 149, got {}", y_pixel);
+    assert_eq!(u_pixel, 43, "U pixel should be 43, got {}", u_pixel);
+    assert_eq!(v_pixel, 21, "V pixel should be 21, got {}", v_pixel);
+}
+
+#[test]
+#[ignore]
+fn avmdec_decodes_solid_red_all_planes() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let y_val: u8 = 81;
+    let u_val: u8 = 90;
+    let v_val: u8 = 240;
+    let y_plane = vec![y_val; 64 * 64];
+    let u_plane = vec![u_val; 32 * 32];
+    let v_plane = vec![v_val; 32 * 32];
+    let bs = wav2c::encode::encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)]);
+    fs::write("/tmp/wav2c_test_red.obu", &bs).unwrap();
+
+    let decoded = decode_with_avmdec("/tmp/wav2c_test_red.obu", "/tmp/wav2c_test_red_out.yuv");
+
+    let y_size = 64 * 64;
+    let uv_size = 32 * 32;
+    assert_eq!(decoded.len(), y_size + 2 * uv_size);
+
+    let dy = decoded[0];
+    let du = decoded[y_size];
+    let dv = decoded[y_size + uv_size];
+
+    eprintln!(
+        "Input Y={} U={} V={}, Decoded Y={} U={} V={}",
+        y_val, u_val, v_val, dy, du, dv
+    );
+
+    assert_eq!(dy, y_val, "Y pixel mismatch");
+    assert_eq!(du, u_val, "U pixel mismatch");
+    assert_eq!(dv, v_val, "V pixel mismatch");
+}
+
+#[test]
+#[ignore]
+fn avmdec_decodes_multi_frame_yuv() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let colors: [(u8, u8, u8); 3] = [(149, 43, 21), (81, 90, 240), (128, 128, 128)];
+    let frames: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = colors
+        .iter()
+        .map(|&(y, u, v)| (vec![y; 64 * 64], vec![u; 32 * 32], vec![v; 32 * 32]))
+        .collect();
+
+    let bs = wav2c::encode::encode_video_yuv(64, 64, 50, &frames);
+    fs::write("/tmp/wav2c_test_multi_yuv.obu", &bs).unwrap();
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_test_multi_yuv.obu",
+        "/tmp/wav2c_test_multi_yuv_out.yuv",
+    );
+
+    let y_size = 64 * 64;
+    let uv_size = 32 * 32;
+    let frame_size = y_size + 2 * uv_size;
+    assert_eq!(decoded.len(), frame_size * 3, "Expected 3 decoded frames");
+
+    for (f, &(ey, eu, ev)) in colors.iter().enumerate() {
+        let base = f * frame_size;
+        let dy = decoded[base];
+        let du = decoded[base + y_size];
+        let dv = decoded[base + y_size + uv_size];
+
+        eprintln!(
+            "Frame {}: expected Y={} U={} V={}, got Y={} U={} V={}",
+            f, ey, eu, ev, dy, du, dv
+        );
+
+        assert_eq!(dy, ey, "Frame {} Y mismatch", f);
+        assert_eq!(du, eu, "Frame {} U mismatch", f);
+        assert_eq!(dv, ev, "Frame {} V mismatch", f);
+    }
+}
+
+#[test]
+#[ignore]
+fn cli_encodes_y4m_fixture() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let status = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            "tests/fixtures/solid_green_64x64.y4m",
+            "/tmp/wav2c_cli_fixture.obu",
+            "--qindex",
+            "50",
+        ])
+        .status()
+        .expect("failed to run wav2c CLI");
+    assert!(status.success(), "wav2c CLI failed");
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_cli_fixture.obu",
+        "/tmp/wav2c_cli_fixture_out.yuv",
+    );
+
+    let y_size = 64 * 64;
+    let uv_size = 32 * 32;
+    assert_eq!(decoded.len(), y_size + 2 * uv_size);
+
+    let y_pixel = decoded[0];
+    eprintln!("CLI fixture: Decoded Y={}", y_pixel);
     let diff = (y_pixel as i32 - 149).abs();
     assert!(diff < 10, "Y pixel should be close to 149, got {}", y_pixel);
+}
+
+#[test]
+#[ignore]
+fn cli_encodes_multi_frame_y4m() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let status = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            "tests/fixtures/multi_gray_64x64_3f.y4m",
+            "/tmp/wav2c_cli_multi_fix.obu",
+            "--qindex",
+            "50",
+        ])
+        .status()
+        .expect("failed to run wav2c CLI");
+    assert!(status.success(), "wav2c CLI failed");
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_cli_multi_fix.obu",
+        "/tmp/wav2c_cli_multi_fix_out.yuv",
+    );
+
+    let frame_size = 64 * 64 + 32 * 32 * 2;
+    assert_eq!(decoded.len(), frame_size * 3, "Expected 3 decoded frames");
+
+    for f in 0..3 {
+        let y_start = f * frame_size;
+        assert_eq!(
+            decoded[y_start], 126,
+            "Frame {} Y should be 126 (ffmpeg gray)",
+            f
+        );
+    }
 }

@@ -39,14 +39,16 @@ Execute phases sequentially. Each phase follows this cycle:
 
 See `docs/plans/` for the full phase breakdown.
 
-Current phases: 0 [IN PROGRESS]
+- Phase 0: Infrastructure [COMPLETE]
+- Phase 1: Multi-frame all-intra encoding with DC coefficients [COMPLETE]
+- Phase 2: AC coefficient support [NEXT]
 
 ## Key Technical Reference
 
 - AVM reference source: `../av2/` (encoder and decoder reference implementation)
 - avmdec binary: `../avm_build/avmdec`
 - AV2 bitstream format: OBU-based (Open Bitstream Units)
-- Still picture mode: `single_picture_header_flag = 1`
+- Video mode: `single_picture_header_flag = 0`, CLK OBUs with order_hint
 - Profile 0: 8-bit 4:2:0
 - Entropy coding: CDF-based arithmetic range coder (Daala-derived)
 - CDF format: cumulative distribution functions with adaptation counter
