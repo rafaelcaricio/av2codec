@@ -57,6 +57,8 @@ pub struct Packet {
 pub struct Encoder {
     width: u32,
     height: u32,
+    padded_width: u32,
+    padded_height: u32,
     base_qindex: u8,
     dequant: i32,
     order_hint: u32,
@@ -65,12 +67,14 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(width: u32, height: u32, base_qindex: u8) -> Result<Self, EncodeError> {
-        if width == 0 || height == 0 || !width.is_multiple_of(64) || !height.is_multiple_of(64) {
+        if width < 4 || height < 4 || !width.is_multiple_of(4) || !height.is_multiple_of(4) {
             return Err(EncodeError::InvalidDimensions { width, height });
         }
         Ok(Self {
             width,
             height,
+            padded_width: round_up_to_64(width),
+            padded_height: round_up_to_64(height),
             base_qindex,
             dequant: ac_qlookup(base_qindex),
             order_hint: 0,
@@ -88,8 +92,8 @@ impl Encoder {
 
     pub fn headers(&self) -> Vec<u8> {
         let seq_config = SequenceHeaderConfig {
-            width: self.width,
-            height: self.height,
+            width: self.padded_width,
+            height: self.padded_height,
         };
         let seq_payload = write_sequence_header(&seq_config);
         ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload)
@@ -121,13 +125,29 @@ impl Encoder {
             });
         }
 
-        let clk_obu = encode_frame_yuv(
-            y,
+        let padded_y = pad_plane(y, self.width, self.height, self.padded_width, self.padded_height);
+        let padded_u = pad_plane(
             u,
+            self.width / 2,
+            self.height / 2,
+            self.padded_width / 2,
+            self.padded_height / 2,
+        );
+        let padded_v = pad_plane(
             v,
+            self.width / 2,
+            self.height / 2,
+            self.padded_width / 2,
+            self.padded_height / 2,
+        );
+
+        let clk_obu = encode_frame_yuv(
+            &padded_y,
+            &padded_u,
+            &padded_v,
             &FrameEncodeParams {
-                width: self.width,
-                height: self.height,
+                width: self.padded_width,
+                height: self.padded_height,
                 dequant: self.dequant,
                 base_qindex: self.base_qindex,
                 order_hint: self.order_hint,
@@ -688,9 +708,32 @@ mod tests {
 
     #[test]
     fn encoder_new_invalid_dimensions() {
-        assert!(Encoder::new(100, 100, 50).is_err());
+        assert!(Encoder::new(101, 100, 50).is_err());
         assert!(Encoder::new(0, 64, 50).is_err());
-        assert!(Encoder::new(65, 64, 50).is_err());
+        assert!(Encoder::new(3, 64, 50).is_err());
+    }
+
+    #[test]
+    fn encoder_new_accepts_multiple_of_4() {
+        assert!(Encoder::new(100, 100, 50).is_ok());
+        assert!(Encoder::new(1920, 1080, 50).is_ok());
+        assert!(Encoder::new(4, 4, 50).is_ok());
+        assert!(Encoder::new(640, 480, 50).is_ok());
+    }
+
+    #[test]
+    fn encoder_new_rejects_non_multiple_of_4() {
+        assert!(Encoder::new(101, 100, 50).is_err());
+        assert!(Encoder::new(100, 3, 50).is_err());
+        assert!(Encoder::new(0, 100, 50).is_err());
+        assert!(Encoder::new(2, 2, 50).is_err());
+    }
+
+    #[test]
+    fn encoder_width_height_return_original() {
+        let enc = Encoder::new(100, 100, 50).unwrap();
+        assert_eq!(enc.width(), 100);
+        assert_eq!(enc.height(), 100);
     }
 
     #[test]
