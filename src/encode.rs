@@ -216,7 +216,6 @@ struct FrameEncodeParams {
     order_hint: u32,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum IntraMode {
@@ -227,13 +226,11 @@ pub enum IntraMode {
     PaethPred = 4,
 }
 
-#[allow(dead_code)]
 const SMOOTH_WEIGHTS_32: [u16; 32] = [
     255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74,
     66, 59, 52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
 ];
 
-#[allow(dead_code)]
 const SMOOTH_WEIGHTS_64: [u16; 64] = [
     255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150,
     144, 138, 133, 127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69,
@@ -241,7 +238,6 @@ const SMOOTH_WEIGHTS_64: [u16; 64] = [
     18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
 ];
 
-#[allow(dead_code)]
 fn smooth_weights(bsize: usize) -> &'static [u16] {
     match bsize {
         32 => &SMOOTH_WEIGHTS_32,
@@ -250,7 +246,6 @@ fn smooth_weights(bsize: usize) -> &'static [u16] {
     }
 }
 
-#[allow(dead_code)]
 struct RefPixels {
     above: Vec<u8>,
     left: Vec<u8>,
@@ -259,7 +254,6 @@ struct RefPixels {
     has_left: bool,
 }
 
-#[allow(dead_code)]
 fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> RefPixels {
     let has_above = y > 0;
     let has_left = x > 0;
@@ -321,7 +315,6 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
     }
 }
 
-#[allow(dead_code)]
 fn predict_dc_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let val = match (refs.has_above, refs.has_left) {
         (false, false) => 128u8,
@@ -342,7 +335,6 @@ fn predict_dc_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     vec![val; bsize * bsize]
 }
 
-#[allow(dead_code)]
 fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let weights = smooth_weights(bsize);
     let below_pred = refs.left[bsize - 1] as u32;
@@ -362,7 +354,6 @@ fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     pred
 }
 
-#[allow(dead_code)]
 fn predict_smooth_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let weights = smooth_weights(bsize);
     let below_pred = refs.left[bsize - 1] as u32;
@@ -378,7 +369,6 @@ fn predict_smooth_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     pred
 }
 
-#[allow(dead_code)]
 fn predict_smooth_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let weights = smooth_weights(bsize);
     let right_pred = refs.above[bsize - 1] as u32;
@@ -394,7 +384,6 @@ fn predict_smooth_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     pred
 }
 
-#[allow(dead_code)]
 fn predict_paeth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let tl = refs.top_left as i32;
     let mut pred = vec![0u8; bsize * bsize];
@@ -418,7 +407,6 @@ fn predict_paeth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     pred
 }
 
-#[allow(dead_code)]
 fn predict_block(refs: &RefPixels, bsize: usize, mode: IntraMode) -> Vec<u8> {
     match mode {
         IntraMode::DcPred => predict_dc_block(refs, bsize),
@@ -429,7 +417,6 @@ fn predict_block(refs: &RefPixels, bsize: usize, mode: IntraMode) -> Vec<u8> {
     }
 }
 
-#[allow(dead_code)]
 const ALL_INTRA_MODES: [IntraMode; 5] = [
     IntraMode::DcPred,
     IntraMode::SmoothPred,
@@ -438,7 +425,6 @@ const ALL_INTRA_MODES: [IntraMode; 5] = [
     IntraMode::PaethPred,
 ];
 
-#[allow(dead_code)]
 fn compute_sad(pixels: &[u8], pred: &[u8]) -> u64 {
     pixels
         .iter()
@@ -447,7 +433,6 @@ fn compute_sad(pixels: &[u8], pred: &[u8]) -> u64 {
         .sum()
 }
 
-#[allow(dead_code)]
 fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
     let mut best_mode = IntraMode::DcPred;
     let mut best_sad = u64::MAX;
@@ -469,10 +454,12 @@ fn encode_plane_block_64(
     x: usize,
     y: usize,
     dequant: i32,
-) -> ([i32; 1024], u16) {
-    let pred = predict_dc(recon, plane_w, x, y, 64);
-    let pred_block = vec![pred; 64 * 64];
+) -> ([i32; 1024], u16, IntraMode) {
+    let refs = get_ref_pixels(recon, plane_w, x, y, 64);
     let y_block = extract_subblock(pixels, plane_w, x, y, 64, 64);
+    let mode = select_intra_mode(&y_block, &refs, 64);
+    let pred_block = predict_block(&refs, 64, mode);
+
     let residual = compute_residual_block(&y_block, &pred_block);
     let mut residual_arr = [0i32; 4096];
     residual_arr.copy_from_slice(&residual);
@@ -483,7 +470,7 @@ fn encode_plane_block_64(
     let inv_residual = dct::inverse_dct2_64x64(&dqcoeffs);
     reconstruct_block(recon, plane_w, x, y, 64, &pred_block, &inv_residual);
 
-    (levels, eob)
+    (levels, eob, mode)
 }
 
 fn encode_plane_block_32(
@@ -493,10 +480,12 @@ fn encode_plane_block_32(
     x: usize,
     y: usize,
     dequant: i32,
-) -> ([i32; 1024], u16) {
-    let pred = predict_dc(recon, plane_w, x, y, 32);
-    let pred_block = vec![pred; 32 * 32];
+) -> ([i32; 1024], u16, IntraMode) {
+    let refs = get_ref_pixels(recon, plane_w, x, y, 32);
     let uv_block = extract_subblock(pixels, plane_w, x, y, 32, 32);
+    let mode = select_intra_mode(&uv_block, &refs, 32);
+    let pred_block = predict_block(&refs, 32, mode);
+
     let residual = compute_residual_block(&uv_block, &pred_block);
     let mut residual_arr = [0i32; 1024];
     residual_arr.copy_from_slice(&residual);
@@ -507,7 +496,7 @@ fn encode_plane_block_32(
     let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
     reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual);
 
-    (levels, eob)
+    (levels, eob, mode)
 }
 
 fn encode_frame_yuv(
@@ -530,7 +519,7 @@ fn encode_frame_yuv(
     let mut sb_grid = Vec::with_capacity(sb_cols * sb_rows);
     for sb_row in 0..sb_rows {
         for sb_col in 0..sb_cols {
-            let (y_levels, y_eob) = encode_plane_block_64(
+            let (y_levels, y_eob, y_mode) = encode_plane_block_64(
                 y_plane,
                 w,
                 &mut recon_y,
@@ -539,7 +528,7 @@ fn encode_frame_yuv(
                 params.dequant,
             );
 
-            let (u_levels, u_eob) = encode_plane_block_32(
+            let (u_levels, u_eob, u_mode) = encode_plane_block_32(
                 u_plane,
                 uv_w,
                 &mut recon_u,
@@ -548,7 +537,7 @@ fn encode_frame_yuv(
                 params.dequant,
             );
 
-            let (v_levels, v_eob) = encode_plane_block_32(
+            let (v_levels, v_eob, _v_mode) = encode_plane_block_32(
                 v_plane,
                 uv_w,
                 &mut recon_v,
@@ -564,8 +553,8 @@ fn encode_frame_yuv(
                 u_eob,
                 v_levels,
                 v_eob,
-                y_mode: 0,
-                uv_mode: 0,
+                y_mode: y_mode as u8,
+                uv_mode: u_mode as u8,
             });
         }
     }
@@ -739,41 +728,6 @@ pub fn dequantize_block(
         dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], log_scale, dequant);
     }
     dqcoeffs
-}
-
-pub fn predict_dc(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> u8 {
-    let has_above = y > 0;
-    let has_left = x > 0;
-
-    match (has_above, has_left) {
-        (false, false) => 128,
-        (true, false) => {
-            let above_row = y - bsize;
-            let mut sum = 0u32;
-            for i in 0..bsize {
-                sum += recon[(above_row + bsize - 1) * stride + x + i] as u32;
-            }
-            ((sum + bsize as u32 / 2) / bsize as u32) as u8
-        }
-        (false, true) => {
-            let mut sum = 0u32;
-            for j in 0..bsize {
-                sum += recon[(y + j) * stride + x - 1] as u32;
-            }
-            ((sum + bsize as u32 / 2) / bsize as u32) as u8
-        }
-        (true, true) => {
-            let above_row = y - bsize;
-            let mut sum = 0u32;
-            for i in 0..bsize {
-                sum += recon[(above_row + bsize - 1) * stride + x + i] as u32;
-            }
-            for j in 0..bsize {
-                sum += recon[(y + j) * stride + x - 1] as u32;
-            }
-            ((sum + bsize as u32) / (2 * bsize as u32)) as u8
-        }
-    }
 }
 
 pub fn reconstruct_block(
@@ -1161,45 +1115,6 @@ mod tests {
         let plane: Vec<u8> = (0..64).collect();
         let block = extract_subblock(&plane, 8, 2, 1, 3, 2);
         assert_eq!(block, vec![10, 11, 12, 18, 19, 20]);
-    }
-
-    #[test]
-    fn predict_dc_no_neighbors() {
-        let recon = vec![0u8; 64 * 64];
-        assert_eq!(predict_dc(&recon, 64, 0, 0, 64), 128);
-    }
-
-    #[test]
-    fn predict_dc_above_only() {
-        let mut recon = vec![0u8; 128 * 128];
-        for i in 0..64 {
-            recon[63 * 128 + i] = 200;
-        }
-        let pred = predict_dc(&recon, 128, 0, 64, 64);
-        assert_eq!(pred, 200);
-    }
-
-    #[test]
-    fn predict_dc_left_only() {
-        let mut recon = vec![0u8; 128 * 128];
-        for j in 0..64 {
-            recon[j * 128 + 63] = 100;
-        }
-        let pred = predict_dc(&recon, 128, 64, 0, 64);
-        assert_eq!(pred, 100);
-    }
-
-    #[test]
-    fn predict_dc_both() {
-        let mut recon = vec![0u8; 128 * 128];
-        for i in 0..64 {
-            recon[63 * 128 + 64 + i] = 200;
-        }
-        for j in 0..64 {
-            recon[(64 + j) * 128 + 63] = 100;
-        }
-        let pred = predict_dc(&recon, 128, 64, 64, 64);
-        assert_eq!(pred, 150);
     }
 
     #[test]
