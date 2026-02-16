@@ -526,9 +526,21 @@ fn encode_plane_block_32(
     y: usize,
     dequant: i32,
 ) -> ([i32; 1024], u16, IntraMode) {
+    encode_plane_block_32_with_mode(pixels, plane_w, recon, x, y, dequant, None)
+}
+
+fn encode_plane_block_32_with_mode(
+    pixels: &[u8],
+    plane_w: usize,
+    recon: &mut [u8],
+    x: usize,
+    y: usize,
+    dequant: i32,
+    forced_mode: Option<IntraMode>,
+) -> ([i32; 1024], u16, IntraMode) {
     let refs = get_ref_pixels(recon, plane_w, x, y, 32);
     let uv_block = extract_subblock(pixels, plane_w, x, y, 32, 32);
-    let mode = select_intra_mode(&uv_block, &refs, 32);
+    let mode = forced_mode.unwrap_or_else(|| select_intra_mode(&uv_block, &refs, 32));
     let pred_block = predict_block(&refs, 32, mode);
 
     let residual = compute_residual_block(&uv_block, &pred_block);
@@ -582,13 +594,14 @@ fn encode_frame_yuv(
                 params.dequant,
             );
 
-            let (v_levels, v_eob, _v_mode) = encode_plane_block_32(
+            let (v_levels, v_eob, _v_mode) = encode_plane_block_32_with_mode(
                 v_plane,
                 uv_w,
                 &mut recon_v,
                 sb_col * 32,
                 sb_row * 32,
                 params.dequant,
+                Some(u_mode),
             );
 
             sb_grid.push(SbCoeffs {
