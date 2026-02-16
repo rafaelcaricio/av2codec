@@ -20,6 +20,43 @@ pub static PROB_INC_TBL: [[u16; 16]; 15] = [
     [15,14,13,12,11,10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
 ];
 
+pub const NUM_PARA_COMBINATIONS: usize = 125;
+pub const NUM_PARA_INTERVALS: usize = 3;
+
+#[rustfmt::skip]
+pub static NSYMBS2SPEED: [i32; 17] = [
+    0, 0, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
+];
+
+#[rustfmt::skip]
+pub static PARA_ADJUSTMENT_LIST: [[i32; NUM_PARA_INTERVALS]; NUM_PARA_COMBINATIONS] = [
+    [ 0,  0,  0], [ 0,  0, -1], [ 0,  0, -2], [ 0,  0,  1], [ 0,  0,  1],
+    [ 0, -1,  0], [ 0, -1, -1], [ 0, -1, -2], [ 0, -1,  1], [ 0, -1,  1],
+    [ 0, -2,  0], [ 0, -2, -1], [ 0, -2, -2], [ 0, -2,  1], [ 0, -2,  1],
+    [ 0,  1,  0], [ 0,  1, -1], [ 0,  1, -2], [ 0,  1,  1], [ 0,  1,  1],
+    [ 0,  1,  0], [ 0,  1, -1], [ 0,  1, -2], [ 0,  1,  1], [ 0,  1,  1],
+    [-1,  0,  0], [-1,  0, -1], [-1,  0, -2], [-1,  0,  1], [-1,  0,  1],
+    [-1, -1,  0], [-1, -1, -1], [-1, -1, -2], [-1, -1,  1], [-1, -1,  1],
+    [-1, -2,  0], [-1, -2, -1], [-1, -2, -2], [-1, -2,  1], [-1, -2,  1],
+    [-1,  1,  0], [-1,  1, -1], [-1,  1, -2], [-1,  1,  1], [-1,  1,  1],
+    [-1,  1,  0], [-1,  1, -1], [-1,  1, -2], [-1,  1,  1], [-1,  1,  1],
+    [-2,  0,  0], [-2,  0, -1], [-2,  0, -2], [-2,  0,  1], [-2,  0,  1],
+    [-2, -1,  0], [-2, -1, -1], [-2, -1, -2], [-2, -1,  1], [-2, -1,  1],
+    [-2, -2,  0], [-2, -2, -1], [-2, -2, -2], [-2, -2,  1], [-2, -2,  1],
+    [-2,  1,  0], [-2,  1, -1], [-2,  1, -2], [-2,  1,  1], [-2,  1,  1],
+    [-2,  1,  0], [-2,  1, -1], [-2,  1, -2], [-2,  1,  1], [-2,  1,  1],
+    [ 1,  0,  0], [ 1,  0, -1], [ 1,  0, -2], [ 1,  0,  1], [ 1,  0,  1],
+    [ 1, -1,  0], [ 1, -1, -1], [ 1, -1, -2], [ 1, -1,  1], [ 1, -1,  1],
+    [ 1, -2,  0], [ 1, -2, -1], [ 1, -2, -2], [ 1, -2,  1], [ 1, -2,  1],
+    [ 1,  1,  0], [ 1,  1, -1], [ 1,  1, -2], [ 1,  1,  1], [ 1,  1,  1],
+    [ 1,  1,  0], [ 1,  1, -1], [ 1,  1, -2], [ 1,  1,  1], [ 1,  1,  1],
+    [ 1,  0,  0], [ 1,  0, -1], [ 1,  0, -2], [ 1,  0,  1], [ 1,  0,  1],
+    [ 1, -1,  0], [ 1, -1, -1], [ 1, -1, -2], [ 1, -1,  1], [ 1, -1,  1],
+    [ 1, -2,  0], [ 1, -2, -1], [ 1, -2, -2], [ 1, -2,  1], [ 1, -2,  1],
+    [ 1,  1,  0], [ 1,  1, -1], [ 1,  1, -2], [ 1,  1,  1], [ 1,  1,  1],
+    [ 1,  1,  0], [ 1,  1, -1], [ 1,  1, -2], [ 1,  1,  1], [ 1,  1,  1],
+];
+
 pub fn ilog_nz(x: u32) -> u32 {
     debug_assert!(x > 0);
     32 - x.leading_zeros()
@@ -30,6 +67,44 @@ pub fn prob_scale(p: u16, r: u32, n: usize, nsym: usize) -> u32 {
     let mut pp = (u32::from(p) >> EC_PROB_SHIFT) << 4;
     pp += u32::from(PROB_INC_TBL[nsym - 2][n]);
     ((rr * pp) >> 7) << 3
+}
+
+pub fn update_cdf(cdf: &mut [u16], val: usize, nsymbs: usize) {
+    debug_assert!(nsymbs < 17);
+    debug_assert!(val < nsymbs);
+    debug_assert_eq!(cdf.len(), nsymbs + 2);
+
+    let counter = cdf[nsymbs] as i32;
+    let para_idx = cdf[nsymbs + 1] as usize;
+
+    let time_interval = if counter > 31 {
+        2
+    } else if counter > 15 {
+        1
+    } else {
+        0
+    };
+
+    let rate = 3 + time_interval + NSYMBS2SPEED[nsymbs]
+        + PARA_ADJUSTMENT_LIST[para_idx][time_interval as usize];
+
+    let mut tmp: i32 = CDF_PROB_TOP as i32;
+
+    for i in 0..(nsymbs - 1) {
+        if i == val {
+            tmp = 0;
+        }
+        let cur = cdf[i] as i32;
+        if tmp < cur {
+            cdf[i] = (cur - ((cur - tmp) >> rate)) as u16;
+        } else {
+            cdf[i] = (cur + ((tmp - cur) >> rate)) as u16;
+        }
+    }
+
+    if cdf[nsymbs] < 32 {
+        cdf[nsymbs] += 1;
+    }
 }
 
 pub struct DaalaCoder {
@@ -264,5 +339,59 @@ mod tests {
             enc.done()
         };
         assert_eq!(encode(), encode());
+    }
+
+    #[test]
+    fn update_cdf_two_symbols_adapts_toward_symbol_0() {
+        let mut cdf = vec![16384u16, 0, 0, 0];
+        update_cdf(&mut cdf, 0, 2);
+        assert!(cdf[0] < 16384, "cdf[0]={} should decrease", cdf[0]);
+        assert_eq!(cdf[1], 0);
+        assert_eq!(cdf[2], 1);
+    }
+
+    #[test]
+    fn update_cdf_two_symbols_adapts_toward_symbol_1() {
+        let mut cdf = vec![16384u16, 0, 0, 0];
+        update_cdf(&mut cdf, 1, 2);
+        assert!(cdf[0] > 16384, "cdf[0]={} should increase", cdf[0]);
+        assert_eq!(cdf[2], 1);
+    }
+
+    #[test]
+    fn update_cdf_counter_saturates_at_32() {
+        let mut cdf = vec![16384u16, 0, 31, 0];
+        update_cdf(&mut cdf, 0, 2);
+        assert_eq!(cdf[2], 32);
+        update_cdf(&mut cdf, 0, 2);
+        assert_eq!(cdf[2], 32);
+    }
+
+    #[test]
+    fn update_cdf_four_symbols() {
+        let mut cdf = vec![24576u16, 16384, 8192, 0, 0, 0];
+        let original = cdf.clone();
+        update_cdf(&mut cdf, 1, 4);
+        assert!(cdf[0] >= original[0]);
+        assert!(cdf[1] < original[1]);
+        assert_eq!(cdf[3], 0);
+        assert_eq!(cdf[4], 1);
+    }
+
+    #[test]
+    fn update_cdf_repeated_converges() {
+        let mut cdf = vec![16384u16, 0, 0, 0];
+        for _ in 0..100 {
+            update_cdf(&mut cdf, 0, 2);
+        }
+        assert!(cdf[0] < 2000, "cdf[0]={} should converge toward 0", cdf[0]);
+    }
+
+    #[test]
+    fn update_cdf_matches_reference_two_symbols() {
+        let mut cdf = vec![16384u16, 0, 0, 0];
+        update_cdf(&mut cdf, 0, 2);
+        assert_eq!(cdf[0], 15360);
+        assert_eq!(cdf[2], 1);
     }
 }
