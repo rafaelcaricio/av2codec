@@ -1,8 +1,12 @@
-# wav2c — AV2 Encoder Development Protocol
+# wav2c — AV2 Codec Development Protocol
+
+## Core Principle: AV2 Specification Compliance
+
+wav2c MUST BE SPECIFICATION COMPLIANT. Both the encoder and decoder must produce and consume valid AV2 bitstreams. The decoder must accept ANY AV2-compliant bitstream — it may skip or ignore unsupported codec tools, but the tools that ARE implemented must work correctly. wav2c will gradually evolve to implement more AV2 tools, but what exists must be correct.
 
 ## Goal
 
-Encode intra-only frames to AV2, decodable by the reference avmdec decoder.
+Encode intra-only frames to AV2, decodable by the reference avmdec decoder. Decode any AV2-compliant intra-only bitstream.
 
 ## Autonomous Closed-Loop Protocol
 
@@ -41,7 +45,7 @@ See `docs/plans/` for the full phase breakdown.
 
 - Phase 0: Infrastructure [COMPLETE]
 - Phase 1: Multi-frame all-intra encoding with DC coefficients [COMPLETE]
-- Phase 2: AC coefficient support [NEXT]
+- Phase 2: AC coefficient support [COMPLETE]
 
 ## Key Technical Reference
 

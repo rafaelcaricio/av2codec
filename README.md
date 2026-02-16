@@ -141,16 +141,17 @@ avmdec --i420 -o decoded.yuv output.obu
 
 ## What it does
 
-wav2c reads Y4M video frames and produces an all-intra AV2 bitstream where every frame is an independent keyframe. It also includes a pure Rust decoder that can reconstruct YUV frames from wav2c-produced bitstreams.
+wav2c reads Y4M video frames and produces an all-intra AV2 bitstream where every frame is an independent keyframe. It also includes a pure Rust decoder that can decode any AV2-compliant bitstream (not limited to wav2c-produced streams).
 
 The encoding pipeline for each frame:
 
 1. Read YUV 4:2:0 pixel data (Y, U, V planes)
-2. Compute residual against mid-gray prediction (128)
-3. Forward 2D DCT (64x64 for Y, 32x32 for U/V)
-4. Quantization using AV2 dequant tables
-5. Entropy-code coefficients using Daala arithmetic coding (base levels, BR, sign, adaptive HR)
-6. Pack into a CLK OBU (implicit keyframe)
+2. Select best intra prediction mode per superblock (DC, Smooth, Smooth_V, Smooth_H, Paeth)
+3. Compute residual against the selected prediction
+4. Forward 2D DCT (64x64 for Y, 32x32 for U/V)
+5. Quantization using AV2 dequant tables
+6. Entropy-code coefficients using Daala arithmetic coding (base levels, BR, sign, adaptive HR)
+7. Pack into a CLK OBU (implicit keyframe)
 
 The decoding pipeline reverses these steps:
 
@@ -158,7 +159,7 @@ The decoding pipeline reverses these steps:
 2. Decode entropy-coded coefficients using Daala arithmetic range decoder
 3. Dequantize coefficient levels
 4. Inverse 2D DCT to reconstruct residuals
-5. Add mid-gray prediction (128) and clamp to [0, 255]
+5. Apply intra prediction and add residuals, clamp to [0, 255]
 
 A sequence header OBU is prepended once at the start of the bitstream.
 
@@ -166,9 +167,11 @@ A sequence header OBU is prepended once at the start of the bitstream.
 
 - Profile 0, 8-bit, 4:2:0 (YCbCr)
 - All-intra encoding (every frame is a keyframe)
+- Intra prediction: DC, Smooth, Smooth_V, Smooth_H, Paeth (best mode selected per superblock)
 - Full DC + AC coefficient coding with forward/inverse DCT
 - Multi-frame video encoding (each frame as a CLK OBU)
-- **Pure Rust decoder** — decodes wav2c bitstreams without any external dependencies
+- **Pure Rust decoder** — decodes any AV2-compliant bitstream, not just wav2c-produced ones
+- Spec-compliant sequence header parsing (both `single_picture_header_flag=0` and `=1`)
 - Streaming encoder API (`send_frame` / `receive_packet`)
 - Batch encoding API (`encode_video_yuv`) and decoding API (`Decoder::decode_all`)
 - Y4M input parsing and output writing
@@ -184,7 +187,7 @@ A sequence header OBU is prepended once at the start of the bitstream.
 
 ## Testing
 
-Unit tests (200 tests across all modules):
+Unit tests (238 tests across all modules):
 
 ```sh
 cargo test
@@ -197,7 +200,7 @@ Integration tests that encode video, decode with avmdec, and verify pixel values
 cargo test --test avmdec_integration -- --ignored
 ```
 
-The integration suite covers single-frame, multi-frame, multiple colors (green, red, gray), all three YUV planes, gradient/testsrc2 patterns with PSNR validation, and CLI roundtrip encoding.
+The integration suite covers single-frame, multi-frame, multiple colors (green, red, gray), all three YUV planes, gradient/testsrc2 patterns with PSNR validation, decoder agreement between wav2c and avmdec, and CLI roundtrip encoding.
 
 ## Project structure
 
@@ -257,6 +260,8 @@ make -j$(nproc) avmdec
 | 1 | Multi-frame all-intra with DC coefficients | Done |
 | 2 | AC coefficient support | Done |
 | 3 | Pure Rust decoder | Done |
+| — | Spec-compliant sequence header parsing | Done |
+| — | Intra prediction modes (DC, Smooth, Paeth) | Done |
 
 ## License
 

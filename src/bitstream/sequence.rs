@@ -2,6 +2,7 @@ use super::writer::BitWriter;
 
 const PROFILE_BITS: u8 = 5;
 const LEVEL_BITS: u8 = 5;
+const SEQ_LEVEL_4_0: u32 = 8;
 const DELTA_DCQUANT_BITS: u8 = 5;
 const DELTA_DCQUANT_MAX: i32 = 1 << (DELTA_DCQUANT_BITS - 2);
 const DELTA_DCQUANT_MIN: i32 = DELTA_DCQUANT_MAX - (1 << DELTA_DCQUANT_BITS) + 1;
@@ -21,6 +22,9 @@ pub fn write_sequence_header(config: &SequenceHeaderConfig) -> Vec<u8> {
     w.write_bit(false);
     let level = compute_level(config.width, config.height);
     w.write_literal(level, LEVEL_BITS);
+    if level >= SEQ_LEVEL_4_0 {
+        w.write_bit(false);
+    }
 
     let num_bits_width = bits_needed(config.width);
     let num_bits_height = bits_needed(config.height);
