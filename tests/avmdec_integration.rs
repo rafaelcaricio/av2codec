@@ -649,3 +649,49 @@ fn avmdec_testsrc2_psnr() {
         y_psnr
     );
 }
+
+#[test]
+#[ignore]
+fn avmdec_decodes_100x100_solid_red() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let w = 100u32;
+    let h = 100u32;
+    let y_plane = vec![82u8; (w * h) as usize];
+    let u_plane = vec![90u8; (w / 2 * h / 2) as usize];
+    let v_plane = vec![240u8; (w / 2 * h / 2) as usize];
+
+    let bs = wav2c::encode::encode_video_yuv(w, h, 50, &[(y_plane, u_plane, v_plane)]);
+    fs::write("/tmp/wav2c_test_100x100.obu", &bs).unwrap();
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_test_100x100.obu",
+        "/tmp/wav2c_test_100x100_out.yuv",
+    );
+
+    let pw = 128usize;
+    let ph = 128usize;
+    let frame_size = pw * ph + (pw / 2) * (ph / 2) * 2;
+    assert_eq!(
+        decoded.len(),
+        frame_size,
+        "Expected padded 128x128 I420 frame"
+    );
+
+    for row in 0..100 {
+        for col in 0..100 {
+            let pixel = decoded[row * pw + col];
+            let diff = (pixel as i32 - 82).abs();
+            assert!(
+                diff < 10,
+                "Y pixel ({},{}) = {}, expected ~82",
+                row,
+                col,
+                pixel
+            );
+        }
+    }
+}
