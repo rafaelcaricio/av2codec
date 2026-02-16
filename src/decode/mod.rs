@@ -150,7 +150,7 @@ fn reconstruct_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::encode_video_yuv;
+    use crate::encode::{encode_video_yuv, encode_video_yuv_with_cdf_update};
 
     #[test]
     fn decode_solid_gray() {
@@ -319,6 +319,47 @@ mod tests {
                 i,
                 p
             );
+        }
+    }
+
+    #[test]
+    fn roundtrip_cdf_adaptation_enabled() {
+        let y = vec![128u8; 64 * 64];
+        let u = vec![128u8; 32 * 32];
+        let v = vec![128u8; 32 * 32];
+        let bs = encode_video_yuv_with_cdf_update(64, 64, 50, &[(y.clone(), u.clone(), v.clone())]);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].y.iter().all(|&p| p == 128));
+        assert!(frames[0].u.iter().all(|&p| p == 128));
+        assert!(frames[0].v.iter().all(|&p| p == 128));
+    }
+
+    #[test]
+    fn roundtrip_cdf_adaptation_with_coeffs() {
+        let y = vec![200u8; 64 * 64];
+        let u = vec![100u8; 32 * 32];
+        let v = vec![150u8; 32 * 32];
+        let bs = encode_video_yuv_with_cdf_update(64, 64, 50, &[(y, u, v)]);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 1);
+        for &p in &frames[0].y {
+            assert!((p as i32 - 200).abs() <= 1, "Y pixel = {}, expected ~200", p);
+        }
+    }
+
+    #[test]
+    fn roundtrip_cdf_adaptation_128x128() {
+        let y = vec![160u8; 128 * 128];
+        let u = vec![128u8; 64 * 64];
+        let v = vec![128u8; 64 * 64];
+        let bs = encode_video_yuv_with_cdf_update(128, 128, 50, &[(y, u, v)]);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].width, 128);
+        assert_eq!(frames[0].height, 128);
+        for &p in &frames[0].y {
+            assert!((p as i32 - 160).abs() <= 1, "Y pixel = {}, expected ~160", p);
         }
     }
 }

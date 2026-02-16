@@ -1,3 +1,4 @@
+use crate::cdf_context::FrameCdfContext;
 use crate::cdf_tables::*;
 use crate::entropy::DaalaCoder;
 use crate::scan::DEFAULT_SCAN_32X32;
@@ -201,15 +202,30 @@ fn get_br_ctx_2d_chroma(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
     ((mag + 1) >> 1).min(3)
 }
 
-fn encode_low_range(ec: &mut DaalaCoder, level: usize, base_levels: usize, cdf: &[u16]) {
+fn encode_low_range(
+    ec: &mut DaalaCoder,
+    level: usize,
+    base_levels: usize,
+    cdf: &[u16],
+    mutable_cdf: Option<&mut Vec<u16>>,
+) {
     if level > base_levels {
         let remainder = level - 1 - base_levels;
         let sym = remainder.min(BR_CDF_SIZE - 1);
-        ec.encode_symbol(sym, cdf);
+        if let Some(mcdf) = mutable_cdf {
+            ec.encode_symbol_mut(sym, mcdf);
+        } else {
+            ec.encode_symbol(sym, cdf);
+        }
     }
 }
 
-fn encode_eob(ec: &mut DaalaCoder, eob: u16, pl_ctx: usize) {
+fn encode_eob(
+    ec: &mut DaalaCoder,
+    eob: u16,
+    pl_ctx: usize,
+    mut cdf_ctx: Option<&mut FrameCdfContext>,
+) {
     let eob_icdf = &EOB_MULTI_1024_ICDF[pl_ctx];
 
     let mut eob_pt = 0usize;
@@ -225,9 +241,17 @@ fn encode_eob(ec: &mut DaalaCoder, eob: u16, pl_ctx: usize) {
 
     let eob_token = eob_pt - 1;
     if eob_token < EOB_PT_INDEX_COUNT - 1 {
-        ec.encode_symbol(eob_token, eob_icdf);
+        if let Some(ref mut ctx) = cdf_ctx {
+            ec.encode_symbol_mut(eob_token, &mut ctx.eob_multi_1024[pl_ctx]);
+        } else {
+            ec.encode_symbol(eob_token, eob_icdf);
+        }
     } else {
-        ec.encode_symbol(EOB_PT_INDEX_COUNT - 1, eob_icdf);
+        if let Some(ref mut ctx) = cdf_ctx {
+            ec.encode_symbol_mut(EOB_PT_INDEX_COUNT - 1, &mut ctx.eob_multi_1024[pl_ctx]);
+        } else {
+            ec.encode_symbol(EOB_PT_INDEX_COUNT - 1, eob_icdf);
+        }
         let extra_token = eob_token - (EOB_PT_INDEX_COUNT - 1);
         ec.encode_literal(extra_token as u32, 2);
     }
@@ -236,7 +260,11 @@ fn encode_eob(ec: &mut DaalaCoder, eob: u16, pl_ctx: usize) {
     if eob_offset_bits > 0 {
         let extra = eob - EOB_GROUP_START[eob_pt];
         let msb = (extra >> (eob_offset_bits - 1)) & 1;
-        ec.encode_symbol(msb as usize, &EOB_EXTRA_ICDF);
+        if let Some(ref mut ctx) = cdf_ctx {
+            ec.encode_symbol_mut(msb as usize, &mut ctx.eob_extra);
+        } else {
+            ec.encode_symbol(msb as usize, &EOB_EXTRA_ICDF);
+        }
         if eob_offset_bits > 1 {
             let rest = extra & ((1 << (eob_offset_bits - 1)) - 1);
             ec.encode_literal(rest as u32, eob_offset_bits - 1);
@@ -292,9 +320,16 @@ struct PlaneEncodeCtx<'a> {
     height: usize,
     txb_skip_icdf: &'a [u16],
     dc_sign_ctx: usize,
+    entropy_ctx: usize,
+    u_has_coeffs: bool,
 }
 
-fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncodeCtx) {
+fn encode_plane_full(
+    ec: &mut DaalaCoder,
+    coeffs: &PlaneCoeffs,
+    ctx: &PlaneEncodeCtx,
+    mut cdf_ctx: Option<&mut FrameCdfContext>,
+) {
     let plane = ctx.plane;
     let txs_ctx_idx = ctx.txs_ctx_idx;
     let bwl = ctx.bwl;
@@ -303,15 +338,28 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
     let dc_sign_ctx = ctx.dc_sign_ctx;
     let eob = coeffs.eob;
 
+    let skip_sym = if eob == 0 { 1 } else { 0 };
+    if let Some(ref mut cdf) = cdf_ctx {
+        let txb_skip_cdf = match plane {
+            0 => &mut cdf.txb_skip_y,
+            1 => &mut cdf.txb_skip_u[ctx.entropy_ctx],
+            _ => if ctx.u_has_coeffs {
+                &mut cdf.txb_skip_v_u_nz[ctx.entropy_ctx]
+            } else {
+                &mut cdf.txb_skip_v[ctx.entropy_ctx]
+            },
+        };
+        ec.encode_symbol_mut(skip_sym, txb_skip_cdf);
+    } else {
+        ec.encode_symbol(skip_sym, txb_skip_icdf);
+    }
+
     if eob == 0 {
-        ec.encode_symbol(1, txb_skip_icdf);
         return;
     }
 
-    ec.encode_symbol(0, txb_skip_icdf);
-
     let pl_ctx = if plane == 0 { 0 } else { 2 };
-    encode_eob(ec, eob, pl_ctx);
+    encode_eob(ec, eob, pl_ctx, cdf_ctx.as_deref_mut());
 
     let width = 1usize << bwl;
     let padded_stride = width + TX_PAD_HOR;
@@ -329,9 +377,12 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
 
     if plane == 0 {
         if eob_lf {
-            let cdf = &COEFF_BASE_LF_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx];
             let sym = eob_abs_level.min(LF_BASE_SYMBOLS - 1) - 1;
-            ec.encode_symbol(sym, cdf);
+            if let Some(ref mut cdf) = cdf_ctx {
+                ec.encode_symbol_mut(sym, &mut cdf.coeff_base_lf_eob_y[txs_ctx_idx][coeff_ctx]);
+            } else {
+                ec.encode_symbol(sym, &COEFF_BASE_LF_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx]);
+            }
             if eob_abs_level > LF_NUM_BASE_LEVELS {
                 let br_ctx = get_br_ctx_lf_eob_2d(eob_pos);
                 encode_low_range(
@@ -339,26 +390,48 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
                     eob_abs_level,
                     LF_NUM_BASE_LEVELS,
                     &COEFF_BR_LF_Y_ICDF[br_ctx],
+                    cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_lf_y[br_ctx]),
                 );
             }
         } else {
-            let cdf = &COEFF_BASE_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx];
             let sym = eob_abs_level.min(NUM_BASE_LEVELS + 1) - 1;
-            ec.encode_symbol(sym, cdf);
+            if let Some(ref mut cdf) = cdf_ctx {
+                ec.encode_symbol_mut(sym, &mut cdf.coeff_base_eob_y[txs_ctx_idx][coeff_ctx]);
+            } else {
+                ec.encode_symbol(sym, &COEFF_BASE_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx]);
+            }
             if eob_abs_level > NUM_BASE_LEVELS {
-                encode_low_range(ec, eob_abs_level, NUM_BASE_LEVELS, &COEFF_BR_Y_ICDF[0]);
+                encode_low_range(
+                    ec,
+                    eob_abs_level,
+                    NUM_BASE_LEVELS,
+                    &COEFF_BR_Y_ICDF[0],
+                    cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_y[0]),
+                );
             }
         }
     } else if eob_lf {
-        let cdf = &COEFF_BASE_LF_EOB_UV_ICDF[coeff_ctx];
         let sym = eob_abs_level.min(LF_BASE_SYMBOLS - 1) - 1;
-        ec.encode_symbol(sym, cdf);
+        if let Some(ref mut cdf) = cdf_ctx {
+            ec.encode_symbol_mut(sym, &mut cdf.coeff_base_lf_eob_uv[coeff_ctx]);
+        } else {
+            ec.encode_symbol(sym, &COEFF_BASE_LF_EOB_UV_ICDF[coeff_ctx]);
+        }
     } else {
-        let cdf = &COEFF_BASE_EOB_UV_ICDF[coeff_ctx];
         let sym = eob_abs_level.min(NUM_BASE_LEVELS + 1) - 1;
-        ec.encode_symbol(sym, cdf);
+        if let Some(ref mut cdf) = cdf_ctx {
+            ec.encode_symbol_mut(sym, &mut cdf.coeff_base_eob_uv[coeff_ctx]);
+        } else {
+            ec.encode_symbol(sym, &COEFF_BASE_EOB_UV_ICDF[coeff_ctx]);
+        }
         if eob_abs_level > NUM_BASE_LEVELS {
-            encode_low_range(ec, eob_abs_level, NUM_BASE_LEVELS, &COEFF_BR_UV_ICDF[0]);
+            encode_low_range(
+                ec,
+                eob_abs_level,
+                NUM_BASE_LEVELS,
+                &COEFF_BR_UV_ICDF[0],
+                cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_uv[0]),
+            );
         }
     }
 
@@ -374,11 +447,18 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
 
             if plane == 0 {
                 if lf {
-                    let ctx = get_lower_levels_ctx_lf_2d(&levels_buf, pos, bwl);
-                    ec.encode_symbol(
-                        abs_level.min(LF_BASE_SYMBOLS - 1),
-                        &COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][ctx],
-                    );
+                    let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, pos, bwl);
+                    if let Some(ref mut cdf) = cdf_ctx {
+                        ec.encode_symbol_mut(
+                            abs_level.min(LF_BASE_SYMBOLS - 1),
+                            &mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx],
+                        );
+                    } else {
+                        ec.encode_symbol(
+                            abs_level.min(LF_BASE_SYMBOLS - 1),
+                            &COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx],
+                        );
+                    }
                     if abs_level > LF_NUM_BASE_LEVELS {
                         let br_ctx = get_br_lf_ctx_2d(&levels_buf, pos, bwl);
                         encode_low_range(
@@ -386,31 +466,68 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
                             abs_level,
                             LF_NUM_BASE_LEVELS,
                             &COEFF_BR_LF_Y_ICDF[br_ctx],
+                            cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
                         );
                     }
                 } else {
-                    let ctx = get_lower_levels_ctx_2d(&levels_buf, pos, bwl, plane);
-                    ec.encode_symbol(
-                        abs_level.min(NUM_BASE_LEVELS + 1),
-                        &COEFF_BASE_Y_ICDF[txs_ctx_idx][ctx],
-                    );
+                    let lctx = get_lower_levels_ctx_2d(&levels_buf, pos, bwl, plane);
+                    if let Some(ref mut cdf) = cdf_ctx {
+                        ec.encode_symbol_mut(
+                            abs_level.min(NUM_BASE_LEVELS + 1),
+                            &mut cdf.coeff_base_y[txs_ctx_idx][lctx],
+                        );
+                    } else {
+                        ec.encode_symbol(
+                            abs_level.min(NUM_BASE_LEVELS + 1),
+                            &COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx],
+                        );
+                    }
                     if abs_level > NUM_BASE_LEVELS {
                         let br_ctx = get_br_ctx_2d(&levels_buf, pos, bwl);
-                        encode_low_range(ec, abs_level, NUM_BASE_LEVELS, &COEFF_BR_Y_ICDF[br_ctx]);
+                        encode_low_range(
+                            ec,
+                            abs_level,
+                            NUM_BASE_LEVELS,
+                            &COEFF_BR_Y_ICDF[br_ctx],
+                            cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_y[br_ctx]),
+                        );
                     }
                 }
             } else if lf {
-                let ctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, pos, bwl, plane);
-                ec.encode_symbol(
-                    abs_level.min(LF_BASE_SYMBOLS - 1),
-                    &COEFF_BASE_LF_UV_ICDF[ctx],
-                );
+                let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, pos, bwl, plane);
+                if let Some(ref mut cdf) = cdf_ctx {
+                    ec.encode_symbol_mut(
+                        abs_level.min(LF_BASE_SYMBOLS - 1),
+                        &mut cdf.coeff_base_lf_uv[lctx],
+                    );
+                } else {
+                    ec.encode_symbol(
+                        abs_level.min(LF_BASE_SYMBOLS - 1),
+                        &COEFF_BASE_LF_UV_ICDF[lctx],
+                    );
+                }
             } else {
-                let ctx = get_lower_levels_ctx_2d_chroma(&levels_buf, pos, bwl, plane);
-                ec.encode_symbol(abs_level.min(NUM_BASE_LEVELS + 1), &COEFF_BASE_UV_ICDF[ctx]);
+                let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, pos, bwl, plane);
+                if let Some(ref mut cdf) = cdf_ctx {
+                    ec.encode_symbol_mut(
+                        abs_level.min(NUM_BASE_LEVELS + 1),
+                        &mut cdf.coeff_base_uv[lctx],
+                    );
+                } else {
+                    ec.encode_symbol(
+                        abs_level.min(NUM_BASE_LEVELS + 1),
+                        &COEFF_BASE_UV_ICDF[lctx],
+                    );
+                }
                 if abs_level > NUM_BASE_LEVELS {
                     let br_ctx = get_br_ctx_2d_chroma(&levels_buf, pos, bwl);
-                    encode_low_range(ec, abs_level, NUM_BASE_LEVELS, &COEFF_BR_UV_ICDF[br_ctx]);
+                    encode_low_range(
+                        ec,
+                        abs_level,
+                        NUM_BASE_LEVELS,
+                        &COEFF_BR_UV_ICDF[br_ctx],
+                        cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_uv[br_ctx]),
+                    );
                 }
             }
 
@@ -425,11 +542,18 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
 
         if plane == 0 {
             if dc_lf {
-                let ctx = get_lower_levels_ctx_lf_2d(&levels_buf, dc_pos, bwl);
-                ec.encode_symbol(
-                    dc_abs_level.min(LF_BASE_SYMBOLS - 1),
-                    &COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][ctx],
-                );
+                let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, dc_pos, bwl);
+                if let Some(ref mut cdf) = cdf_ctx {
+                    ec.encode_symbol_mut(
+                        dc_abs_level.min(LF_BASE_SYMBOLS - 1),
+                        &mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx],
+                    );
+                } else {
+                    ec.encode_symbol(
+                        dc_abs_level.min(LF_BASE_SYMBOLS - 1),
+                        &COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx],
+                    );
+                }
                 if dc_abs_level > LF_NUM_BASE_LEVELS {
                     let br_ctx = get_br_lf_ctx_dc_2d(&levels_buf, dc_pos, bwl);
                     encode_low_range(
@@ -437,34 +561,68 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
                         dc_abs_level,
                         LF_NUM_BASE_LEVELS,
                         &COEFF_BR_LF_Y_ICDF[br_ctx],
+                        cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
                     );
                 }
             } else {
-                let ctx = get_lower_levels_ctx_2d(&levels_buf, dc_pos, bwl, plane);
-                ec.encode_symbol(
-                    dc_abs_level.min(NUM_BASE_LEVELS + 1),
-                    &COEFF_BASE_Y_ICDF[txs_ctx_idx][ctx],
-                );
+                let lctx = get_lower_levels_ctx_2d(&levels_buf, dc_pos, bwl, plane);
+                if let Some(ref mut cdf) = cdf_ctx {
+                    ec.encode_symbol_mut(
+                        dc_abs_level.min(NUM_BASE_LEVELS + 1),
+                        &mut cdf.coeff_base_y[txs_ctx_idx][lctx],
+                    );
+                } else {
+                    ec.encode_symbol(
+                        dc_abs_level.min(NUM_BASE_LEVELS + 1),
+                        &COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx],
+                    );
+                }
                 if dc_abs_level > NUM_BASE_LEVELS {
                     let br_ctx = get_br_ctx_2d(&levels_buf, dc_pos, bwl);
-                    encode_low_range(ec, dc_abs_level, NUM_BASE_LEVELS, &COEFF_BR_Y_ICDF[br_ctx]);
+                    encode_low_range(
+                        ec,
+                        dc_abs_level,
+                        NUM_BASE_LEVELS,
+                        &COEFF_BR_Y_ICDF[br_ctx],
+                        cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_y[br_ctx]),
+                    );
                 }
             }
         } else if dc_lf {
-            let ctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, dc_pos, bwl, plane);
-            ec.encode_symbol(
-                dc_abs_level.min(LF_BASE_SYMBOLS - 1),
-                &COEFF_BASE_LF_UV_ICDF[ctx],
-            );
+            let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, dc_pos, bwl, plane);
+            if let Some(ref mut cdf) = cdf_ctx {
+                ec.encode_symbol_mut(
+                    dc_abs_level.min(LF_BASE_SYMBOLS - 1),
+                    &mut cdf.coeff_base_lf_uv[lctx],
+                );
+            } else {
+                ec.encode_symbol(
+                    dc_abs_level.min(LF_BASE_SYMBOLS - 1),
+                    &COEFF_BASE_LF_UV_ICDF[lctx],
+                );
+            }
         } else {
-            let ctx = get_lower_levels_ctx_2d_chroma(&levels_buf, dc_pos, bwl, plane);
-            ec.encode_symbol(
-                dc_abs_level.min(NUM_BASE_LEVELS + 1),
-                &COEFF_BASE_UV_ICDF[ctx],
-            );
+            let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, dc_pos, bwl, plane);
+            if let Some(ref mut cdf) = cdf_ctx {
+                ec.encode_symbol_mut(
+                    dc_abs_level.min(NUM_BASE_LEVELS + 1),
+                    &mut cdf.coeff_base_uv[lctx],
+                );
+            } else {
+                ec.encode_symbol(
+                    dc_abs_level.min(NUM_BASE_LEVELS + 1),
+                    &COEFF_BASE_UV_ICDF[lctx],
+                );
+            }
             if dc_abs_level > NUM_BASE_LEVELS {
                 let br_ctx = get_br_ctx_2d_chroma(&levels_buf, dc_pos, bwl);
-                encode_low_range(ec, dc_abs_level, NUM_BASE_LEVELS, &COEFF_BR_UV_ICDF[br_ctx]);
+                encode_low_range(
+                    ec,
+                    dc_abs_level,
+                    NUM_BASE_LEVELS,
+                    &COEFF_BR_UV_ICDF[br_ctx],
+                    cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_uv[br_ctx]),
+                );
             }
         }
         levels_buf[get_padded_idx(dc_pos, bwl)] = stored_level(dc_abs_level, dc_lf, plane);
@@ -486,7 +644,17 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
 
         if is_dc_2d {
             if plane == 0 {
-                ec.encode_symbol(if level < 0 { 1 } else { 0 }, &DC_SIGN_Y_ICDF[dc_sign_ctx]);
+                if let Some(ref mut cdf) = cdf_ctx {
+                    ec.encode_symbol_mut(
+                        if level < 0 { 1 } else { 0 },
+                        &mut cdf.dc_sign_y[dc_sign_ctx],
+                    );
+                } else {
+                    ec.encode_symbol(
+                        if level < 0 { 1 } else { 0 },
+                        &DC_SIGN_Y_ICDF[dc_sign_ctx],
+                    );
+                }
             } else {
                 ec.encode_literal(if level < 0 { 1 } else { 0 }, 1);
             }
@@ -531,7 +699,10 @@ pub fn encode_tile_data_with_coeffs(
             height: 32,
             txb_skip_icdf: &TXB_SKIP_Y_ICDF,
             dc_sign_ctx: 0,
+            entropy_ctx: 0,
+            u_has_coeffs: false,
         },
+        None,
     );
 
     let u_coeffs = PlaneCoeffs {
@@ -548,7 +719,10 @@ pub fn encode_tile_data_with_coeffs(
             height: 32,
             txb_skip_icdf: &TXB_SKIP_U_ICDF,
             dc_sign_ctx: 0,
+            entropy_ctx: 0,
+            u_has_coeffs: false,
         },
+        None,
     );
 
     let v_skip_icdf = if u_eob > 0 {
@@ -570,7 +744,10 @@ pub fn encode_tile_data_with_coeffs(
             height: 32,
             txb_skip_icdf: v_skip_icdf,
             dc_sign_ctx: 0,
+            entropy_ctx: 0,
+            u_has_coeffs: u_eob > 0,
         },
+        None,
     );
 
     ec.done()
@@ -651,8 +828,19 @@ fn compute_dc_sign_ctx(above: &[u8], left: &[u8]) -> usize {
     }
 }
 
-pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCoeffs]) -> Vec<u8> {
+pub fn encode_tile_data_multi_sb(
+    sb_cols: usize,
+    sb_rows: usize,
+    sb_grid: &[SbCoeffs],
+    allow_update_cdf: bool,
+) -> Vec<u8> {
     let mut ec = DaalaCoder::new();
+
+    let mut cdf_ctx = if allow_update_cdf {
+        Some(FrameCdfContext::new())
+    } else {
+        None
+    };
 
     let mut above_y = vec![0u8; sb_cols * 16];
     let mut above_u = vec![0u8; sb_cols * 8];
@@ -666,10 +854,17 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
         for sb_col in 0..sb_cols {
             let sb = &sb_grid[sb_row * sb_cols + sb_col];
 
-            ec.encode_symbol(0, &DO_SPLIT_ICDF);
-            ec.encode_symbol(0, &Y_MODE_SET_ICDF);
-            ec.encode_symbol(sb.y_mode as usize, &Y_MODE_IDX_ICDF);
-            ec.encode_symbol(sb.uv_mode as usize, &UV_MODE_ICDF);
+            if let Some(ref mut ctx) = cdf_ctx {
+                ec.encode_symbol_mut(0, &mut ctx.do_split);
+                ec.encode_symbol_mut(0, &mut ctx.y_mode_set);
+                ec.encode_symbol_mut(sb.y_mode as usize, &mut ctx.y_mode_idx);
+                ec.encode_symbol_mut(sb.uv_mode as usize, &mut ctx.uv_mode);
+            } else {
+                ec.encode_symbol(0, &DO_SPLIT_ICDF);
+                ec.encode_symbol(0, &Y_MODE_SET_ICDF);
+                ec.encode_symbol(sb.y_mode as usize, &Y_MODE_IDX_ICDF);
+                ec.encode_symbol(sb.uv_mode as usize, &UV_MODE_ICDF);
+            }
 
             let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
             let y_dc_sign_ctx = compute_dc_sign_ctx(y_above, &left_y);
@@ -687,7 +882,10 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
                     height: 32,
                     txb_skip_icdf: &TXB_SKIP_Y_ICDF,
                     dc_sign_ctx: y_dc_sign_ctx,
+                    entropy_ctx: 0,
+                    u_has_coeffs: false,
                 },
+                cdf_ctx.as_mut(),
             );
 
             let y_cul = compute_cul_level(&sb.y_levels, sb.y_eob);
@@ -712,7 +910,10 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
                     height: 32,
                     txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
                     dc_sign_ctx: 0,
+                    entropy_ctx: u_entropy_ctx,
+                    u_has_coeffs: false,
                 },
+                cdf_ctx.as_mut(),
             );
 
             let u_cul = compute_cul_level(&sb.u_levels, sb.u_eob);
@@ -742,7 +943,10 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
                     height: 32,
                     txb_skip_icdf: v_skip_icdf,
                     dc_sign_ctx: 0,
+                    entropy_ctx: v_entropy_ctx,
+                    u_has_coeffs: sb.u_eob > 0,
                 },
+                cdf_ctx.as_mut(),
             );
 
             let v_cul = compute_cul_level(&sb.v_levels, sb.v_eob);
@@ -819,7 +1023,7 @@ mod tests {
     #[test]
     fn encode_eob_position_1() {
         let mut ec = DaalaCoder::new();
-        encode_eob(&mut ec, 1, 0);
+        encode_eob(&mut ec, 1, 0, None);
         let data = ec.done();
         assert!(!data.is_empty());
     }
@@ -828,7 +1032,7 @@ mod tests {
     fn encode_eob_various_positions() {
         for eob in [1, 2, 3, 5, 9, 17, 33, 100] {
             let mut ec = DaalaCoder::new();
-            encode_eob(&mut ec, eob, 0);
+            encode_eob(&mut ec, eob, 0, None);
             let data = ec.done();
             assert!(!data.is_empty(), "eob={} produced empty data", eob);
         }
@@ -948,7 +1152,7 @@ mod tests {
             0,
             0,
         );
-        let multi = encode_tile_data_multi_sb(1, 1, &[sb]);
+        let multi = encode_tile_data_multi_sb(1, 1, &[sb], false);
         assert_eq!(
             single, multi,
             "1x1 multi-SB should match single-SB encoding"
@@ -969,7 +1173,7 @@ mod tests {
                 uv_mode: 0,
             })
             .collect();
-        let data = encode_tile_data_multi_sb(2, 2, &sbs);
+        let data = encode_tile_data_multi_sb(2, 2, &sbs, false);
         assert!(!data.is_empty());
     }
 
@@ -996,7 +1200,7 @@ mod tests {
                 sb
             })
             .collect();
-        let data = encode_tile_data_multi_sb(2, 2, &sbs);
+        let data = encode_tile_data_multi_sb(2, 2, &sbs, false);
         assert!(!data.is_empty());
     }
 }

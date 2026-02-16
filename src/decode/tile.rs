@@ -878,7 +878,7 @@ mod tests {
                 sb
             })
             .collect();
-        let data = tile::encode_tile_data_multi_sb(2, 2, &sbs);
+        let data = tile::encode_tile_data_multi_sb(2, 2, &sbs, false);
         let decoded = decode_tile_data_multi_sb(&data, 2, 2, false);
         assert_eq!(decoded.len(), 4);
         for (i, sb) in decoded.iter().enumerate() {

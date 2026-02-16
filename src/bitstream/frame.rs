@@ -8,6 +8,7 @@ pub struct FrameHeaderConfig {
     pub height: u32,
     pub base_qindex: u8,
     pub order_hint: u32,
+    pub disable_cdf_update: bool,
 }
 
 pub fn write_clk_obu_payload(config: &FrameHeaderConfig, tile_data: &[u8]) -> Vec<u8> {
@@ -31,7 +32,7 @@ fn write_uncompressed_header(w: &mut BitWriter, config: &FrameHeaderConfig) {
     w.write_uvlc(0);
 
     w.write_bit(true);
-    w.write_bit(true);
+    w.write_bit(config.disable_cdf_update);
     w.write_literal(config.order_hint, ORDER_HINT_BITS);
 
     w.write_bit(false);
@@ -130,6 +131,7 @@ mod tests {
             height: 64,
             base_qindex: 50,
             order_hint: 0,
+            disable_cdf_update: true,
         }
     }
 
@@ -154,6 +156,7 @@ mod tests {
             height: 128,
             base_qindex: 50,
             order_hint: 0,
+            disable_cdf_update: true,
         };
         let mut w = BitWriter::new();
         w.write_bit(true);

@@ -189,6 +189,7 @@ mod tests {
             height: 64,
             base_qindex: 50,
             order_hint: 0,
+            disable_cdf_update: true,
         };
         let tile_data = vec![0xAA, 0xBB];
         let payload = write_clk_obu_payload(&config, &tile_data);
@@ -206,6 +207,7 @@ mod tests {
             height: 128,
             base_qindex: 80,
             order_hint: 5,
+            disable_cdf_update: true,
         };
         let tile_data = vec![0x01, 0x02, 0x03, 0x04];
         let payload = write_clk_obu_payload(&config, &tile_data);
@@ -223,6 +225,7 @@ mod tests {
             height: 192,
             base_qindex: 100,
             order_hint: 3,
+            disable_cdf_update: true,
         };
         let tile_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
         let payload = write_clk_obu_payload(&config, &tile_data);
@@ -240,6 +243,7 @@ mod tests {
             height: 64,
             base_qindex: 0,
             order_hint: 7,
+            disable_cdf_update: true,
         };
         let tile_data = vec![0xFF];
         let payload = write_clk_obu_payload(&config, &tile_data);

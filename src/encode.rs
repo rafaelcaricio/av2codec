@@ -152,6 +152,7 @@ impl Encoder {
                 base_qindex: self.base_qindex,
                 order_hint: self.order_hint,
             },
+            false,
         );
 
         let frame_number = self.order_hint as u64;
@@ -561,6 +562,7 @@ fn encode_frame_yuv(
     u_plane: &[u8],
     v_plane: &[u8],
     params: &FrameEncodeParams,
+    allow_cdf_update: bool,
 ) -> Vec<u8> {
     let w = params.width as usize;
     let h = params.height as usize;
@@ -617,12 +619,13 @@ fn encode_frame_yuv(
         }
     }
 
-    let tile_data = tile::encode_tile_data_multi_sb(sb_cols, sb_rows, &sb_grid);
+    let tile_data = tile::encode_tile_data_multi_sb(sb_cols, sb_rows, &sb_grid, allow_cdf_update);
     let frame_config = FrameHeaderConfig {
         width: params.width,
         height: params.height,
         base_qindex: params.base_qindex,
         order_hint: params.order_hint,
+        disable_cdf_update: !allow_cdf_update,
     };
     let clk_payload = write_clk_obu_payload(&frame_config, &tile_data);
     ObuWriter::pack_obu(ObuType::Clk, &clk_payload)
@@ -660,6 +663,7 @@ pub fn encode_video(width: u32, height: u32, base_qindex: u8, y_planes: &[Vec<u8
             height: ph,
             base_qindex,
             order_hint: i as u32,
+            disable_cdf_update: true,
         };
         let clk_payload = write_clk_obu_payload(&frame_config, &tile_data);
         let clk_obu = ObuWriter::pack_obu(ObuType::Clk, &clk_payload);
@@ -706,6 +710,52 @@ pub fn encode_video_yuv(
                 base_qindex,
                 order_hint: i as u32,
             },
+            false,
+        );
+        output.extend_from_slice(&clk_obu);
+    }
+
+    output
+}
+
+pub fn encode_video_yuv_with_cdf_update(
+    width: u32,
+    height: u32,
+    base_qindex: u8,
+    frames: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+) -> Vec<u8> {
+    let mut output = Vec::new();
+
+    let pw = round_up_to_64(width);
+    let ph = round_up_to_64(height);
+
+    let seq_config = SequenceHeaderConfig {
+        width: pw,
+        height: ph,
+    };
+    let seq_payload = write_sequence_header(&seq_config);
+    let seq_obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload);
+    output.extend_from_slice(&seq_obu);
+
+    let dequant = ac_qlookup(base_qindex);
+
+    for (i, (y_plane, u_plane, v_plane)) in frames.iter().enumerate() {
+        let padded_y = pad_plane(y_plane, width, height, pw, ph);
+        let padded_u = pad_plane(u_plane, width / 2, height / 2, pw / 2, ph / 2);
+        let padded_v = pad_plane(v_plane, width / 2, height / 2, pw / 2, ph / 2);
+
+        let clk_obu = encode_frame_yuv(
+            &padded_y,
+            &padded_u,
+            &padded_v,
+            &FrameEncodeParams {
+                width: pw,
+                height: ph,
+                dequant,
+                base_qindex,
+                order_hint: i as u32,
+            },
+            true,
         );
         output.extend_from_slice(&clk_obu);
     }
