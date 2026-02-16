@@ -1,4 +1,44 @@
 #[rustfmt::skip]
+const FWD_DCT2_4: [[i8; 4]; 4] = [
+    [64, 64, 64, 64],
+    [83, 35, -35, -83],
+    [64, -64, -64, 64],
+    [35, -83, 83, -35],
+];
+
+#[rustfmt::skip]
+const FWD_DCT2_8: [[i8; 8]; 8] = [
+    [64, 64, 64, 64, 64, 64, 64, 64],
+    [89, 75, 50, 18, -18, -50, -75, -89],
+    [83, 35, -35, -83, -83, -35, 35, 83],
+    [75, -18, -89, -50, 50, 89, 18, -75],
+    [64, -64, -64, 64, 64, -64, -64, 64],
+    [50, -89, 18, 75, -75, -18, 89, -50],
+    [35, -83, 83, -35, -35, 83, -83, 35],
+    [18, -50, 75, -89, 89, -75, 50, -18],
+];
+
+#[rustfmt::skip]
+const FWD_DCT2_16: [[i8; 16]; 16] = [
+    [64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64],
+    [90, 87, 80, 70, 57, 43, 26, 9, -9, -26, -43, -57, -70, -80, -87, -90],
+    [89, 75, 50, 18, -18, -50, -75, -89, -89, -75, -50, -18, 18, 50, 75, 89],
+    [87, 57, 9, -43, -80, -90, -70, -26, 26, 70, 90, 80, 43, -9, -57, -87],
+    [83, 35, -35, -83, -83, -35, 35, 83, 83, 35, -35, -83, -83, -35, 35, 83],
+    [80, 9, -70, -87, -26, 57, 90, 43, -43, -90, -57, 26, 87, 70, -9, -80],
+    [75, -18, -89, -50, 50, 89, 18, -75, -75, 18, 89, 50, -50, -89, -18, 75],
+    [70, -43, -87, 9, 90, 26, -80, -57, 57, 80, -26, -90, -9, 87, 43, -70],
+    [64, -64, -64, 64, 64, -64, -64, 64, 64, -64, -64, 64, 64, -64, -64, 64],
+    [57, -80, -26, 90, -9, -87, 43, 70, -70, -43, 87, 9, -90, 26, 80, -57],
+    [50, -89, 18, 75, -75, -18, 89, -50, -50, 89, -18, -75, 75, 18, -89, 50],
+    [43, -90, 57, 26, -87, 70, 9, -80, 80, -9, -70, 87, -26, -57, 90, -43],
+    [35, -83, 83, -35, -35, 83, -83, 35, 35, -83, 83, -35, -35, 83, -83, 35],
+    [26, -70, 90, -80, 43, 9, -57, 87, -87, 57, -9, -43, 80, -90, 70, -26],
+    [18, -50, 75, -89, 89, -75, 50, -18, -18, 50, -75, 89, -89, 75, -50, 18],
+    [9, -26, 43, -57, 70, -80, 87, -90, 90, -87, 80, -70, 57, -43, 26, -9],
+];
+
+#[rustfmt::skip]
 const FWD_DCT2_32: [[i8; 32]; 32] = [
     [64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64],
     [90, 90, 88, 85, 82, 78, 73, 67, 61, 54, 47, 39, 30, 22, 13, 4, -4, -13, -22, -30, -39, -47, -54, -61, -67, -73, -78, -82, -85, -88, -90, -90],
@@ -222,6 +262,180 @@ pub fn inverse_dct2_64x64(coeffs: &[i32; 1024]) -> [i32; 4096] {
     output
 }
 
+pub fn forward_dct2_4x4(residual: &[i32; 16]) -> [i32; 16] {
+    let mut temp = [[0i32; 4]; 4];
+
+    for col in 0..4 {
+        for freq_row in 0..4 {
+            let mut sum = 0i64;
+            for spatial_row in 0..4 {
+                sum += FWD_DCT2_4[freq_row][spatial_row] as i64
+                    * residual[spatial_row * 4 + col] as i64;
+            }
+            temp[freq_row][col] = round_shift(sum, 1);
+        }
+    }
+
+    let mut output = [0i32; 16];
+    for freq_row in 0..4 {
+        for freq_col in 0..4 {
+            let mut sum = 0i64;
+            for spatial_col in 0..4 {
+                sum +=
+                    FWD_DCT2_4[freq_col][spatial_col] as i64 * temp[freq_row][spatial_col] as i64;
+            }
+            output[freq_row * 4 + freq_col] = round_shift(sum, 10);
+        }
+    }
+
+    output
+}
+
+pub fn forward_dct2_8x8(residual: &[i32; 64]) -> [i32; 64] {
+    let mut temp = [[0i32; 8]; 8];
+
+    for col in 0..8 {
+        for freq_row in 0..8 {
+            let mut sum = 0i64;
+            for spatial_row in 0..8 {
+                sum += FWD_DCT2_8[freq_row][spatial_row] as i64
+                    * residual[spatial_row * 8 + col] as i64;
+            }
+            temp[freq_row][col] = round_shift(sum, 2);
+        }
+    }
+
+    let mut output = [0i32; 64];
+    for freq_row in 0..8 {
+        for freq_col in 0..8 {
+            let mut sum = 0i64;
+            for spatial_col in 0..8 {
+                sum +=
+                    FWD_DCT2_8[freq_col][spatial_col] as i64 * temp[freq_row][spatial_col] as i64;
+            }
+            output[freq_row * 8 + freq_col] = round_shift(sum, 10);
+        }
+    }
+
+    output
+}
+
+pub fn forward_dct2_16x16(residual: &[i32; 256]) -> [i32; 256] {
+    let mut temp = [[0i32; 16]; 16];
+
+    for col in 0..16 {
+        for freq_row in 0..16 {
+            let mut sum = 0i64;
+            for spatial_row in 0..16 {
+                sum += FWD_DCT2_16[freq_row][spatial_row] as i64
+                    * residual[spatial_row * 16 + col] as i64;
+            }
+            temp[freq_row][col] = round_shift(sum, 2);
+        }
+    }
+
+    let mut output = [0i32; 256];
+    for freq_row in 0..16 {
+        for freq_col in 0..16 {
+            let mut sum = 0i64;
+            for spatial_col in 0..16 {
+                sum += FWD_DCT2_16[freq_col][spatial_col] as i64
+                    * temp[freq_row][spatial_col] as i64;
+            }
+            output[freq_row * 16 + freq_col] = round_shift(sum, 11);
+        }
+    }
+
+    output
+}
+
+pub fn inverse_dct2_4x4(coeffs: &[i32; 16]) -> [i32; 16] {
+    let mut temp = [[0i32; 4]; 4];
+
+    for col in 0..4 {
+        for spatial_row in 0..4 {
+            let mut sum = 0i64;
+            for freq_row in 0..4 {
+                sum +=
+                    FWD_DCT2_4[freq_row][spatial_row] as i64 * coeffs[freq_row * 4 + col] as i64;
+            }
+            temp[spatial_row][col] = round_shift(sum, 7);
+        }
+    }
+
+    let mut output = [0i32; 16];
+    for spatial_row in 0..4 {
+        for spatial_col in 0..4 {
+            let mut sum = 0i64;
+            for freq_col in 0..4 {
+                sum +=
+                    FWD_DCT2_4[freq_col][spatial_col] as i64 * temp[spatial_row][freq_col] as i64;
+            }
+            output[spatial_row * 4 + spatial_col] = round_shift(sum, 10);
+        }
+    }
+
+    output
+}
+
+pub fn inverse_dct2_8x8(coeffs: &[i32; 64]) -> [i32; 64] {
+    let mut temp = [[0i32; 8]; 8];
+
+    for col in 0..8 {
+        for spatial_row in 0..8 {
+            let mut sum = 0i64;
+            for freq_row in 0..8 {
+                sum +=
+                    FWD_DCT2_8[freq_row][spatial_row] as i64 * coeffs[freq_row * 8 + col] as i64;
+            }
+            temp[spatial_row][col] = round_shift(sum, 7);
+        }
+    }
+
+    let mut output = [0i32; 64];
+    for spatial_row in 0..8 {
+        for spatial_col in 0..8 {
+            let mut sum = 0i64;
+            for freq_col in 0..8 {
+                sum +=
+                    FWD_DCT2_8[freq_col][spatial_col] as i64 * temp[spatial_row][freq_col] as i64;
+            }
+            output[spatial_row * 8 + spatial_col] = round_shift(sum, 11);
+        }
+    }
+
+    output
+}
+
+pub fn inverse_dct2_16x16(coeffs: &[i32; 256]) -> [i32; 256] {
+    let mut temp = [[0i32; 16]; 16];
+
+    for col in 0..16 {
+        for spatial_row in 0..16 {
+            let mut sum = 0i64;
+            for freq_row in 0..16 {
+                sum += FWD_DCT2_16[freq_row][spatial_row] as i64
+                    * coeffs[freq_row * 16 + col] as i64;
+            }
+            temp[spatial_row][col] = round_shift(sum, 6);
+        }
+    }
+
+    let mut output = [0i32; 256];
+    for spatial_row in 0..16 {
+        for spatial_col in 0..16 {
+            let mut sum = 0i64;
+            for freq_col in 0..16 {
+                sum += FWD_DCT2_16[freq_col][spatial_col] as i64
+                    * temp[spatial_row][freq_col] as i64;
+            }
+            output[spatial_row * 16 + spatial_col] = round_shift(sum, 13);
+        }
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +592,183 @@ mod tests {
                 reconstructed[i],
                 diff
             );
+        }
+    }
+
+    #[test]
+    fn dc_basis_is_64_for_4x4() {
+        for &val in &FWD_DCT2_4[0] {
+            assert_eq!(val, 64);
+        }
+    }
+
+    #[test]
+    fn dc_basis_is_64_for_8x8() {
+        for &val in &FWD_DCT2_8[0] {
+            assert_eq!(val, 64);
+        }
+    }
+
+    #[test]
+    fn dc_basis_is_64_for_16x16() {
+        for &val in &FWD_DCT2_16[0] {
+            assert_eq!(val, 64);
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_4x4_dc_only() {
+        let mut coeffs = [0i32; 16];
+        coeffs[0] = 1000;
+        let output = inverse_dct2_4x4(&coeffs);
+        let first = output[0];
+        assert_ne!(first, 0);
+        for &v in &output {
+            assert!((v - first).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_4x4_zero() {
+        let output = inverse_dct2_4x4(&[0i32; 16]);
+        assert!(output.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn inverse_dct2_8x8_dc_only() {
+        let mut coeffs = [0i32; 64];
+        coeffs[0] = 1000;
+        let output = inverse_dct2_8x8(&coeffs);
+        let first = output[0];
+        assert_ne!(first, 0);
+        for &v in &output {
+            assert!((v - first).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_8x8_zero() {
+        let output = inverse_dct2_8x8(&[0i32; 64]);
+        assert!(output.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn inverse_dct2_16x16_dc_only() {
+        let mut coeffs = [0i32; 256];
+        coeffs[0] = 1000;
+        let output = inverse_dct2_16x16(&coeffs);
+        let first = output[0];
+        assert_ne!(first, 0);
+        for &v in &output {
+            assert!((v - first).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_16x16_zero() {
+        let output = inverse_dct2_16x16(&[0i32; 256]);
+        assert!(output.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn inverse_dct2_4x4_roundtrip() {
+        let mut residual = [0i32; 16];
+        for row in 0..4 {
+            for col in 0..4 {
+                residual[row * 4 + col] = (row as i32 * 3 + col as i32) % 10 - 5;
+            }
+        }
+        let coeffs = forward_dct2_4x4(&residual);
+        let reconstructed = inverse_dct2_4x4(&coeffs);
+        for i in 0..16 {
+            let diff = (residual[i] - reconstructed[i]).abs();
+            assert!(
+                diff <= 1,
+                "roundtrip mismatch at {}: expected {}, got {} (diff {})",
+                i,
+                residual[i],
+                reconstructed[i],
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_8x8_roundtrip() {
+        let mut residual = [0i32; 64];
+        for row in 0..8 {
+            for col in 0..8 {
+                residual[row * 8 + col] = (row as i32 * 3 + col as i32) % 20 - 10;
+            }
+        }
+        let coeffs = forward_dct2_8x8(&residual);
+        let reconstructed = inverse_dct2_8x8(&coeffs);
+        for i in 0..64 {
+            let diff = (residual[i] - reconstructed[i]).abs();
+            assert!(
+                diff <= 1,
+                "roundtrip mismatch at {}: expected {}, got {} (diff {})",
+                i,
+                residual[i],
+                reconstructed[i],
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_16x16_roundtrip() {
+        let mut residual = [0i32; 256];
+        for row in 0..16 {
+            for col in 0..16 {
+                residual[row * 16 + col] = (row as i32 * 3 + col as i32) % 30 - 15;
+            }
+        }
+        let coeffs = forward_dct2_16x16(&residual);
+        let reconstructed = inverse_dct2_16x16(&coeffs);
+        for i in 0..256 {
+            let diff = (residual[i] - reconstructed[i]).abs();
+            assert!(
+                diff <= 1,
+                "roundtrip mismatch at {}: expected {}, got {} (diff {})",
+                i,
+                residual[i],
+                reconstructed[i],
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn uniform_residual_4x4_dc_only() {
+        let r = 10;
+        let residual = [r; 16];
+        let output = forward_dct2_4x4(&residual);
+        assert_eq!(output[0], 32 * r);
+        for (i, &val) in output.iter().enumerate().skip(1) {
+            assert_eq!(val, 0, "AC coefficient at index {} should be zero", i);
+        }
+    }
+
+    #[test]
+    fn uniform_residual_8x8_dc_only() {
+        let r = 10;
+        let residual = [r; 64];
+        let output = forward_dct2_8x8(&residual);
+        assert_eq!(output[0], 64 * r);
+        for (i, &val) in output.iter().enumerate().skip(1) {
+            assert_eq!(val, 0, "AC coefficient at index {} should be zero", i);
+        }
+    }
+
+    #[test]
+    fn uniform_residual_16x16_dc_only() {
+        let r = 10;
+        let residual = [r; 256];
+        let output = forward_dct2_16x16(&residual);
+        assert_eq!(output[0], 128 * r);
+        for (i, &val) in output.iter().enumerate().skip(1) {
+            assert_eq!(val, 0, "AC coefficient at index {} should be zero", i);
         }
     }
 }
