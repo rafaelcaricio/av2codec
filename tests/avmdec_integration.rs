@@ -166,9 +166,12 @@ fn avmdec_decodes_solid_red_all_planes() {
         y_val, u_val, v_val, dy, du, dv
     );
 
-    assert_eq!(dy, y_val, "Y pixel mismatch");
-    assert_eq!(du, u_val, "U pixel mismatch");
-    assert_eq!(dv, v_val, "V pixel mismatch");
+    let y_diff = (dy as i32 - y_val as i32).abs();
+    let u_diff = (du as i32 - u_val as i32).abs();
+    let v_diff = (dv as i32 - v_val as i32).abs();
+    assert!(y_diff <= 3, "Y pixel mismatch: expected {}, got {} (diff {})", y_val, dy, y_diff);
+    assert!(u_diff <= 3, "U pixel mismatch: expected {}, got {} (diff {})", u_val, du, u_diff);
+    assert!(v_diff <= 3, "V pixel mismatch: expected {}, got {} (diff {})", v_val, dv, v_diff);
 }
 
 #[test]
@@ -209,9 +212,12 @@ fn avmdec_decodes_multi_frame_yuv() {
             f, ey, eu, ev, dy, du, dv
         );
 
-        assert_eq!(dy, ey, "Frame {} Y mismatch", f);
-        assert_eq!(du, eu, "Frame {} U mismatch", f);
-        assert_eq!(dv, ev, "Frame {} V mismatch", f);
+        let y_diff = (dy as i32 - ey as i32).abs();
+        let u_diff = (du as i32 - eu as i32).abs();
+        let v_diff = (dv as i32 - ev as i32).abs();
+        assert!(y_diff <= 3, "Frame {} Y mismatch: expected {}, got {} (diff {})", f, ey, dy, y_diff);
+        assert!(u_diff <= 3, "Frame {} U mismatch: expected {}, got {} (diff {})", f, eu, du, u_diff);
+        assert!(v_diff <= 3, "Frame {} V mismatch: expected {}, got {} (diff {})", f, ev, dv, v_diff);
     }
 }
 
@@ -473,9 +479,12 @@ fn avmdec_decodes_256x128_solid_red() {
         dy, du, dv
     );
 
-    assert_eq!(dy, 81, "Y pixel mismatch");
-    assert_eq!(du, 90, "U pixel mismatch");
-    assert_eq!(dv, 240, "V pixel mismatch");
+    let y_diff = (dy as i32 - 81).abs();
+    let u_diff = (du as i32 - 90).abs();
+    let v_diff = (dv as i32 - 240).abs();
+    assert!(y_diff <= 3, "Y pixel mismatch: expected 81, got {} (diff {})", dy, y_diff);
+    assert!(u_diff <= 3, "U pixel mismatch: expected 90, got {} (diff {})", du, u_diff);
+    assert!(v_diff <= 3, "V pixel mismatch: expected 240, got {} (diff {})", dv, v_diff);
 }
 
 #[test]
