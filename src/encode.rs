@@ -332,18 +332,26 @@ fn encode_frame_yuv(
 }
 
 pub fn encode_still_image(width: u32, height: u32, base_qindex: u8) -> Vec<u8> {
+    let pw = round_up_to_64(width);
+    let ph = round_up_to_64(height);
     encode_video(
         width,
         height,
         base_qindex,
-        &[vec![128; (width * height) as usize]],
+        &[vec![128; (pw * ph) as usize]],
     )
 }
 
 pub fn encode_video(width: u32, height: u32, base_qindex: u8, y_planes: &[Vec<u8>]) -> Vec<u8> {
     let mut output = Vec::new();
 
-    let seq_config = SequenceHeaderConfig { width, height };
+    let pw = round_up_to_64(width);
+    let ph = round_up_to_64(height);
+
+    let seq_config = SequenceHeaderConfig {
+        width: pw,
+        height: ph,
+    };
     let seq_payload = write_sequence_header(&seq_config);
     let seq_obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload);
     output.extend_from_slice(&seq_obu);
@@ -351,8 +359,8 @@ pub fn encode_video(width: u32, height: u32, base_qindex: u8, y_planes: &[Vec<u8
     for (i, _y_plane) in y_planes.iter().enumerate() {
         let tile_data = tile::encode_tile_data();
         let frame_config = FrameHeaderConfig {
-            width,
-            height,
+            width: pw,
+            height: ph,
             base_qindex,
             order_hint: i as u32,
         };
@@ -372,7 +380,13 @@ pub fn encode_video_yuv(
 ) -> Vec<u8> {
     let mut output = Vec::new();
 
-    let seq_config = SequenceHeaderConfig { width, height };
+    let pw = round_up_to_64(width);
+    let ph = round_up_to_64(height);
+
+    let seq_config = SequenceHeaderConfig {
+        width: pw,
+        height: ph,
+    };
     let seq_payload = write_sequence_header(&seq_config);
     let seq_obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload);
     output.extend_from_slice(&seq_obu);
@@ -380,13 +394,17 @@ pub fn encode_video_yuv(
     let dequant = ac_qlookup(base_qindex);
 
     for (i, (y_plane, u_plane, v_plane)) in frames.iter().enumerate() {
+        let padded_y = pad_plane(y_plane, width, height, pw, ph);
+        let padded_u = pad_plane(u_plane, width / 2, height / 2, pw / 2, ph / 2);
+        let padded_v = pad_plane(v_plane, width / 2, height / 2, pw / 2, ph / 2);
+
         let clk_obu = encode_frame_yuv(
-            y_plane,
-            u_plane,
-            v_plane,
+            &padded_y,
+            &padded_u,
+            &padded_v,
             &FrameEncodeParams {
-                width,
-                height,
+                width: pw,
+                height: ph,
                 dequant,
                 base_qindex,
                 order_hint: i as u32,
@@ -986,6 +1004,17 @@ mod tests {
     }
 
     #[test]
+    fn encode_video_yuv_non_aligned() {
+        let w = 100u32;
+        let h = 100u32;
+        let y = vec![200u8; (w * h) as usize];
+        let u = vec![128u8; (w / 2 * h / 2) as usize];
+        let v = vec![128u8; (w / 2 * h / 2) as usize];
+        let bs = encode_video_yuv(w, h, 50, &[(y, u, v)]);
+        assert!(!bs.is_empty());
+    }
+
+    #[test]
     fn round_up_to_64_exact() {
         assert_eq!(round_up_to_64(64), 64);
         assert_eq!(round_up_to_64(128), 128);
@@ -1020,8 +1049,8 @@ mod tests {
     #[test]
     fn pad_plane_preserves_original_pixels() {
         let mut plane = vec![0u8; 100 * 100];
-        for i in 0..100 * 100 {
-            plane[i] = (i % 256) as u8;
+        for (i, pixel) in plane.iter_mut().enumerate() {
+            *pixel = (i % 256) as u8;
         }
         let padded = pad_plane(&plane, 100, 100, 128, 128);
         for row in 0..100 {
