@@ -216,6 +216,111 @@ struct FrameEncodeParams {
     order_hint: u32,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum IntraMode {
+    DcPred = 0,
+    SmoothPred = 1,
+    SmoothVPred = 2,
+    SmoothHPred = 3,
+    PaethPred = 4,
+}
+
+#[allow(dead_code)]
+const SMOOTH_WEIGHTS_32: [u16; 32] = [
+    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74,
+    66, 59, 52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
+];
+
+#[allow(dead_code)]
+const SMOOTH_WEIGHTS_64: [u16; 64] = [
+    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150,
+    144, 138, 133, 127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69,
+    65, 61, 57, 54, 50, 47, 44, 41, 38, 35, 32, 29, 27, 25, 22, 20,
+    18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
+];
+
+#[allow(dead_code)]
+fn smooth_weights(bsize: usize) -> &'static [u16] {
+    match bsize {
+        32 => &SMOOTH_WEIGHTS_32,
+        64 => &SMOOTH_WEIGHTS_64,
+        _ => panic!("unsupported block size for smooth weights: {}", bsize),
+    }
+}
+
+#[allow(dead_code)]
+struct RefPixels {
+    above: Vec<u8>,
+    left: Vec<u8>,
+    top_left: u8,
+    has_above: bool,
+    has_left: bool,
+}
+
+#[allow(dead_code)]
+fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> RefPixels {
+    let has_above = y > 0;
+    let has_left = x > 0;
+
+    match (has_above, has_left) {
+        (false, false) => RefPixels {
+            above: vec![127; bsize],
+            left: vec![129; bsize],
+            top_left: 128,
+            has_above: false,
+            has_left: false,
+        },
+        (true, false) => {
+            let mut above = vec![0u8; bsize];
+            for i in 0..bsize {
+                above[i] = recon[(y - 1) * stride + x + i];
+            }
+            let tl = above[0];
+            RefPixels {
+                left: vec![tl; bsize],
+                top_left: tl,
+                above,
+                has_above: true,
+                has_left: false,
+            }
+        }
+        (false, true) => {
+            let mut left = vec![0u8; bsize];
+            for j in 0..bsize {
+                left[j] = recon[(y + j) * stride + x - 1];
+            }
+            let tl = left[0];
+            RefPixels {
+                above: vec![tl; bsize],
+                top_left: tl,
+                left,
+                has_above: false,
+                has_left: true,
+            }
+        }
+        (true, true) => {
+            let mut above = vec![0u8; bsize];
+            for i in 0..bsize {
+                above[i] = recon[(y - 1) * stride + x + i];
+            }
+            let mut left = vec![0u8; bsize];
+            for j in 0..bsize {
+                left[j] = recon[(y + j) * stride + x - 1];
+            }
+            let tl = recon[(y - 1) * stride + x - 1];
+            RefPixels {
+                above,
+                left,
+                top_left: tl,
+                has_above: true,
+                has_left: true,
+            }
+        }
+    }
+}
+
 fn encode_plane_block_64(
     pixels: &[u8],
     plane_w: usize,
@@ -1064,5 +1169,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn intra_mode_values() {
+        assert_eq!(IntraMode::DcPred as u8, 0);
+        assert_eq!(IntraMode::SmoothPred as u8, 1);
+        assert_eq!(IntraMode::SmoothVPred as u8, 2);
+        assert_eq!(IntraMode::SmoothHPred as u8, 3);
+        assert_eq!(IntraMode::PaethPred as u8, 4);
+    }
+
+    #[test]
+    fn smooth_weights_32_endpoints() {
+        assert_eq!(SMOOTH_WEIGHTS_32[0], 255);
+        assert_eq!(SMOOTH_WEIGHTS_32[31], 8);
+    }
+
+    #[test]
+    fn smooth_weights_64_endpoints() {
+        assert_eq!(SMOOTH_WEIGHTS_64[0], 255);
+        assert_eq!(SMOOTH_WEIGHTS_64[63], 4);
+    }
+
+    #[test]
+    fn ref_pixels_no_neighbors() {
+        let recon = vec![0u8; 64 * 64];
+        let refs = get_ref_pixels(&recon, 64, 0, 0, 32);
+        assert!(refs.above.iter().all(|&v| v == 127));
+        assert!(refs.left.iter().all(|&v| v == 129));
+        assert_eq!(refs.top_left, 128);
+        assert!(!refs.has_above);
+        assert!(!refs.has_left);
+    }
+
+    #[test]
+    fn ref_pixels_above_only() {
+        let mut recon = vec![0u8; 128 * 128];
+        for i in 0..64 {
+            recon[63 * 128 + i] = 200;
+        }
+        let refs = get_ref_pixels(&recon, 128, 0, 64, 64);
+        assert!(refs.above.iter().all(|&v| v == 200));
+        assert!(refs.left.iter().all(|&v| v == 200));
+        assert_eq!(refs.top_left, 200);
+        assert!(refs.has_above);
+        assert!(!refs.has_left);
+    }
+
+    #[test]
+    fn ref_pixels_left_only() {
+        let mut recon = vec![0u8; 128 * 128];
+        for j in 0..64 {
+            recon[j * 128 + 63] = 150;
+        }
+        let refs = get_ref_pixels(&recon, 128, 64, 0, 64);
+        assert!(refs.left.iter().all(|&v| v == 150));
+        assert!(refs.above.iter().all(|&v| v == 150));
+        assert_eq!(refs.top_left, 150);
+        assert!(!refs.has_above);
+        assert!(refs.has_left);
+    }
+
+    #[test]
+    fn ref_pixels_both_neighbors() {
+        let mut recon = vec![0u8; 128 * 128];
+        for i in 0..64 {
+            recon[63 * 128 + 64 + i] = 200;
+        }
+        for j in 0..64 {
+            recon[(64 + j) * 128 + 63] = 100;
+        }
+        recon[63 * 128 + 63] = 180;
+        let refs = get_ref_pixels(&recon, 128, 64, 64, 64);
+        assert!(refs.above.iter().all(|&v| v == 200));
+        assert!(refs.left.iter().all(|&v| v == 100));
+        assert_eq!(refs.top_left, 180);
+        assert!(refs.has_above);
+        assert!(refs.has_left);
     }
 }
