@@ -102,22 +102,24 @@ fn reconstruct_frame(
 
             let y_x = sb_col * 64;
             let y_y = sb_row * 64;
-            let y_pred = crate::encode::predict_dc(&y_plane, w, y_x, y_y, 64);
+            let y_mode = crate::encode::IntraMode::from_index(sb.y_mode);
+            let y_pred_block = crate::encode::predict_intra_block(&y_plane, w, y_x, y_y, 64, y_mode);
             let y_residuals =
                 transform::dequantize_and_inverse(&sb.y_levels, sb.y_eob, dequant, 2, true);
-            crate::encode::reconstruct_block(&mut y_plane, w, y_x, y_y, 64, y_pred, &y_residuals);
+            crate::encode::reconstruct_block(&mut y_plane, w, y_x, y_y, 64, &y_pred_block, &y_residuals);
 
             let uv_x = sb_col * 32;
             let uv_y = sb_row * 32;
-            let u_pred = crate::encode::predict_dc(&u_plane, uv_w, uv_x, uv_y, 32);
+            let uv_mode = crate::encode::IntraMode::from_index(sb.uv_mode);
+            let u_pred_block = crate::encode::predict_intra_block(&u_plane, uv_w, uv_x, uv_y, 32, uv_mode);
             let u_residuals =
                 transform::dequantize_and_inverse(&sb.u_levels, sb.u_eob, dequant, 1, false);
-            crate::encode::reconstruct_block(&mut u_plane, uv_w, uv_x, uv_y, 32, u_pred, &u_residuals);
+            crate::encode::reconstruct_block(&mut u_plane, uv_w, uv_x, uv_y, 32, &u_pred_block, &u_residuals);
 
-            let v_pred = crate::encode::predict_dc(&v_plane, uv_w, uv_x, uv_y, 32);
+            let v_pred_block = crate::encode::predict_intra_block(&v_plane, uv_w, uv_x, uv_y, 32, uv_mode);
             let v_residuals =
                 transform::dequantize_and_inverse(&sb.v_levels, sb.v_eob, dequant, 1, false);
-            crate::encode::reconstruct_block(&mut v_plane, uv_w, uv_x, uv_y, 32, v_pred, &v_residuals);
+            crate::encode::reconstruct_block(&mut v_plane, uv_w, uv_x, uv_y, 32, &v_pred_block, &v_residuals);
         }
     }
 

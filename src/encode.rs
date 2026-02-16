@@ -226,6 +226,19 @@ pub enum IntraMode {
     PaethPred = 4,
 }
 
+impl IntraMode {
+    pub fn from_index(idx: u8) -> Self {
+        match idx {
+            0 => IntraMode::DcPred,
+            1 => IntraMode::SmoothPred,
+            2 => IntraMode::SmoothVPred,
+            3 => IntraMode::SmoothHPred,
+            4 => IntraMode::PaethPred,
+            _ => IntraMode::DcPred,
+        }
+    }
+}
+
 const SMOOTH_WEIGHTS_32: [u16; 32] = [
     255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74,
     66, 59, 52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
@@ -311,6 +324,26 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
                 has_above: true,
                 has_left: true,
             }
+        }
+    }
+}
+
+pub fn predict_dc(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> u8 {
+    let refs = get_ref_pixels(recon, stride, x, y, bsize);
+    match (refs.has_above, refs.has_left) {
+        (false, false) => 128,
+        (true, false) => {
+            let sum: u32 = refs.above.iter().map(|&v| v as u32).sum();
+            ((sum + bsize as u32 / 2) / bsize as u32) as u8
+        }
+        (false, true) => {
+            let sum: u32 = refs.left.iter().map(|&v| v as u32).sum();
+            ((sum + bsize as u32 / 2) / bsize as u32) as u8
+        }
+        (true, true) => {
+            let sum: u32 = refs.above.iter().map(|&v| v as u32).sum::<u32>()
+                + refs.left.iter().map(|&v| v as u32).sum::<u32>();
+            ((sum + bsize as u32) / (2 * bsize as u32)) as u8
         }
     }
 }
@@ -415,6 +448,18 @@ fn predict_block(refs: &RefPixels, bsize: usize, mode: IntraMode) -> Vec<u8> {
         IntraMode::SmoothHPred => predict_smooth_h_block(refs, bsize),
         IntraMode::PaethPred => predict_paeth_block(refs, bsize),
     }
+}
+
+pub fn predict_intra_block(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    bsize: usize,
+    mode: IntraMode,
+) -> Vec<u8> {
+    let refs = get_ref_pixels(recon, stride, x, y, bsize);
+    predict_block(&refs, bsize, mode)
 }
 
 const ALL_INTRA_MODES: [IntraMode; 5] = [

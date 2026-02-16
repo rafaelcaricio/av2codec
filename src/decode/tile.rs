@@ -20,6 +20,8 @@ pub struct DecodedSbCoeffs {
     pub u_eob: u16,
     pub v_levels: [i32; 1024],
     pub v_eob: u16,
+    pub y_mode: u8,
+    pub uv_mode: u8,
 }
 
 fn get_adaptive_param(ctx: usize) -> u32 {
@@ -553,8 +555,8 @@ pub fn decode_tile_data_multi_sb(
         for sb_col in 0..sb_cols {
             let _partition = ec.decode_symbol(&DO_SPLIT_ICDF);
             let _mode_set = ec.decode_symbol(&Y_MODE_SET_ICDF);
-            let _mode_idx = ec.decode_symbol(&Y_MODE_IDX_ICDF);
-            let _uv_mode = ec.decode_symbol(&UV_MODE_ICDF);
+            let y_mode = ec.decode_symbol(&Y_MODE_IDX_ICDF) as u8;
+            let uv_mode = ec.decode_symbol(&UV_MODE_ICDF) as u8;
 
             let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
             let y_dc_sign_ctx = compute_dc_sign_ctx(y_above, &left_y);
@@ -628,6 +630,8 @@ pub fn decode_tile_data_multi_sb(
                 u_eob,
                 v_levels,
                 v_eob,
+                y_mode,
+                uv_mode,
             });
         }
     }
@@ -682,6 +686,8 @@ mod tests {
             0,
             &[0i32; 1024],
             0,
+            0,
+            0,
         );
         let decoded = decode_tile_data_multi_sb(&data, 1, 1);
         assert_eq!(decoded.len(), 1);
@@ -704,6 +710,8 @@ mod tests {
                     u_eob: 0,
                     v_levels: [0i32; 1024],
                     v_eob: 0,
+                    y_mode: 0,
+                    uv_mode: 0,
                 };
                 sb.y_levels[0] = (i + 1) * 10;
                 sb.y_eob = 1;
@@ -753,6 +761,8 @@ mod tests {
             1,
             &v_levels,
             1,
+            0,
+            0,
         );
         let decoded = decode_tile_data_multi_sb(&data, 1, 1);
         assert_eq!(decoded.len(), 1);

@@ -45,6 +45,8 @@ fn encode_y4m_fixture(fixture_path: &str, out_path: &str, qindex: u8) {
     let status = Command::new("cargo")
         .args([
             "run",
+            "--bin",
+            "wav2c",
             "--",
             fixture_path,
             out_path,
@@ -232,6 +234,8 @@ fn cli_encodes_y4m_fixture() {
     let status = Command::new("cargo")
         .args([
             "run",
+            "--bin",
+            "wav2c",
             "--",
             "tests/fixtures/solid_green_64x64.y4m",
             "/tmp/wav2c_cli_fixture.obu",
@@ -268,6 +272,8 @@ fn cli_encodes_multi_frame_y4m() {
     let status = Command::new("cargo")
         .args([
             "run",
+            "--bin",
+            "wav2c",
             "--",
             "tests/fixtures/multi_gray_64x64_3f.y4m",
             "/tmp/wav2c_cli_multi_fix.obu",
