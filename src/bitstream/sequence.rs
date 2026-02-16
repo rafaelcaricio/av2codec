@@ -19,7 +19,8 @@ pub fn write_sequence_header(config: &SequenceHeaderConfig) -> Vec<u8> {
     w.write_bit(false);
     w.write_literal(0, 3);
     w.write_bit(false);
-    w.write_literal(0, LEVEL_BITS);
+    let level = compute_level(config.width, config.height);
+    w.write_literal(level, LEVEL_BITS);
 
     let num_bits_width = bits_needed(config.width);
     let num_bits_height = bits_needed(config.height);
@@ -53,6 +54,25 @@ pub fn write_sequence_header(config: &SequenceHeaderConfig) -> Vec<u8> {
 
     w.write_trailing_bits();
     w.finalize()
+}
+
+fn compute_level(width: u32, height: u32) -> u32 {
+    let pic_size = (width as u64) * (height as u64);
+    let max_dim = width.max(height);
+    const LEVELS: [(u32, u32, u64, u32); 6] = [
+        (640, 640, 147456, 0),     // SEQ_LEVEL_2_0
+        (880, 880, 278784, 1),     // SEQ_LEVEL_2_1
+        (1360, 1360, 665856, 4),   // SEQ_LEVEL_3_0
+        (1720, 1720, 1065024, 5),  // SEQ_LEVEL_3_1
+        (2560, 2560, 2359296, 8),  // SEQ_LEVEL_4_0
+        (4975, 4975, 8912896, 12), // SEQ_LEVEL_5_0
+    ];
+    for &(max_w, max_h, max_pic, level_idx) in &LEVELS {
+        if width <= max_w && height <= max_h && pic_size <= max_pic && max_dim <= max_w {
+            return level_idx;
+        }
+    }
+    12
 }
 
 fn bits_needed(value: u32) -> u32 {
@@ -116,7 +136,8 @@ fn write_inter_group(w: &mut BitWriter) {
     w.write_bit(true);
 
     w.write_bit(false);
-    w.write_bit(false);
+    w.write_bit(true);
+    w.write_literal(1, 4);
     w.write_literal(0, 3);
 
     write_quniform(w, 5, 0);
@@ -193,7 +214,7 @@ mod tests {
             height: 64,
         };
         let payload = write_sequence_header(&config);
-        assert_eq!(payload.len(), 17, "Expected 17 bytes payload for 64x64");
+        assert_eq!(payload.len(), 18, "Expected 18 bytes payload for 64x64");
     }
 
     #[test]
@@ -247,7 +268,7 @@ mod tests {
         };
         let payload = write_sequence_header(&config);
         let obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &payload);
-        assert_eq!(obu[0], 18);
+        assert_eq!(obu[0], 19);
         assert_eq!((obu[1] >> 2) & 0x1F, 1);
     }
 
