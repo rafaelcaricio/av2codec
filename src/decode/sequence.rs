@@ -6,6 +6,7 @@ const SEQ_LEVEL_4_0: u32 = 8;
 pub struct SequenceParams {
     pub width: u32,
     pub height: u32,
+    pub single_picture_header_flag: bool,
 }
 
 pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeError> {
@@ -33,7 +34,11 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
     let width = r.read_literal(num_bits_width as u8) + 1;
     let height = r.read_literal(num_bits_height as u8) + 1;
 
-    Ok(SequenceParams { width, height })
+    Ok(SequenceParams {
+        width,
+        height,
+        single_picture_header_flag,
+    })
 }
 
 #[cfg(test)]

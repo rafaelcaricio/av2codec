@@ -1,11 +1,6 @@
 use super::bitreader::BitReader;
+use super::sequence::SequenceParams;
 use super::DecodeError;
-
-pub struct FrameParams<'a> {
-    pub base_qindex: u8,
-    pub order_hint: u32,
-    pub tile_data: &'a [u8],
-}
 
 fn tile_log2(blk_size: u32, target: u32) -> u32 {
     let mut k = 0;
@@ -47,10 +42,26 @@ fn parse_tile_info(r: &mut BitReader, width: u32, height: u32) {
     }
 }
 
+pub struct FrameParams<'a> {
+    pub base_qindex: u8,
+    pub order_hint: u32,
+    pub tile_data: &'a [u8],
+}
+
 pub fn parse_frame_header<'a>(
     payload: &'a [u8],
-    width: u32,
-    height: u32,
+    seq: &SequenceParams,
+) -> Result<FrameParams<'a>, DecodeError> {
+    if seq.single_picture_header_flag {
+        parse_frame_header_sph1(payload, seq)
+    } else {
+        parse_frame_header_sph0(payload, seq)
+    }
+}
+
+fn parse_frame_header_sph0<'a>(
+    payload: &'a [u8],
+    seq: &SequenceParams,
 ) -> Result<FrameParams<'a>, DecodeError> {
     let mut r = BitReader::new(payload);
 
@@ -67,7 +78,7 @@ pub fn parse_frame_header<'a>(
 
     let _frame_size_present = r.read_bit();
 
-    parse_tile_info(&mut r, width, height);
+    parse_tile_info(&mut r, seq.width, seq.height);
 
     let base_qindex = r.read_literal(8) as u8;
 
@@ -98,10 +109,75 @@ pub fn parse_frame_header<'a>(
     })
 }
 
+fn parse_frame_header_sph1<'a>(
+    payload: &'a [u8],
+    seq: &SequenceParams,
+) -> Result<FrameParams<'a>, DecodeError> {
+    let mut r = BitReader::new(payload);
+
+    let _mfh_id = r.read_uvlc();
+    let _seq_header_id = r.read_uvlc();
+
+    // sph=1 CLK KEY_FRAME: frame_type, show_existing_frame, order_hint,
+    // refresh_frame_flags are all derived — 0 bits read
+    // setup_frame_size with override=0: 0 bits
+
+    // read_screen_content_params: force_screen_content_tools=2 for sph=1
+    let allow_screen_content_tools = r.read_bit();
+    if allow_screen_content_tools {
+        // force_integer_mv=2 for sph=1
+        let _cur_frame_force_integer_mv = r.read_bit();
+    }
+
+    // read_intrabc_params
+    let allow_intrabc = r.read_bit();
+    if allow_intrabc {
+        let allow_global_intrabc = r.read_bit();
+        if allow_global_intrabc {
+            let _allow_local_intrabc = r.read_bit();
+        }
+    }
+
+    // disable_cdf_update
+    let _disable_cdf_update = r.read_bit();
+
+    // read_tile_info
+    parse_tile_info(&mut r, seq.width, seq.height);
+
+    // setup_quantization: base_qindex (8 bits for 8-bit profile 0)
+    let base_qindex = if r.has_remaining() {
+        r.read_literal(8) as u8
+    } else {
+        0
+    };
+
+    r.skip_to_byte_boundary();
+
+    let tile_data = if r.has_remaining() {
+        r.remaining_bytes()
+    } else {
+        &[]
+    };
+
+    Ok(FrameParams {
+        base_qindex,
+        order_hint: 0,
+        tile_data,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bitstream::{write_clk_obu_payload, FrameHeaderConfig};
+
+    fn sph0_seq(width: u32, height: u32) -> SequenceParams {
+        SequenceParams {
+            width,
+            height,
+            single_picture_header_flag: false,
+        }
+    }
 
     #[test]
     fn roundtrip_64x64_qindex50() {
@@ -113,7 +189,8 @@ mod tests {
         };
         let tile_data = vec![0xAA, 0xBB];
         let payload = write_clk_obu_payload(&config, &tile_data);
-        let params = parse_frame_header(&payload, 64, 64).unwrap();
+        let seq = sph0_seq(64, 64);
+        let params = parse_frame_header(&payload, &seq).unwrap();
         assert_eq!(params.base_qindex, 50);
         assert_eq!(params.order_hint, 0);
         assert_eq!(params.tile_data, &[0xAA, 0xBB]);
@@ -129,7 +206,8 @@ mod tests {
         };
         let tile_data = vec![0x01, 0x02, 0x03, 0x04];
         let payload = write_clk_obu_payload(&config, &tile_data);
-        let params = parse_frame_header(&payload, 128, 128).unwrap();
+        let seq = sph0_seq(128, 128);
+        let params = parse_frame_header(&payload, &seq).unwrap();
         assert_eq!(params.base_qindex, 80);
         assert_eq!(params.order_hint, 5);
         assert_eq!(params.tile_data, &[0x01, 0x02, 0x03, 0x04]);
@@ -145,7 +223,8 @@ mod tests {
         };
         let tile_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
         let payload = write_clk_obu_payload(&config, &tile_data);
-        let params = parse_frame_header(&payload, 256, 192).unwrap();
+        let seq = sph0_seq(256, 192);
+        let params = parse_frame_header(&payload, &seq).unwrap();
         assert_eq!(params.base_qindex, 100);
         assert_eq!(params.order_hint, 3);
         assert_eq!(params.tile_data, &[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE]);
@@ -161,7 +240,8 @@ mod tests {
         };
         let tile_data = vec![0xFF];
         let payload = write_clk_obu_payload(&config, &tile_data);
-        let params = parse_frame_header(&payload, 64, 64).unwrap();
+        let seq = sph0_seq(64, 64);
+        let params = parse_frame_header(&payload, &seq).unwrap();
         assert_eq!(params.base_qindex, 0);
         assert_eq!(params.order_hint, 7);
         assert_eq!(params.tile_data, &[0xFF]);

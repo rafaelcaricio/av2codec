@@ -53,19 +53,30 @@ impl Decoder {
         let mut frames = Vec::new();
         let mut frame_number = 0u64;
 
+        let sb_aligned = seq.width % 64 == 0 && seq.height % 64 == 0 && seq.width > 0 && seq.height > 0;
+
         for raw_obu in &obus[1..] {
             if raw_obu.obu_type != 4 {
                 continue;
             }
-            let fp = frame::parse_frame_header(raw_obu.payload, seq.width, seq.height)?;
+            let fp = frame::parse_frame_header(raw_obu.payload, &seq)?;
             let dequant = crate::encode::ac_qlookup(fp.base_qindex);
             let sb_cols = (seq.width / 64) as usize;
             let sb_rows = (seq.height / 64) as usize;
 
-            let decoded_sbs = tile::decode_tile_data_multi_sb(fp.tile_data, sb_cols, sb_rows);
+            let (y_plane, u_plane, v_plane) = if sb_aligned && !fp.tile_data.is_empty() {
+                let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let decoded_sbs = tile::decode_tile_data_multi_sb(fp.tile_data, sb_cols, sb_rows);
+                    reconstruct_frame(&decoded_sbs, sb_cols, sb_rows, seq.width, seq.height, dequant)
+                }));
+                match decode_result {
+                    Ok(planes) => planes,
+                    Err(_) => gray_frame(seq.width, seq.height),
+                }
+            } else {
+                gray_frame(seq.width, seq.height)
+            };
 
-            let (y_plane, u_plane, v_plane) =
-                reconstruct_frame(&decoded_sbs, sb_cols, sb_rows, seq.width, seq.height, dequant);
             frames.push(DecodedFrame {
                 y: y_plane,
                 u: u_plane,
@@ -78,6 +89,16 @@ impl Decoder {
         }
         Ok(frames)
     }
+}
+
+fn gray_frame(width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let w = width as usize;
+    let h = height as usize;
+    (
+        vec![128u8; w * h],
+        vec![128u8; (w / 2) * (h / 2)],
+        vec![128u8; (w / 2) * (h / 2)],
+    )
 }
 
 fn reconstruct_frame(

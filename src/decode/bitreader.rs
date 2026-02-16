@@ -75,6 +75,14 @@ impl<'a> BitReader<'a> {
             self.byte_pos += 1;
         }
     }
+
+    pub fn has_remaining(&self) -> bool {
+        self.byte_pos < self.data.len()
+    }
+
+    pub fn total_bits_read(&self) -> usize {
+        self.byte_pos * 8 + self.bit_pos as usize
+    }
 }
 
 pub fn decode_leb128(data: &[u8]) -> (u32, usize) {
