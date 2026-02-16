@@ -335,4 +335,49 @@ mod tests {
             "Gradient input should produce nonzero AC coefficients"
         );
     }
+
+    #[test]
+    fn inverse_dct2_32x32_dc_only() {
+        let r = 21;
+        let mut coeffs = [0i32; 1024];
+        coeffs[0] = 128 * r;
+        let output = inverse_dct2_32x32(&coeffs);
+        for (i, &val) in output.iter().enumerate() {
+            assert_eq!(val, r, "pixel {} should be {} but got {}", i, r, val);
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_64x64_dc_only() {
+        let r = 21;
+        let mut coeffs = [0i32; 1024];
+        coeffs[0] = 128 * r;
+        let output = inverse_dct2_64x64(&coeffs);
+        for (i, &val) in output.iter().enumerate() {
+            assert_eq!(val, r, "pixel {} should be {} but got {}", i, r, val);
+        }
+    }
+
+    #[test]
+    fn inverse_dct2_32x32_roundtrip() {
+        let mut residual = [0i32; 1024];
+        for row in 0..32 {
+            for col in 0..32 {
+                residual[row * 32 + col] = (row as i32 * 3 + col as i32) % 50 - 25;
+            }
+        }
+        let coeffs = forward_dct2_32x32(&residual);
+        let reconstructed = inverse_dct2_32x32(&coeffs);
+        for i in 0..1024 {
+            let diff = (residual[i] - reconstructed[i]).abs();
+            assert!(
+                diff <= 1,
+                "roundtrip mismatch at {}: expected {}, got {} (diff {})",
+                i,
+                residual[i],
+                reconstructed[i],
+                diff
+            );
+        }
+    }
 }
