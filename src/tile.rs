@@ -272,15 +272,22 @@ struct PlaneCoeffs<'a> {
     eob: u16,
 }
 
-fn encode_plane_full(
-    ec: &mut DaalaCoder,
-    coeffs: &PlaneCoeffs,
+struct PlaneEncodeCtx<'a> {
     plane: usize,
     txs_ctx_idx: usize,
     bwl: u32,
     height: usize,
-    txb_skip_icdf: &[u16],
-) {
+    txb_skip_icdf: &'a [u16],
+    dc_sign_ctx: usize,
+}
+
+fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncodeCtx) {
+    let plane = ctx.plane;
+    let txs_ctx_idx = ctx.txs_ctx_idx;
+    let bwl = ctx.bwl;
+    let height = ctx.height;
+    let txb_skip_icdf = ctx.txb_skip_icdf;
+    let dc_sign_ctx = ctx.dc_sign_ctx;
     let eob = coeffs.eob;
 
     if eob == 0 {
@@ -466,7 +473,7 @@ fn encode_plane_full(
 
         if is_dc_2d {
             if plane == 0 {
-                ec.encode_symbol(if level < 0 { 1 } else { 0 }, &DC_SIGN_Y_ICDF[0]);
+                ec.encode_symbol(if level < 0 { 1 } else { 0 }, &DC_SIGN_Y_ICDF[dc_sign_ctx]);
             } else {
                 ec.encode_literal(if level < 0 { 1 } else { 0 }, 1);
             }
@@ -498,13 +505,19 @@ pub fn encode_tile_data_with_coeffs(
         levels: y_levels,
         eob: y_eob,
     };
-    encode_plane_full(&mut ec, &y_coeffs, 0, 1, 5, 32, &TXB_SKIP_Y_ICDF);
+    encode_plane_full(&mut ec, &y_coeffs, &PlaneEncodeCtx {
+        plane: 0, txs_ctx_idx: 1, bwl: 5, height: 32,
+        txb_skip_icdf: &TXB_SKIP_Y_ICDF, dc_sign_ctx: 0,
+    });
 
     let u_coeffs = PlaneCoeffs {
         levels: u_levels,
         eob: u_eob,
     };
-    encode_plane_full(&mut ec, &u_coeffs, 1, 0, 5, 32, &TXB_SKIP_U_ICDF);
+    encode_plane_full(&mut ec, &u_coeffs, &PlaneEncodeCtx {
+        plane: 1, txs_ctx_idx: 0, bwl: 5, height: 32,
+        txb_skip_icdf: &TXB_SKIP_U_ICDF, dc_sign_ctx: 0,
+    });
 
     let v_skip_icdf = if u_eob > 0 {
         &TXB_SKIP_V_U_NONZERO_ICDF
@@ -515,7 +528,10 @@ pub fn encode_tile_data_with_coeffs(
         levels: v_levels,
         eob: v_eob,
     };
-    encode_plane_full(&mut ec, &v_coeffs, 2, 0, 5, 32, v_skip_icdf);
+    encode_plane_full(&mut ec, &v_coeffs, &PlaneEncodeCtx {
+        plane: 2, txs_ctx_idx: 0, bwl: 5, height: 32,
+        txb_skip_icdf: v_skip_icdf, dc_sign_ctx: 0,
+    });
 
     ec.done()
 }
@@ -535,6 +551,143 @@ pub fn encode_tile_data_with_dc(y_dc_level: i32, u_dc_level: i32, v_dc_level: i3
 
 pub fn encode_tile_data() -> Vec<u8> {
     encode_tile_data_with_dc(0, 0, 0)
+}
+
+const COEFF_CONTEXT_BITS: u32 = 3;
+const COEFF_CONTEXT_MASK: u8 = (1 << COEFF_CONTEXT_BITS) - 1;
+
+pub struct SbCoeffs {
+    pub y_levels: [i32; 1024],
+    pub y_eob: u16,
+    pub u_levels: [i32; 1024],
+    pub u_eob: u16,
+    pub v_levels: [i32; 1024],
+    pub v_eob: u16,
+}
+
+fn compute_cul_level(levels: &[i32], eob: u16) -> u8 {
+    if eob == 0 {
+        return 0;
+    }
+    let mut sum = 0u32;
+    for item in levels.iter().take(eob as usize) {
+        sum += item.unsigned_abs();
+    }
+    let mut cul = sum.min(COEFF_CONTEXT_MASK as u32) as u8;
+    let dc = levels[0];
+    if dc < 0 {
+        cul |= 1 << COEFF_CONTEXT_BITS;
+    } else if dc > 0 {
+        cul += 2 << COEFF_CONTEXT_BITS;
+    }
+    cul
+}
+
+fn compute_entropy_ctx(above: &[u8], left: &[u8]) -> usize {
+    let above_nz = above.iter().any(|&x| x != 0) as usize;
+    let left_nz = left.iter().any(|&x| x != 0) as usize;
+    above_nz + left_nz
+}
+
+fn compute_dc_sign_ctx(above: &[u8], left: &[u8]) -> usize {
+    const SIGNS: [i32; 3] = [0, -1, 1];
+    let mut dc_sign = 0i32;
+    for &a in above {
+        let sign = (a >> COEFF_CONTEXT_BITS) as usize;
+        dc_sign += SIGNS[sign.min(2)];
+    }
+    for &l in left {
+        let sign = (l >> COEFF_CONTEXT_BITS) as usize;
+        dc_sign += SIGNS[sign.min(2)];
+    }
+    if dc_sign < 0 {
+        1
+    } else if dc_sign > 0 {
+        2
+    } else {
+        0
+    }
+}
+
+pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCoeffs]) -> Vec<u8> {
+    let mut ec = DaalaCoder::new();
+
+    let mut above_y = vec![0u8; sb_cols * 16];
+    let mut above_u = vec![0u8; sb_cols * 8];
+    let mut above_v = vec![0u8; sb_cols * 8];
+
+    for sb_row in 0..sb_rows {
+        let mut left_y = [0u8; 16];
+        let mut left_u = [0u8; 8];
+        let mut left_v = [0u8; 8];
+
+        for sb_col in 0..sb_cols {
+            let sb = &sb_grid[sb_row * sb_cols + sb_col];
+
+            ec.encode_symbol(0, &DO_SPLIT_ICDF);
+            ec.encode_symbol(0, &Y_MODE_SET_ICDF);
+            ec.encode_symbol(0, &Y_MODE_IDX_ICDF);
+            ec.encode_symbol(0, &UV_MODE_ICDF);
+
+            let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
+            let y_dc_sign_ctx = compute_dc_sign_ctx(y_above, &left_y);
+            let y_coeffs = PlaneCoeffs {
+                levels: &sb.y_levels,
+                eob: sb.y_eob,
+            };
+            encode_plane_full(&mut ec, &y_coeffs, &PlaneEncodeCtx {
+                plane: 0, txs_ctx_idx: 1, bwl: 5, height: 32,
+                txb_skip_icdf: &TXB_SKIP_Y_ICDF, dc_sign_ctx: y_dc_sign_ctx,
+            });
+
+            let y_cul = compute_cul_level(&sb.y_levels, sb.y_eob);
+            for v in &mut above_y[sb_col * 16..(sb_col + 1) * 16] {
+                *v = y_cul;
+            }
+            left_y.fill(y_cul);
+
+            let u_above = &above_u[sb_col * 8..(sb_col + 1) * 8];
+            let u_entropy_ctx = compute_entropy_ctx(u_above, &left_u);
+            let u_coeffs = PlaneCoeffs {
+                levels: &sb.u_levels,
+                eob: sb.u_eob,
+            };
+            encode_plane_full(&mut ec, &u_coeffs, &PlaneEncodeCtx {
+                plane: 1, txs_ctx_idx: 0, bwl: 5, height: 32,
+                txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx], dc_sign_ctx: 0,
+            });
+
+            let u_cul = compute_cul_level(&sb.u_levels, sb.u_eob);
+            for v in &mut above_u[sb_col * 8..(sb_col + 1) * 8] {
+                *v = u_cul;
+            }
+            left_u.fill(u_cul);
+
+            let v_above = &above_v[sb_col * 8..(sb_col + 1) * 8];
+            let v_entropy_ctx = compute_entropy_ctx(v_above, &left_v);
+            let v_skip_icdf = if sb.u_eob > 0 {
+                &TXB_SKIP_V_U_NONZERO_CTX_ICDF[v_entropy_ctx]
+            } else {
+                &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx]
+            };
+            let v_coeffs = PlaneCoeffs {
+                levels: &sb.v_levels,
+                eob: sb.v_eob,
+            };
+            encode_plane_full(&mut ec, &v_coeffs, &PlaneEncodeCtx {
+                plane: 2, txs_ctx_idx: 0, bwl: 5, height: 32,
+                txb_skip_icdf: v_skip_icdf, dc_sign_ctx: 0,
+            });
+
+            let v_cul = compute_cul_level(&sb.v_levels, sb.v_eob);
+            for v in &mut above_v[sb_col * 8..(sb_col + 1) * 8] {
+                *v = v_cul;
+            }
+            left_v.fill(v_cul);
+        }
+    }
+
+    ec.done()
 }
 
 #[cfg(test)]
@@ -634,5 +787,139 @@ mod tests {
     fn is_lf_dc_is_lf() {
         assert!(is_lf_2d(0, 0, 0));
         assert!(is_lf_2d(0, 0, 1));
+    }
+
+    #[test]
+    fn compute_cul_level_zero() {
+        let levels = [0i32; 1024];
+        assert_eq!(compute_cul_level(&levels, 0), 0);
+    }
+
+    #[test]
+    fn compute_cul_level_positive_dc() {
+        let mut levels = [0i32; 1024];
+        levels[0] = 5;
+        let cul = compute_cul_level(&levels, 1);
+        assert_eq!(cul & COEFF_CONTEXT_MASK, 5);
+        assert_eq!(cul >> COEFF_CONTEXT_BITS, 2);
+    }
+
+    #[test]
+    fn compute_cul_level_negative_dc() {
+        let mut levels = [0i32; 1024];
+        levels[0] = -3;
+        let cul = compute_cul_level(&levels, 1);
+        assert_eq!(cul & COEFF_CONTEXT_MASK, 3);
+        assert_eq!(cul >> COEFF_CONTEXT_BITS, 1);
+    }
+
+    #[test]
+    fn compute_cul_level_clamped() {
+        let mut levels = [0i32; 1024];
+        levels[0] = 100;
+        let cul = compute_cul_level(&levels, 1);
+        assert_eq!(cul & COEFF_CONTEXT_MASK, 7);
+    }
+
+    #[test]
+    fn entropy_ctx_both_zero() {
+        assert_eq!(compute_entropy_ctx(&[0, 0, 0, 0], &[0, 0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn entropy_ctx_above_nonzero() {
+        assert_eq!(compute_entropy_ctx(&[1, 0, 0, 0], &[0, 0, 0, 0]), 1);
+    }
+
+    #[test]
+    fn entropy_ctx_both_nonzero() {
+        assert_eq!(compute_entropy_ctx(&[1, 0, 0, 0], &[0, 0, 1, 0]), 2);
+    }
+
+    #[test]
+    fn dc_sign_ctx_all_zero() {
+        assert_eq!(compute_dc_sign_ctx(&[0; 16], &[0; 16]), 0);
+    }
+
+    #[test]
+    fn dc_sign_ctx_positive() {
+        let mut above = [0u8; 16];
+        above.fill(2 << COEFF_CONTEXT_BITS | 1);
+        assert_eq!(compute_dc_sign_ctx(&above, &[0; 16]), 2);
+    }
+
+    #[test]
+    fn dc_sign_ctx_negative() {
+        let mut left = [0u8; 16];
+        left.fill(1 << COEFF_CONTEXT_BITS | 1);
+        assert_eq!(compute_dc_sign_ctx(&[0; 16], &left), 1);
+    }
+
+    #[test]
+    fn multi_sb_1x1_matches_single_sb() {
+        let mut sb = SbCoeffs {
+            y_levels: [0i32; 1024],
+            y_eob: 0,
+            u_levels: [0i32; 1024],
+            u_eob: 0,
+            v_levels: [0i32; 1024],
+            v_eob: 0,
+        };
+        sb.y_levels[0] = 50;
+        sb.y_eob = 1;
+        sb.u_levels[0] = -10;
+        sb.u_eob = 1;
+
+        let single = encode_tile_data_with_coeffs(
+            &sb.y_levels,
+            sb.y_eob,
+            &sb.u_levels,
+            sb.u_eob,
+            &sb.v_levels,
+            sb.v_eob,
+        );
+        let multi = encode_tile_data_multi_sb(1, 1, &[sb]);
+        assert_eq!(single, multi, "1x1 multi-SB should match single-SB encoding");
+    }
+
+    #[test]
+    fn multi_sb_2x2_nonempty() {
+        let sbs: Vec<SbCoeffs> = (0..4)
+            .map(|_| SbCoeffs {
+                y_levels: [0i32; 1024],
+                y_eob: 0,
+                u_levels: [0i32; 1024],
+                u_eob: 0,
+                v_levels: [0i32; 1024],
+                v_eob: 0,
+            })
+            .collect();
+        let data = encode_tile_data_multi_sb(2, 2, &sbs);
+        assert!(!data.is_empty());
+    }
+
+    #[test]
+    fn multi_sb_2x2_with_coeffs() {
+        let sbs: Vec<SbCoeffs> = (0..4)
+            .map(|i| {
+                let mut sb = SbCoeffs {
+                    y_levels: [0i32; 1024],
+                    y_eob: 0,
+                    u_levels: [0i32; 1024],
+                    u_eob: 0,
+                    v_levels: [0i32; 1024],
+                    v_eob: 0,
+                };
+                sb.y_levels[0] = (i + 1) * 10;
+                sb.y_eob = 1;
+                sb.u_levels[0] = (i + 1) * 5;
+                sb.u_eob = 1;
+                sb.v_levels[0] = (i + 1) * 3;
+                sb.v_eob = 1;
+                sb
+            })
+            .collect();
+        let data = encode_tile_data_multi_sb(2, 2, &sbs);
+        assert!(!data.is_empty());
     }
 }

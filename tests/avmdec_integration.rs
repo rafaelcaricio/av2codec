@@ -406,6 +406,80 @@ fn avmdec_gradient_psnr() {
 
 #[test]
 #[ignore]
+fn avmdec_decodes_128x128_solid_green() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let y_plane = vec![149u8; 128 * 128];
+    let u_plane = vec![43u8; 64 * 64];
+    let v_plane = vec![21u8; 64 * 64];
+    let bs = wav2c::encode::encode_video_yuv(128, 128, 50, &[(y_plane, u_plane, v_plane)]);
+    fs::write("/tmp/wav2c_test_128x128_green.obu", &bs).unwrap();
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_test_128x128_green.obu",
+        "/tmp/wav2c_test_128x128_green_out.yuv",
+    );
+
+    let y_size = 128 * 128;
+    let uv_size = 64 * 64;
+    assert_eq!(decoded.len(), y_size + 2 * uv_size);
+
+    let y_pixel = decoded[0];
+    let u_pixel = decoded[y_size];
+    let v_pixel = decoded[y_size + uv_size];
+
+    eprintln!(
+        "128x128 Input Y=149 U=43 V=21, Decoded Y={} U={} V={}",
+        y_pixel, u_pixel, v_pixel
+    );
+
+    assert_eq!(y_pixel, 149, "Y pixel should be 149, got {}", y_pixel);
+    assert_eq!(u_pixel, 43, "U pixel should be 43, got {}", u_pixel);
+    assert_eq!(v_pixel, 21, "V pixel should be 21, got {}", v_pixel);
+}
+
+#[test]
+#[ignore]
+fn avmdec_decodes_256x128_solid_red() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let y_plane = vec![81u8; 256 * 128];
+    let u_plane = vec![90u8; 128 * 64];
+    let v_plane = vec![240u8; 128 * 64];
+    let bs = wav2c::encode::encode_video_yuv(256, 128, 50, &[(y_plane, u_plane, v_plane)]);
+    fs::write("/tmp/wav2c_test_256x128_red.obu", &bs).unwrap();
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_test_256x128_red.obu",
+        "/tmp/wav2c_test_256x128_red_out.yuv",
+    );
+
+    let y_size = 256 * 128;
+    let uv_size = 128 * 64;
+    assert_eq!(decoded.len(), y_size + 2 * uv_size);
+
+    let dy = decoded[0];
+    let du = decoded[y_size];
+    let dv = decoded[y_size + uv_size];
+
+    eprintln!(
+        "256x128 Input Y=81 U=90 V=240, Decoded Y={} U={} V={}",
+        dy, du, dv
+    );
+
+    assert_eq!(dy, 81, "Y pixel mismatch");
+    assert_eq!(du, 90, "U pixel mismatch");
+    assert_eq!(dv, 240, "V pixel mismatch");
+}
+
+#[test]
+#[ignore]
 fn avmdec_testsrc2_psnr() {
     if !avmdec_available() {
         eprintln!("avmdec not found, skipping");

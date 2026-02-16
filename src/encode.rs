@@ -7,6 +7,7 @@ use crate::bitstream::{
 use crate::dct;
 use crate::scan::DEFAULT_SCAN_32X32;
 use crate::tile;
+use crate::tile::SbCoeffs;
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -18,7 +19,11 @@ impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EncodeError::InvalidDimensions { width, height } => {
-                write!(f, "invalid dimensions: {}x{} (must be 64x64)", width, height)
+                write!(
+                    f,
+                    "invalid dimensions: {}x{} (must be multiples of 64)",
+                    width, height
+                )
             }
             EncodeError::InvalidPlaneSize { plane, expected, got } => {
                 write!(f, "{} plane size mismatch: expected {}, got {}", plane, expected, got)
@@ -45,7 +50,7 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(width: u32, height: u32, base_qindex: u8) -> Result<Self, EncodeError> {
-        if width != 64 || height != 64 {
+        if width == 0 || height == 0 || !width.is_multiple_of(64) || !height.is_multiple_of(64) {
             return Err(EncodeError::InvalidDimensions { width, height });
         }
         Ok(Self {
@@ -89,7 +94,18 @@ impl Encoder {
             return Err(EncodeError::InvalidPlaneSize { plane: "V", expected: uv_size, got: v.len() });
         }
 
-        let clk_obu = encode_frame_yuv(y, u, v, self.dequant, self.base_qindex, self.order_hint);
+        let clk_obu = encode_frame_yuv(
+            y,
+            u,
+            v,
+            &FrameEncodeParams {
+                width: self.width,
+                height: self.height,
+                dequant: self.dequant,
+                base_qindex: self.base_qindex,
+                order_hint: self.order_hint,
+            },
+        );
 
         let frame_number = self.order_hint as u64;
         self.order_hint += 1;
@@ -110,38 +126,81 @@ impl Encoder {
     }
 }
 
-fn encode_frame_yuv(
-    y_plane: &[u8],
-    u_plane: &[u8],
-    v_plane: &[u8],
-    dequant: i32,
-    base_qindex: u8,
-    order_hint: u32,
-) -> Vec<u8> {
-    let y_residual = compute_residual_block(y_plane, 64, 64);
+fn extract_subblock(plane: &[u8], frame_w: usize, x: usize, y: usize, bw: usize, bh: usize) -> Vec<u8> {
+    let mut block = vec![0u8; bw * bh];
+    for row in 0..bh {
+        let src_offset = (y + row) * frame_w + x;
+        let dst_offset = row * bw;
+        block[dst_offset..dst_offset + bw].copy_from_slice(&plane[src_offset..src_offset + bw]);
+    }
+    block
+}
+
+fn encode_sb_coeffs(y_block: &[u8], u_block: &[u8], v_block: &[u8], dequant: i32) -> SbCoeffs {
+    let y_residual = compute_residual_block(y_block, 64, 64);
     let mut y_residual_arr = [0i32; 4096];
     y_residual_arr.copy_from_slice(&y_residual);
     let y_dct = dct::forward_dct2_64x64(&y_residual_arr);
     let (y_levels, y_eob) = quantize_block(&y_dct, dequant, 2);
 
-    let u_residual = compute_residual_block(u_plane, 32, 32);
+    let u_residual = compute_residual_block(u_block, 32, 32);
     let mut u_residual_arr = [0i32; 1024];
     u_residual_arr.copy_from_slice(&u_residual);
     let u_dct = dct::forward_dct2_32x32(&u_residual_arr);
     let (u_levels, u_eob) = quantize_block(&u_dct, dequant, 1);
 
-    let v_residual = compute_residual_block(v_plane, 32, 32);
+    let v_residual = compute_residual_block(v_block, 32, 32);
     let mut v_residual_arr = [0i32; 1024];
     v_residual_arr.copy_from_slice(&v_residual);
     let v_dct = dct::forward_dct2_32x32(&v_residual_arr);
     let (v_levels, v_eob) = quantize_block(&v_dct, dequant, 1);
 
-    let tile_data = tile::encode_tile_data_with_coeffs(
-        &y_levels, y_eob, &u_levels, u_eob, &v_levels, v_eob,
-    );
+    SbCoeffs {
+        y_levels,
+        y_eob,
+        u_levels,
+        u_eob,
+        v_levels,
+        v_eob,
+    }
+}
+
+struct FrameEncodeParams {
+    width: u32,
+    height: u32,
+    dequant: i32,
+    base_qindex: u8,
+    order_hint: u32,
+}
+
+fn encode_frame_yuv(
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    params: &FrameEncodeParams,
+) -> Vec<u8> {
+    let w = params.width as usize;
+    let h = params.height as usize;
+    let sb_cols = w / 64;
+    let sb_rows = h / 64;
+    let uv_w = w / 2;
+
+    let mut sb_grid = Vec::with_capacity(sb_cols * sb_rows);
+    for sb_row in 0..sb_rows {
+        for sb_col in 0..sb_cols {
+            let y_block = extract_subblock(y_plane, w, sb_col * 64, sb_row * 64, 64, 64);
+            let u_block = extract_subblock(u_plane, uv_w, sb_col * 32, sb_row * 32, 32, 32);
+            let v_block = extract_subblock(v_plane, uv_w, sb_col * 32, sb_row * 32, 32, 32);
+            sb_grid.push(encode_sb_coeffs(&y_block, &u_block, &v_block, params.dequant));
+        }
+    }
+
+    let tile_data = tile::encode_tile_data_multi_sb(sb_cols, sb_rows, &sb_grid);
     let frame_config = FrameHeaderConfig {
-        base_qindex,
-        order_hint,
+        width: params.width,
+        height: params.height,
+        base_qindex: params.base_qindex,
+        order_hint: params.order_hint,
     };
     let clk_payload = write_clk_obu_payload(&frame_config, &tile_data);
     ObuWriter::pack_obu(ObuType::Clk, &clk_payload)
@@ -167,6 +226,8 @@ pub fn encode_video(width: u32, height: u32, base_qindex: u8, y_planes: &[Vec<u8
     for (i, _y_plane) in y_planes.iter().enumerate() {
         let tile_data = tile::encode_tile_data();
         let frame_config = FrameHeaderConfig {
+            width,
+            height,
             base_qindex,
             order_hint: i as u32,
         };
@@ -194,7 +255,18 @@ pub fn encode_video_yuv(
     let dequant = ac_qlookup(base_qindex);
 
     for (i, (y_plane, u_plane, v_plane)) in frames.iter().enumerate() {
-        let clk_obu = encode_frame_yuv(y_plane, u_plane, v_plane, dequant, base_qindex, i as u32);
+        let clk_obu = encode_frame_yuv(
+            y_plane,
+            u_plane,
+            v_plane,
+            &FrameEncodeParams {
+                width,
+                height,
+                dequant,
+                base_qindex,
+                order_hint: i as u32,
+            },
+        );
         output.extend_from_slice(&clk_obu);
     }
 
@@ -424,9 +496,16 @@ mod tests {
     }
 
     #[test]
-    fn encoder_new_invalid_dimensions() {
+    fn encoder_new_128x128_valid() {
         let enc = Encoder::new(128, 128, 50);
-        assert!(enc.is_err());
+        assert!(enc.is_ok());
+    }
+
+    #[test]
+    fn encoder_new_invalid_dimensions() {
+        assert!(Encoder::new(100, 100, 50).is_err());
+        assert!(Encoder::new(0, 64, 50).is_err());
+        assert!(Encoder::new(65, 64, 50).is_err());
     }
 
     #[test]
@@ -503,5 +582,78 @@ mod tests {
         let pkt = enc.receive_packet().unwrap();
 
         assert_eq!(pkt.data, batch_clk, "streaming and batch should produce identical CLK OBUs");
+    }
+
+    #[test]
+    fn encoder_128x128_solid_color() {
+        let mut enc = Encoder::new(128, 128, 50).unwrap();
+        let y = vec![200u8; 128 * 128];
+        let u = vec![100u8; 64 * 64];
+        let v = vec![150u8; 64 * 64];
+        enc.send_frame(&y, &u, &v).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        assert!(!pkt.data.is_empty());
+        assert_eq!(pkt.frame_number, 0);
+    }
+
+    #[test]
+    fn encoder_256x128_solid_color() {
+        let mut enc = Encoder::new(256, 128, 50).unwrap();
+        let y = vec![180u8; 256 * 128];
+        let u = vec![60u8; 128 * 64];
+        let v = vec![200u8; 128 * 64];
+        enc.send_frame(&y, &u, &v).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        assert!(!pkt.data.is_empty());
+    }
+
+    #[test]
+    fn encoder_128x128_produces_larger_bitstream() {
+        let bs_64 = encode_video_yuv(
+            64, 64, 50,
+            &[(vec![149u8; 64 * 64], vec![43u8; 32 * 32], vec![21u8; 32 * 32])],
+        );
+        let bs_128 = encode_video_yuv(
+            128, 128, 50,
+            &[(vec![149u8; 128 * 128], vec![43u8; 64 * 64], vec![21u8; 64 * 64])],
+        );
+        assert!(
+            bs_128.len() > bs_64.len(),
+            "128x128 ({} bytes) should be larger than 64x64 ({} bytes)",
+            bs_128.len(),
+            bs_64.len()
+        );
+    }
+
+    #[test]
+    fn encoder_128x128_sb_grid_count() {
+        let w = 128usize;
+        let h = 128usize;
+        let sb_cols = w / 64;
+        let sb_rows = h / 64;
+        assert_eq!(sb_cols * sb_rows, 4);
+    }
+
+    #[test]
+    fn encoder_256x128_sb_grid_count() {
+        let w = 256usize;
+        let h = 128usize;
+        let sb_cols = w / 64;
+        let sb_rows = h / 64;
+        assert_eq!(sb_cols * sb_rows, 8);
+    }
+
+    #[test]
+    fn extract_subblock_full_frame() {
+        let plane: Vec<u8> = (0..16).collect();
+        let block = extract_subblock(&plane, 4, 0, 0, 4, 4);
+        assert_eq!(block, plane);
+    }
+
+    #[test]
+    fn extract_subblock_offset() {
+        let plane: Vec<u8> = (0..64).collect();
+        let block = extract_subblock(&plane, 8, 2, 1, 3, 2);
+        assert_eq!(block, vec![10, 11, 12, 18, 19, 20]);
     }
 }

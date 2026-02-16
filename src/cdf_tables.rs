@@ -267,6 +267,27 @@ pub const EOB_GROUP_START: [u16; 12] = [0, 1, 2, 3, 5, 9, 17, 33, 65, 129, 257, 
 pub const EOB_OFFSET_BITS: [u8; 12] = [0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 #[rustfmt::skip]
+pub const TXB_SKIP_U_CTX_ICDF: [[u16; 2]; 3] = [
+    [31468,     0],
+    [21065,     0],
+    [ 8039,     0],
+];
+
+#[rustfmt::skip]
+pub const TXB_SKIP_V_CTX_ICDF: [[u16; 2]; 3] = [
+    [31329,     0],
+    [26577,     0],
+    [18158,     0],
+];
+
+#[rustfmt::skip]
+pub const TXB_SKIP_V_U_NONZERO_CTX_ICDF: [[u16; 2]; 3] = [
+    [25120,     0],
+    [16620,     0],
+    [ 8203,     0],
+];
+
+#[rustfmt::skip]
 pub const DC_SIGN_UV_ICDF: [u16; 2] = [16384, 0];
 
 #[rustfmt::skip]
@@ -336,6 +357,15 @@ mod tests {
         for row in &DC_SIGN_Y_ICDF {
             assert_eq!(*row.last().unwrap(), 0);
         }
+        for row in &TXB_SKIP_U_CTX_ICDF {
+            assert_eq!(*row.last().unwrap(), 0);
+        }
+        for row in &TXB_SKIP_V_CTX_ICDF {
+            assert_eq!(*row.last().unwrap(), 0);
+        }
+        for row in &TXB_SKIP_V_U_NONZERO_CTX_ICDF {
+            assert_eq!(*row.last().unwrap(), 0);
+        }
     }
 
     #[test]
@@ -391,6 +421,15 @@ mod tests {
         for row in &DC_SIGN_Y_ICDF {
             check_monotonic(row);
         }
+        for row in &TXB_SKIP_U_CTX_ICDF {
+            check_monotonic(row);
+        }
+        for row in &TXB_SKIP_V_CTX_ICDF {
+            check_monotonic(row);
+        }
+        for row in &TXB_SKIP_V_U_NONZERO_CTX_ICDF {
+            check_monotonic(row);
+        }
     }
 
     #[test]
@@ -437,5 +476,21 @@ mod tests {
         for row in &DC_SIGN_Y_ICDF {
             assert!(row[0] < 32768);
         }
+        for row in &TXB_SKIP_U_CTX_ICDF {
+            assert!(row[0] < 32768);
+        }
+        for row in &TXB_SKIP_V_CTX_ICDF {
+            assert!(row[0] < 32768);
+        }
+        for row in &TXB_SKIP_V_U_NONZERO_CTX_ICDF {
+            assert!(row[0] < 32768);
+        }
+    }
+
+    #[test]
+    fn ctx_icdf_base0_matches_single_sb_values() {
+        assert_eq!(TXB_SKIP_U_CTX_ICDF[0], [31468, 0]);
+        assert_eq!(TXB_SKIP_V_CTX_ICDF[0], [31329, 0]);
+        assert_eq!(TXB_SKIP_V_U_NONZERO_CTX_ICDF[0], [25120, 0]);
     }
 }
