@@ -66,7 +66,7 @@ impl Decoder {
 
             let (y_plane, u_plane, v_plane) = if sb_aligned && !fp.tile_data.is_empty() {
                 let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let decoded_sbs = tile::decode_tile_data_multi_sb(fp.tile_data, sb_cols, sb_rows);
+                    let decoded_sbs = tile::decode_tile_data_multi_sb(fp.tile_data, sb_cols, sb_rows, !fp.disable_cdf_update);
                     reconstruct_frame(&decoded_sbs, sb_cols, sb_rows, seq.width, seq.height, dequant)
                 }));
                 match decode_result {

@@ -31,7 +31,7 @@ fn write_uncompressed_header(w: &mut BitWriter, config: &FrameHeaderConfig) {
     w.write_uvlc(0);
 
     w.write_bit(true);
-    w.write_bit(false);
+    w.write_bit(true);
     w.write_literal(config.order_hint, ORDER_HINT_BITS);
 
     w.write_bit(false);

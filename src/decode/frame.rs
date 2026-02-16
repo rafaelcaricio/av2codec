@@ -46,6 +46,7 @@ pub struct FrameParams<'a> {
     pub base_qindex: u8,
     pub order_hint: u32,
     pub tile_data: &'a [u8],
+    pub disable_cdf_update: bool,
 }
 
 pub fn parse_frame_header<'a>(
@@ -71,7 +72,7 @@ fn parse_frame_header_sph0<'a>(
     r.read_uvlc();
 
     let _error_resilient_mode = r.read_bit();
-    let _disable_cdf_update = r.read_bit();
+    let disable_cdf_update = r.read_bit();
     let order_hint = r.read_literal(6);
 
     let _refresh_frame_flags = r.read_bit();
@@ -106,6 +107,7 @@ fn parse_frame_header_sph0<'a>(
         base_qindex,
         order_hint,
         tile_data,
+        disable_cdf_update,
     })
 }
 
@@ -139,7 +141,7 @@ fn parse_frame_header_sph1<'a>(
     }
 
     // disable_cdf_update
-    let _disable_cdf_update = r.read_bit();
+    let disable_cdf_update = r.read_bit();
 
     // read_tile_info
     parse_tile_info(&mut r, seq.width, seq.height);
@@ -163,6 +165,7 @@ fn parse_frame_header_sph1<'a>(
         base_qindex,
         order_hint: 0,
         tile_data,
+        disable_cdf_update,
     })
 }
 
