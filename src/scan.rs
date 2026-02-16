@@ -1,3 +1,49 @@
+use crate::block::TxSize;
+
+pub fn get_scan(tx_size: TxSize) -> &'static [u16] {
+    match tx_size {
+        TxSize::Tx4x4 => &DEFAULT_SCAN_4X4,
+        TxSize::Tx8x8 => &DEFAULT_SCAN_8X8,
+        TxSize::Tx16x16 => &DEFAULT_SCAN_16X16,
+        TxSize::Tx32x32 | TxSize::Tx64x64 => &DEFAULT_SCAN_32X32,
+    }
+}
+
+#[rustfmt::skip]
+pub const DEFAULT_SCAN_4X4: [u16; 16] = [
+    0, 4, 1, 8, 5, 2, 12, 9, 6, 3, 13, 10, 7, 14, 11, 15
+];
+
+#[rustfmt::skip]
+pub const DEFAULT_SCAN_8X8: [u16; 64] = [
+    0, 8, 1, 16, 9, 2, 24, 17, 10, 3, 32, 25, 18, 11, 4, 40,
+    33, 26, 19, 12, 5, 48, 41, 34, 27, 20, 13, 6, 56, 49, 42, 35,
+    28, 21, 14, 7, 57, 50, 43, 36, 29, 22, 15, 58, 51, 44, 37, 30,
+    23, 59, 52, 45, 38, 31, 60, 53, 46, 39, 61, 54, 47, 62, 55, 63,
+];
+
+#[rustfmt::skip]
+pub const DEFAULT_SCAN_16X16: [u16; 256] = [
+    0,   16,  1,   32,  17,  2,   48,  33,  18,  3,   64,  49,  34,  19,  4,
+    80,  65,  50,  35,  20,  5,   96,  81,  66,  51,  36,  21,  6,   112, 97,
+    82,  67,  52,  37,  22,  7,   128, 113, 98,  83,  68,  53,  38,  23,  8,
+    144, 129, 114, 99,  84,  69,  54,  39,  24,  9,   160, 145, 130, 115, 100,
+    85,  70,  55,  40,  25,  10,  176, 161, 146, 131, 116, 101, 86,  71,  56,
+    41,  26,  11,  192, 177, 162, 147, 132, 117, 102, 87,  72,  57,  42,  27,
+    12,  208, 193, 178, 163, 148, 133, 118, 103, 88,  73,  58,  43,  28,  13,
+    224, 209, 194, 179, 164, 149, 134, 119, 104, 89,  74,  59,  44,  29,  14,
+    240, 225, 210, 195, 180, 165, 150, 135, 120, 105, 90,  75,  60,  45,  30,
+    15,  241, 226, 211, 196, 181, 166, 151, 136, 121, 106, 91,  76,  61,  46,
+    31,  242, 227, 212, 197, 182, 167, 152, 137, 122, 107, 92,  77,  62,  47,
+    243, 228, 213, 198, 183, 168, 153, 138, 123, 108, 93,  78,  63,  244, 229,
+    214, 199, 184, 169, 154, 139, 124, 109, 94,  79,  245, 230, 215, 200, 185,
+    170, 155, 140, 125, 110, 95,  246, 231, 216, 201, 186, 171, 156, 141, 126,
+    111, 247, 232, 217, 202, 187, 172, 157, 142, 127, 248, 233, 218, 203, 188,
+    173, 158, 143, 249, 234, 219, 204, 189, 174, 159, 250, 235, 220, 205, 190,
+    175, 251, 236, 221, 206, 191, 252, 237, 222, 207, 253, 238, 223, 254, 239,
+    255,
+];
+
 #[rustfmt::skip]
 pub const DEFAULT_SCAN_32X32: [u16; 1024] = [
     0,   32,   1,    64,   33,  2,   96,   65,  34,   3,    128,  97,  66,  35,
@@ -137,5 +183,90 @@ mod tests {
     #[test]
     fn scan_third_entry_is_col1_row0() {
         assert_eq!(DEFAULT_SCAN_32X32[2], 1);
+    }
+
+    #[test]
+    fn scan_4x4_dc_is_first() {
+        assert_eq!(DEFAULT_SCAN_4X4[0], 0);
+    }
+
+    #[test]
+    fn scan_4x4_all_unique() {
+        let mut seen = [false; 16];
+        for &val in &DEFAULT_SCAN_4X4 {
+            assert!(!seen[val as usize], "dup: {}", val);
+            seen[val as usize] = true;
+        }
+    }
+
+    #[test]
+    fn scan_4x4_all_in_range() {
+        for &val in &DEFAULT_SCAN_4X4 {
+            assert!(val < 16, "out of range: {}", val);
+        }
+    }
+
+    #[test]
+    fn scan_4x4_diagonal_order() {
+        assert_eq!(DEFAULT_SCAN_4X4[1], 4);
+        assert_eq!(DEFAULT_SCAN_4X4[2], 1);
+        assert_eq!(DEFAULT_SCAN_4X4[15], 15);
+    }
+
+    #[test]
+    fn scan_8x8_dc_is_first() {
+        assert_eq!(DEFAULT_SCAN_8X8[0], 0);
+    }
+
+    #[test]
+    fn scan_8x8_all_unique() {
+        let mut seen = [false; 64];
+        for &val in &DEFAULT_SCAN_8X8 {
+            assert!(!seen[val as usize], "dup: {}", val);
+            seen[val as usize] = true;
+        }
+    }
+
+    #[test]
+    fn scan_8x8_all_in_range() {
+        for &val in &DEFAULT_SCAN_8X8 {
+            assert!(val < 64, "out of range: {}", val);
+        }
+    }
+
+    #[test]
+    fn scan_16x16_dc_is_first() {
+        assert_eq!(DEFAULT_SCAN_16X16[0], 0);
+    }
+
+    #[test]
+    fn scan_16x16_all_unique() {
+        let mut seen = [false; 256];
+        for &val in &DEFAULT_SCAN_16X16 {
+            assert!(!seen[val as usize], "dup: {}", val);
+            seen[val as usize] = true;
+        }
+    }
+
+    #[test]
+    fn scan_16x16_all_in_range() {
+        for &val in &DEFAULT_SCAN_16X16 {
+            assert!(val < 256, "out of range: {}", val);
+        }
+    }
+
+    #[test]
+    fn scan_16x16_second_entry() {
+        assert_eq!(DEFAULT_SCAN_16X16[1], 16);
+    }
+
+    #[test]
+    fn get_scan_dispatch() {
+        use crate::block::TxSize;
+        assert_eq!(get_scan(TxSize::Tx4x4).len(), 16);
+        assert_eq!(get_scan(TxSize::Tx8x8).len(), 64);
+        assert_eq!(get_scan(TxSize::Tx16x16).len(), 256);
+        assert_eq!(get_scan(TxSize::Tx32x32).len(), 1024);
+        assert_eq!(get_scan(TxSize::Tx64x64).len(), 1024);
     }
 }
