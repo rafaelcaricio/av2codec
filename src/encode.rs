@@ -11,8 +11,15 @@ use crate::tile::SbCoeffs;
 
 #[derive(Debug)]
 pub enum EncodeError {
-    InvalidDimensions { width: u32, height: u32 },
-    InvalidPlaneSize { plane: &'static str, expected: usize, got: usize },
+    InvalidDimensions {
+        width: u32,
+        height: u32,
+    },
+    InvalidPlaneSize {
+        plane: &'static str,
+        expected: usize,
+        got: usize,
+    },
 }
 
 impl fmt::Display for EncodeError {
@@ -25,8 +32,16 @@ impl fmt::Display for EncodeError {
                     width, height
                 )
             }
-            EncodeError::InvalidPlaneSize { plane, expected, got } => {
-                write!(f, "{} plane size mismatch: expected {}, got {}", plane, expected, got)
+            EncodeError::InvalidPlaneSize {
+                plane,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "{} plane size mismatch: expected {}, got {}",
+                    plane, expected, got
+                )
             }
         }
     }
@@ -85,13 +100,25 @@ impl Encoder {
         let uv_size = (self.width / 2 * self.height / 2) as usize;
 
         if y.len() != y_size {
-            return Err(EncodeError::InvalidPlaneSize { plane: "Y", expected: y_size, got: y.len() });
+            return Err(EncodeError::InvalidPlaneSize {
+                plane: "Y",
+                expected: y_size,
+                got: y.len(),
+            });
         }
         if u.len() != uv_size {
-            return Err(EncodeError::InvalidPlaneSize { plane: "U", expected: uv_size, got: u.len() });
+            return Err(EncodeError::InvalidPlaneSize {
+                plane: "U",
+                expected: uv_size,
+                got: u.len(),
+            });
         }
         if v.len() != uv_size {
-            return Err(EncodeError::InvalidPlaneSize { plane: "V", expected: uv_size, got: v.len() });
+            return Err(EncodeError::InvalidPlaneSize {
+                plane: "V",
+                expected: uv_size,
+                got: v.len(),
+            });
         }
 
         let clk_obu = encode_frame_yuv(
@@ -126,7 +153,14 @@ impl Encoder {
     }
 }
 
-fn extract_subblock(plane: &[u8], frame_w: usize, x: usize, y: usize, bw: usize, bh: usize) -> Vec<u8> {
+fn extract_subblock(
+    plane: &[u8],
+    frame_w: usize,
+    x: usize,
+    y: usize,
+    bw: usize,
+    bh: usize,
+) -> Vec<u8> {
     let mut block = vec![0u8; bw * bh];
     for row in 0..bh {
         let src_offset = (y + row) * frame_w + x;
@@ -191,7 +225,12 @@ fn encode_frame_yuv(
             let y_block = extract_subblock(y_plane, w, sb_col * 64, sb_row * 64, 64, 64);
             let u_block = extract_subblock(u_plane, uv_w, sb_col * 32, sb_row * 32, 32, 32);
             let v_block = extract_subblock(v_plane, uv_w, sb_col * 32, sb_row * 32, 32, 32);
-            sb_grid.push(encode_sb_coeffs(&y_block, &u_block, &v_block, params.dequant));
+            sb_grid.push(encode_sb_coeffs(
+                &y_block,
+                &u_block,
+                &v_block,
+                params.dequant,
+            ));
         }
     }
 
@@ -581,7 +620,10 @@ mod tests {
         enc.send_frame(&y, &u, &v).unwrap();
         let pkt = enc.receive_packet().unwrap();
 
-        assert_eq!(pkt.data, batch_clk, "streaming and batch should produce identical CLK OBUs");
+        assert_eq!(
+            pkt.data, batch_clk,
+            "streaming and batch should produce identical CLK OBUs"
+        );
     }
 
     #[test]
@@ -610,12 +652,24 @@ mod tests {
     #[test]
     fn encoder_128x128_produces_larger_bitstream() {
         let bs_64 = encode_video_yuv(
-            64, 64, 50,
-            &[(vec![149u8; 64 * 64], vec![43u8; 32 * 32], vec![21u8; 32 * 32])],
+            64,
+            64,
+            50,
+            &[(
+                vec![149u8; 64 * 64],
+                vec![43u8; 32 * 32],
+                vec![21u8; 32 * 32],
+            )],
         );
         let bs_128 = encode_video_yuv(
-            128, 128, 50,
-            &[(vec![149u8; 128 * 128], vec![43u8; 64 * 64], vec![21u8; 64 * 64])],
+            128,
+            128,
+            50,
+            &[(
+                vec![149u8; 128 * 128],
+                vec![43u8; 64 * 64],
+                vec![21u8; 64 * 64],
+            )],
         );
         assert!(
             bs_128.len() > bs_64.len(),
