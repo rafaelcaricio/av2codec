@@ -499,6 +499,7 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn encode_tile_data_with_coeffs(
     y_levels: &[i32],
     y_eob: u16,
@@ -506,13 +507,15 @@ pub fn encode_tile_data_with_coeffs(
     u_eob: u16,
     v_levels: &[i32],
     v_eob: u16,
+    y_mode: u8,
+    uv_mode: u8,
 ) -> Vec<u8> {
     let mut ec = DaalaCoder::new();
 
     ec.encode_symbol(0, &DO_SPLIT_ICDF);
     ec.encode_symbol(0, &Y_MODE_SET_ICDF);
-    ec.encode_symbol(0, &Y_MODE_IDX_ICDF);
-    ec.encode_symbol(0, &UV_MODE_ICDF);
+    ec.encode_symbol(y_mode as usize, &Y_MODE_IDX_ICDF);
+    ec.encode_symbol(uv_mode as usize, &UV_MODE_ICDF);
 
     let y_coeffs = PlaneCoeffs {
         levels: y_levels,
@@ -583,7 +586,7 @@ pub fn encode_tile_data_with_dc(y_dc_level: i32, u_dc_level: i32, v_dc_level: i3
     let y_eob = if y_dc_level != 0 { 1u16 } else { 0u16 };
     let u_eob = if u_dc_level != 0 { 1u16 } else { 0u16 };
     let v_eob = if v_dc_level != 0 { 1u16 } else { 0u16 };
-    encode_tile_data_with_coeffs(&y_levels, y_eob, &u_levels, u_eob, &v_levels, v_eob)
+    encode_tile_data_with_coeffs(&y_levels, y_eob, &u_levels, u_eob, &v_levels, v_eob, 0, 0)
 }
 
 pub fn encode_tile_data() -> Vec<u8> {
@@ -600,6 +603,8 @@ pub struct SbCoeffs {
     pub u_eob: u16,
     pub v_levels: [i32; 1024],
     pub v_eob: u16,
+    pub y_mode: u8,
+    pub uv_mode: u8,
 }
 
 fn compute_cul_level(levels: &[i32], eob: u16) -> u8 {
@@ -663,8 +668,8 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
 
             ec.encode_symbol(0, &DO_SPLIT_ICDF);
             ec.encode_symbol(0, &Y_MODE_SET_ICDF);
-            ec.encode_symbol(0, &Y_MODE_IDX_ICDF);
-            ec.encode_symbol(0, &UV_MODE_ICDF);
+            ec.encode_symbol(sb.y_mode as usize, &Y_MODE_IDX_ICDF);
+            ec.encode_symbol(sb.uv_mode as usize, &UV_MODE_ICDF);
 
             let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
             let y_dc_sign_ctx = compute_dc_sign_ctx(y_above, &left_y);
@@ -799,7 +804,7 @@ mod tests {
         levels[0] = 100;
         levels[1] = -20;
         levels[2] = 10;
-        let data = encode_tile_data_with_coeffs(&levels, 3, &[0i32; 1024], 0, &[0i32; 1024], 0);
+        let data = encode_tile_data_with_coeffs(&levels, 3, &[0i32; 1024], 0, &[0i32; 1024], 0, 0, 0);
         assert!(!data.is_empty());
     }
 
@@ -807,7 +812,7 @@ mod tests {
     fn tile_data_eob_1_produces_data() {
         let mut levels = [0i32; 1024];
         levels[0] = 50;
-        let data = encode_tile_data_with_coeffs(&levels, 1, &[0i32; 1024], 0, &[0i32; 1024], 0);
+        let data = encode_tile_data_with_coeffs(&levels, 1, &[0i32; 1024], 0, &[0i32; 1024], 0, 0, 0);
         assert!(!data.is_empty());
     }
 
@@ -925,6 +930,8 @@ mod tests {
             u_eob: 0,
             v_levels: [0i32; 1024],
             v_eob: 0,
+            y_mode: 0,
+            uv_mode: 0,
         };
         sb.y_levels[0] = 50;
         sb.y_eob = 1;
@@ -938,6 +945,8 @@ mod tests {
             sb.u_eob,
             &sb.v_levels,
             sb.v_eob,
+            0,
+            0,
         );
         let multi = encode_tile_data_multi_sb(1, 1, &[sb]);
         assert_eq!(
@@ -956,6 +965,8 @@ mod tests {
                 u_eob: 0,
                 v_levels: [0i32; 1024],
                 v_eob: 0,
+                y_mode: 0,
+                uv_mode: 0,
             })
             .collect();
         let data = encode_tile_data_multi_sb(2, 2, &sbs);
@@ -973,6 +984,8 @@ mod tests {
                     u_eob: 0,
                     v_levels: [0i32; 1024],
                     v_eob: 0,
+                    y_mode: 0,
+                    uv_mode: 0,
                 };
                 sb.y_levels[0] = (i + 1) * 10;
                 sb.y_eob = 1;

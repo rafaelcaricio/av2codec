@@ -471,8 +471,9 @@ fn encode_plane_block_64(
     dequant: i32,
 ) -> ([i32; 1024], u16) {
     let pred = predict_dc(recon, plane_w, x, y, 64);
+    let pred_block = vec![pred; 64 * 64];
     let y_block = extract_subblock(pixels, plane_w, x, y, 64, 64);
-    let residual = compute_residual_block(&y_block, 64, 64, pred);
+    let residual = compute_residual_block(&y_block, &pred_block);
     let mut residual_arr = [0i32; 4096];
     residual_arr.copy_from_slice(&residual);
     let dct_coeffs = dct::forward_dct2_64x64(&residual_arr);
@@ -480,7 +481,7 @@ fn encode_plane_block_64(
 
     let dqcoeffs = dequantize_block(&levels, eob, dequant, 2);
     let inv_residual = dct::inverse_dct2_64x64(&dqcoeffs);
-    reconstruct_block(recon, plane_w, x, y, 64, pred, &inv_residual);
+    reconstruct_block(recon, plane_w, x, y, 64, &pred_block, &inv_residual);
 
     (levels, eob)
 }
@@ -494,8 +495,9 @@ fn encode_plane_block_32(
     dequant: i32,
 ) -> ([i32; 1024], u16) {
     let pred = predict_dc(recon, plane_w, x, y, 32);
+    let pred_block = vec![pred; 32 * 32];
     let uv_block = extract_subblock(pixels, plane_w, x, y, 32, 32);
-    let residual = compute_residual_block(&uv_block, 32, 32, pred);
+    let residual = compute_residual_block(&uv_block, &pred_block);
     let mut residual_arr = [0i32; 1024];
     residual_arr.copy_from_slice(&residual);
     let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
@@ -503,7 +505,7 @@ fn encode_plane_block_32(
 
     let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
     let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
-    reconstruct_block(recon, plane_w, x, y, 32, pred, &inv_residual);
+    reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual);
 
     (levels, eob)
 }
@@ -562,6 +564,8 @@ fn encode_frame_yuv(
                 u_eob,
                 v_levels,
                 v_eob,
+                y_mode: 0,
+                uv_mode: 0,
             });
         }
     }
@@ -662,18 +666,12 @@ pub fn encode_video_yuv(
     output
 }
 
-pub fn compute_residual_block(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    prediction: u8,
-) -> Vec<i32> {
-    let pred = prediction as i32;
-    let mut residual = vec![0i32; width * height];
-    for i in 0..width * height {
-        residual[i] = pixels[i] as i32 - pred;
-    }
-    residual
+pub fn compute_residual_block(pixels: &[u8], pred_block: &[u8]) -> Vec<i32> {
+    pixels
+        .iter()
+        .zip(pred_block.iter())
+        .map(|(&p, &q)| p as i32 - q as i32)
+        .collect()
 }
 
 pub fn quantize_coeff(coeff: i64, log_scale: u32, dequant: i32) -> i32 {
@@ -784,13 +782,14 @@ pub fn reconstruct_block(
     x: usize,
     y: usize,
     bsize: usize,
-    pred: u8,
+    pred_block: &[u8],
     inv_residual: &[i32],
 ) {
-    let pred_i32 = pred as i32;
     for row in 0..bsize {
         for col in 0..bsize {
-            let pixel = (pred_i32 + inv_residual[row * bsize + col]).clamp(0, 255) as u8;
+            let pixel = (pred_block[row * bsize + col] as i32
+                + inv_residual[row * bsize + col])
+                .clamp(0, 255) as u8;
             recon[(y + row) * stride + x + col] = pixel;
         }
     }
@@ -907,14 +906,14 @@ mod tests {
     #[test]
     fn compute_residual_block_midgray() {
         let pixels = vec![128u8; 64];
-        let residual = compute_residual_block(&pixels, 8, 8, 128);
+        let residual = compute_residual_block(&pixels, &[128u8; 64]);
         assert!(residual.iter().all(|&r| r == 0));
     }
 
     #[test]
     fn compute_residual_block_values() {
         let pixels = vec![200u8; 4];
-        let residual = compute_residual_block(&pixels, 2, 2, 128);
+        let residual = compute_residual_block(&pixels, &[128u8; 4]);
         assert!(residual.iter().all(|&r| r == 72));
     }
 
@@ -948,7 +947,7 @@ mod tests {
     #[test]
     fn solid_color_dct_produces_dc_only() {
         let pixels = vec![200u8; 32 * 32];
-        let residual = compute_residual_block(&pixels, 32, 32, 128);
+        let residual = compute_residual_block(&pixels, &vec![128u8; 32 * 32]);
         let mut residual_arr = [0i32; 1024];
         residual_arr.copy_from_slice(&residual);
         let dct_coeffs = crate::dct::forward_dct2_32x32(&residual_arr);
@@ -1229,7 +1228,7 @@ mod tests {
     fn reconstruct_block_basic() {
         let mut recon = vec![0u8; 4];
         let inv_residual = [10i32, 20, -5, 30];
-        reconstruct_block(&mut recon, 2, 0, 0, 2, 128, &inv_residual);
+        reconstruct_block(&mut recon, 2, 0, 0, 2, &[128u8; 4], &inv_residual);
         assert_eq!(recon, vec![138, 148, 123, 158]);
     }
 
@@ -1237,7 +1236,7 @@ mod tests {
     fn reconstruct_block_clamps() {
         let mut recon = vec![0u8; 4];
         let inv_residual = [200i32, -200, 0, 0];
-        reconstruct_block(&mut recon, 2, 0, 0, 2, 128, &inv_residual);
+        reconstruct_block(&mut recon, 2, 0, 0, 2, &[128u8; 4], &inv_residual);
         assert_eq!(recon[0], 255);
         assert_eq!(recon[1], 0);
     }
@@ -1245,7 +1244,7 @@ mod tests {
     #[test]
     fn compute_residual_block_custom_prediction() {
         let pixels = vec![200u8; 4];
-        let residual = compute_residual_block(&pixels, 2, 2, 150);
+        let residual = compute_residual_block(&pixels, &[150u8; 4]);
         assert!(residual.iter().all(|&r| r == 50));
     }
 
