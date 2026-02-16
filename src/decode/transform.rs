@@ -84,7 +84,7 @@ mod tests {
     fn dequantize_block_solid_32x32() {
         let pixel_val = 200u8;
         let pixels = vec![pixel_val; 32 * 32];
-        let residual = compute_residual_block(&pixels, 32, 32);
+        let residual = compute_residual_block(&pixels, 32, 32, 128);
         let mut residual_arr = [0i32; 1024];
         residual_arr.copy_from_slice(&residual);
         let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
@@ -112,7 +112,7 @@ mod tests {
     fn dequantize_block_solid_64x64() {
         let pixel_val = 149u8;
         let pixels = vec![pixel_val; 64 * 64];
-        let residual = compute_residual_block(&pixels, 64, 64);
+        let residual = compute_residual_block(&pixels, 64, 64, 128);
         let mut residual_arr = [0i32; 4096];
         residual_arr.copy_from_slice(&residual);
         let dct_coeffs = dct::forward_dct2_64x64(&residual_arr);

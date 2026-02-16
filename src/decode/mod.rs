@@ -90,40 +90,34 @@ fn reconstruct_frame(
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let w = width as usize;
     let h = height as usize;
+    let uv_w = w / 2;
+    let uv_h = h / 2;
     let mut y_plane = vec![0u8; w * h];
-    let mut u_plane = vec![0u8; (w / 2) * (h / 2)];
-    let mut v_plane = vec![0u8; (w / 2) * (h / 2)];
+    let mut u_plane = vec![0u8; uv_w * uv_h];
+    let mut v_plane = vec![0u8; uv_w * uv_h];
 
     for sb_row in 0..sb_rows {
         for sb_col in 0..sb_cols {
             let sb = &sbs[sb_row * sb_cols + sb_col];
 
+            let y_x = sb_col * 64;
+            let y_y = sb_row * 64;
+            let y_pred = crate::encode::predict_dc(&y_plane, w, y_x, y_y, 64);
             let y_residuals =
                 transform::dequantize_and_inverse(&sb.y_levels, sb.y_eob, dequant, 2, true);
-            for row in 0..64 {
-                for col in 0..64 {
-                    let px = (y_residuals[row * 64 + col] + 128).clamp(0, 255) as u8;
-                    y_plane[(sb_row * 64 + row) * w + sb_col * 64 + col] = px;
-                }
-            }
+            crate::encode::reconstruct_block(&mut y_plane, w, y_x, y_y, 64, y_pred, &y_residuals);
 
+            let uv_x = sb_col * 32;
+            let uv_y = sb_row * 32;
+            let u_pred = crate::encode::predict_dc(&u_plane, uv_w, uv_x, uv_y, 32);
             let u_residuals =
                 transform::dequantize_and_inverse(&sb.u_levels, sb.u_eob, dequant, 1, false);
-            for row in 0..32 {
-                for col in 0..32 {
-                    let px = (u_residuals[row * 32 + col] + 128).clamp(0, 255) as u8;
-                    u_plane[(sb_row * 32 + row) * (w / 2) + sb_col * 32 + col] = px;
-                }
-            }
+            crate::encode::reconstruct_block(&mut u_plane, uv_w, uv_x, uv_y, 32, u_pred, &u_residuals);
 
+            let v_pred = crate::encode::predict_dc(&v_plane, uv_w, uv_x, uv_y, 32);
             let v_residuals =
                 transform::dequantize_and_inverse(&sb.v_levels, sb.v_eob, dequant, 1, false);
-            for row in 0..32 {
-                for col in 0..32 {
-                    let px = (v_residuals[row * 32 + col] + 128).clamp(0, 255) as u8;
-                    v_plane[(sb_row * 32 + row) * (w / 2) + sb_col * 32 + col] = px;
-                }
-            }
+            crate::encode::reconstruct_block(&mut v_plane, uv_w, uv_x, uv_y, 32, v_pred, &v_residuals);
         }
     }
 
