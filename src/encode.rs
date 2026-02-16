@@ -321,6 +321,147 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
     }
 }
 
+#[allow(dead_code)]
+fn predict_dc_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+    let val = match (refs.has_above, refs.has_left) {
+        (false, false) => 128u8,
+        (true, false) => {
+            let sum: u32 = refs.above.iter().map(|&v| v as u32).sum();
+            ((sum + bsize as u32 / 2) / bsize as u32) as u8
+        }
+        (false, true) => {
+            let sum: u32 = refs.left.iter().map(|&v| v as u32).sum();
+            ((sum + bsize as u32 / 2) / bsize as u32) as u8
+        }
+        (true, true) => {
+            let sum: u32 = refs.above.iter().map(|&v| v as u32).sum::<u32>()
+                + refs.left.iter().map(|&v| v as u32).sum::<u32>();
+            ((sum + bsize as u32) / (2 * bsize as u32)) as u8
+        }
+    };
+    vec![val; bsize * bsize]
+}
+
+#[allow(dead_code)]
+fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+    let weights = smooth_weights(bsize);
+    let below_pred = refs.left[bsize - 1] as u32;
+    let right_pred = refs.above[bsize - 1] as u32;
+    let mut pred = vec![0u8; bsize * bsize];
+    for r in 0..bsize {
+        for c in 0..bsize {
+            let w_h = weights[r] as u32;
+            let w_w = weights[c] as u32;
+            let above = refs.above[c] as u32;
+            let left = refs.left[r] as u32;
+            let val = w_h * above + (256 - w_h) * below_pred
+                + w_w * left + (256 - w_w) * right_pred;
+            pred[r * bsize + c] = ((val + 256) >> 9) as u8;
+        }
+    }
+    pred
+}
+
+#[allow(dead_code)]
+fn predict_smooth_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+    let weights = smooth_weights(bsize);
+    let below_pred = refs.left[bsize - 1] as u32;
+    let mut pred = vec![0u8; bsize * bsize];
+    for r in 0..bsize {
+        let w = weights[r] as u32;
+        for c in 0..bsize {
+            let above = refs.above[c] as u32;
+            let val = w * above + (256 - w) * below_pred;
+            pred[r * bsize + c] = ((val + 128) >> 8) as u8;
+        }
+    }
+    pred
+}
+
+#[allow(dead_code)]
+fn predict_smooth_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+    let weights = smooth_weights(bsize);
+    let right_pred = refs.above[bsize - 1] as u32;
+    let mut pred = vec![0u8; bsize * bsize];
+    for r in 0..bsize {
+        let left = refs.left[r] as u32;
+        for c in 0..bsize {
+            let w = weights[c] as u32;
+            let val = w * left + (256 - w) * right_pred;
+            pred[r * bsize + c] = ((val + 128) >> 8) as u8;
+        }
+    }
+    pred
+}
+
+#[allow(dead_code)]
+fn predict_paeth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+    let tl = refs.top_left as i32;
+    let mut pred = vec![0u8; bsize * bsize];
+    for r in 0..bsize {
+        let left = refs.left[r] as i32;
+        for c in 0..bsize {
+            let above = refs.above[c] as i32;
+            let base = above + left - tl;
+            let p_left = (base - left).abs();
+            let p_top = (base - above).abs();
+            let p_tl = (base - tl).abs();
+            pred[r * bsize + c] = if p_left <= p_top && p_left <= p_tl {
+                refs.left[r]
+            } else if p_top <= p_tl {
+                refs.above[c]
+            } else {
+                refs.top_left
+            };
+        }
+    }
+    pred
+}
+
+#[allow(dead_code)]
+fn predict_block(refs: &RefPixels, bsize: usize, mode: IntraMode) -> Vec<u8> {
+    match mode {
+        IntraMode::DcPred => predict_dc_block(refs, bsize),
+        IntraMode::SmoothPred => predict_smooth_block(refs, bsize),
+        IntraMode::SmoothVPred => predict_smooth_v_block(refs, bsize),
+        IntraMode::SmoothHPred => predict_smooth_h_block(refs, bsize),
+        IntraMode::PaethPred => predict_paeth_block(refs, bsize),
+    }
+}
+
+#[allow(dead_code)]
+const ALL_INTRA_MODES: [IntraMode; 5] = [
+    IntraMode::DcPred,
+    IntraMode::SmoothPred,
+    IntraMode::SmoothVPred,
+    IntraMode::SmoothHPred,
+    IntraMode::PaethPred,
+];
+
+#[allow(dead_code)]
+fn compute_sad(pixels: &[u8], pred: &[u8]) -> u64 {
+    pixels
+        .iter()
+        .zip(pred.iter())
+        .map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64)
+        .sum()
+}
+
+#[allow(dead_code)]
+fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
+    let mut best_mode = IntraMode::DcPred;
+    let mut best_sad = u64::MAX;
+    for &mode in &ALL_INTRA_MODES {
+        let pred = predict_block(refs, bsize, mode);
+        let sad = compute_sad(pixels, &pred);
+        if sad < best_sad {
+            best_sad = sad;
+            best_mode = mode;
+        }
+    }
+    best_mode
+}
+
 fn encode_plane_block_64(
     pixels: &[u8],
     plane_w: usize,
@@ -1247,5 +1388,153 @@ mod tests {
         assert_eq!(refs.top_left, 180);
         assert!(refs.has_above);
         assert!(refs.has_left);
+    }
+
+    #[test]
+    fn predict_dc_block_no_neighbors() {
+        let refs = RefPixels {
+            above: vec![127; 32],
+            left: vec![129; 32],
+            top_left: 128,
+            has_above: false,
+            has_left: false,
+        };
+        let pred = predict_dc_block(&refs, 32);
+        assert!(pred.iter().all(|&v| v == 128));
+    }
+
+    #[test]
+    fn predict_dc_block_both_neighbors() {
+        let refs = RefPixels {
+            above: vec![200; 32],
+            left: vec![100; 32],
+            top_left: 150,
+            has_above: true,
+            has_left: true,
+        };
+        let pred = predict_dc_block(&refs, 32);
+        assert!(pred.iter().all(|&v| v == 150));
+    }
+
+    #[test]
+    fn predict_smooth_no_neighbors_approx_128() {
+        let refs = RefPixels {
+            above: vec![127; 32],
+            left: vec![129; 32],
+            top_left: 128,
+            has_above: false,
+            has_left: false,
+        };
+        let pred = predict_smooth_block(&refs, 32);
+        for &v in &pred {
+            assert!((v as i32 - 128).abs() <= 1, "smooth pred {} too far from 128", v);
+        }
+    }
+
+    #[test]
+    fn predict_smooth_v_vertical_gradient() {
+        let refs = RefPixels {
+            above: vec![255; 32],
+            left: vec![0; 32],
+            top_left: 255,
+            has_above: true,
+            has_left: true,
+        };
+        let pred = predict_smooth_v_block(&refs, 32);
+        assert!(pred[0] > pred[31 * 32], "should decrease top to bottom");
+        assert!(pred[0] >= 254, "top row should be near 255, got {}", pred[0]);
+    }
+
+    #[test]
+    fn predict_smooth_h_horizontal_gradient() {
+        let refs = RefPixels {
+            above: vec![0; 32],
+            left: vec![255; 32],
+            top_left: 255,
+            has_above: true,
+            has_left: true,
+        };
+        let pred = predict_smooth_h_block(&refs, 32);
+        assert!(pred[0] > pred[31], "should decrease left to right");
+        assert!(pred[0] >= 254, "left col should be near 255, got {}", pred[0]);
+    }
+
+    #[test]
+    fn predict_paeth_flat_returns_dc() {
+        let refs = RefPixels {
+            above: vec![128; 32],
+            left: vec![128; 32],
+            top_left: 128,
+            has_above: true,
+            has_left: true,
+        };
+        let pred = predict_paeth_block(&refs, 32);
+        assert!(pred.iter().all(|&v| v == 128));
+    }
+
+    #[test]
+    fn predict_paeth_vertical_edge() {
+        let refs = RefPixels {
+            above: vec![200; 32],
+            left: vec![100; 32],
+            top_left: 200,
+            has_above: true,
+            has_left: true,
+        };
+        let pred = predict_paeth_block(&refs, 32);
+        assert!(pred.iter().all(|&v| v == 100));
+    }
+
+    #[test]
+    fn predict_paeth_horizontal_edge() {
+        let refs = RefPixels {
+            above: vec![100; 32],
+            left: vec![200; 32],
+            top_left: 200,
+            has_above: true,
+            has_left: true,
+        };
+        let pred = predict_paeth_block(&refs, 32);
+        assert!(pred.iter().all(|&v| v == 100));
+    }
+
+    #[test]
+    fn select_mode_flat_block_picks_dc() {
+        let pixels = vec![150u8; 32 * 32];
+        let refs = RefPixels {
+            above: vec![150; 32],
+            left: vec![150; 32],
+            top_left: 150,
+            has_above: true,
+            has_left: true,
+        };
+        assert_eq!(select_intra_mode(&pixels, &refs, 32), IntraMode::DcPred);
+    }
+
+    #[test]
+    fn select_mode_vertical_gradient_prefers_smooth_v() {
+        let refs = RefPixels {
+            above: vec![255; 32],
+            left: vec![0; 32],
+            top_left: 255,
+            has_above: true,
+            has_left: true,
+        };
+        let pred_sv = predict_smooth_v_block(&refs, 32);
+        let mode = select_intra_mode(&pred_sv, &refs, 32);
+        assert_eq!(mode, IntraMode::SmoothVPred);
+    }
+
+    #[test]
+    fn compute_sad_identical() {
+        let a = vec![100u8; 64];
+        assert_eq!(compute_sad(&a, &a), 0);
+    }
+
+    #[test]
+    fn compute_sad_known_value() {
+        let a = vec![100u8; 4];
+        let b = vec![110u8; 4];
+        assert_eq!(compute_sad(&a, &b), 40);
     }
 }
