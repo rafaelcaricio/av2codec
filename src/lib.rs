@@ -1,4 +1,5 @@
 pub mod bitstream;
+pub mod cdf_context;
 pub mod cdf_tables;
 pub mod dct;
 pub mod decode;

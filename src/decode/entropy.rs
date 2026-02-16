@@ -105,6 +105,38 @@ impl<'a> DaalaDecoder<'a> {
         ret
     }
 
+    pub fn decode_symbol_mut(&mut self, cdf: &mut [u16]) -> usize {
+        let nsyms = cdf.len() - 2;
+        let dif = self.dif;
+        let r = self.rng;
+
+        debug_assert!(dif >> (OD_EC_WINDOW_SIZE as u64 - 16) < r as u64);
+        debug_assert!(r >= 0x8000);
+
+        let c = (dif >> (OD_EC_WINDOW_SIZE as u64 - 16)) as u32;
+        let mut v = r;
+        let mut ret: usize = 0;
+        let mut u;
+        loop {
+            u = v;
+            v = prob_scale(cdf[ret], r, ret, nsyms);
+            if c >= v {
+                break;
+            }
+            ret += 1;
+        }
+        debug_assert!(v < u);
+        debug_assert!(u <= r);
+
+        let new_rng = u - v;
+        let new_dif = dif - ((v as u64) << (OD_EC_WINDOW_SIZE as u64 - 16));
+        self.normalize(new_dif, new_rng);
+
+        crate::entropy::update_cdf(cdf, ret, nsyms);
+
+        ret
+    }
+
     pub fn decode_literal(&mut self, n_bits: u32) -> u32 {
         let dif = self.dif;
         let r = self.rng;
@@ -250,5 +282,45 @@ mod tests {
         for val in 0..=255u32 {
             assert_eq!(dec.decode_literal(8), val, "mismatch at value {}", val);
         }
+    }
+
+    #[test]
+    fn roundtrip_symbol_mut_adapts_cdf() {
+        let init_cdf = vec![16384u16, 0, 0, 0];
+
+        let mut enc_cdf = init_cdf.clone();
+        let mut enc = DaalaCoder::new();
+        enc.encode_symbol_mut(0, &mut enc_cdf);
+        enc.encode_symbol_mut(0, &mut enc_cdf);
+        enc.encode_symbol_mut(1, &mut enc_cdf);
+        let buf = enc.done();
+
+        let mut dec_cdf = init_cdf.clone();
+        let mut dec = DaalaDecoder::new(&buf);
+        assert_eq!(dec.decode_symbol_mut(&mut dec_cdf), 0);
+        assert_eq!(dec.decode_symbol_mut(&mut dec_cdf), 0);
+        assert_eq!(dec.decode_symbol_mut(&mut dec_cdf), 1);
+
+        assert_eq!(enc_cdf, dec_cdf);
+    }
+
+    #[test]
+    fn roundtrip_symbol_mut_many_symbols() {
+        let init_cdf = vec![24576u16, 16384, 8192, 0, 0, 0];
+
+        let symbols = [0usize, 1, 2, 3, 0, 0, 1, 3, 2, 0, 1, 1, 0, 2, 3, 0];
+        let mut enc_cdf = init_cdf.clone();
+        let mut enc = DaalaCoder::new();
+        for &s in &symbols {
+            enc.encode_symbol_mut(s, &mut enc_cdf);
+        }
+        let buf = enc.done();
+
+        let mut dec_cdf = init_cdf.clone();
+        let mut dec = DaalaDecoder::new(&buf);
+        for &expected in &symbols {
+            assert_eq!(dec.decode_symbol_mut(&mut dec_cdf), expected);
+        }
+        assert_eq!(enc_cdf, dec_cdf);
     }
 }

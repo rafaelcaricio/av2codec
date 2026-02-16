@@ -90,15 +90,15 @@ pub fn update_cdf(cdf: &mut [u16], val: usize, nsymbs: usize) {
 
     let mut tmp: i32 = CDF_PROB_TOP as i32;
 
-    for i in 0..(nsymbs - 1) {
+    for (i, slot) in cdf[..(nsymbs - 1)].iter_mut().enumerate() {
         if i == val {
             tmp = 0;
         }
-        let cur = cdf[i] as i32;
+        let cur = *slot as i32;
         if tmp < cur {
-            cdf[i] = (cur - ((cur - tmp) >> rate)) as u16;
+            *slot = (cur - ((cur - tmp) >> rate)) as u16;
         } else {
-            cdf[i] = (cur + ((tmp - cur) >> rate)) as u16;
+            *slot = (cur + ((tmp - cur) >> rate)) as u16;
         }
     }
 
@@ -210,6 +210,22 @@ impl DaalaCoder {
         };
         let fh = u32::from(icdf[s]);
         self.encode_q15(fl, fh, s, nsyms);
+    }
+
+    pub fn encode_symbol_mut(&mut self, s: usize, cdf: &mut [u16]) {
+        let nsyms = cdf.len() - 2;
+        debug_assert!(s < nsyms);
+        debug_assert_eq!(cdf[nsyms - 1], 0);
+
+        let fl = if s > 0 {
+            u32::from(cdf[s - 1])
+        } else {
+            CDF_PROB_TOP
+        };
+        let fh = u32::from(cdf[s]);
+        self.encode_q15(fl, fh, s, nsyms);
+
+        update_cdf(cdf, s, nsyms);
     }
 
     pub fn encode_literal(&mut self, val: u32, n_bits: u32) {
