@@ -38,6 +38,15 @@ pub struct FrameCdfContext {
     pub coeff_base_eob_uv: [Vec<u16>; 4],
     pub coeff_br_lf_uv: [Vec<u16>; 4],
     pub coeff_br_uv: [Vec<u16>; 4],
+    pub do_split_part: [[Vec<u16>; 64]; 2],
+    pub do_square_split: [[Vec<u16>; 8]; 2],
+    pub rect_type: [[Vec<u16>; 64]; 2],
+    pub do_ext_partition: [[Vec<u16>; 64]; 2],
+    pub do_uneven_4way: [[Vec<u16>; 64]; 2],
+    pub eob_multi_16: [Vec<u16>; 3],
+    pub eob_multi_64: [Vec<u16>; 3],
+    pub eob_multi_256: [Vec<u16>; 3],
+    pub eob_multi_512: [Vec<u16>; 3],
 }
 
 impl Default for FrameCdfContext {
@@ -81,6 +90,25 @@ impl FrameCdfContext {
             coeff_base_eob_uv: std::array::from_fn(|i| make_cdf(&COEFF_BASE_EOB_UV_ICDF[i], 0)),
             coeff_br_lf_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_LF_UV_ICDF[i], 0)),
             coeff_br_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_UV_ICDF[i], 0)),
+            do_split_part: std::array::from_fn(|p| {
+                std::array::from_fn(|c| make_cdf(&DO_SPLIT_PART_ICDF[p][c], 0))
+            }),
+            do_square_split: std::array::from_fn(|p| {
+                std::array::from_fn(|c| make_cdf(&DO_SQUARE_SPLIT_ICDF[p][c], 0))
+            }),
+            rect_type: std::array::from_fn(|p| {
+                std::array::from_fn(|c| make_cdf(&RECT_TYPE_ICDF[p][c], 0))
+            }),
+            do_ext_partition: std::array::from_fn(|p| {
+                std::array::from_fn(|c| make_cdf(&DO_EXT_PARTITION_ICDF[p][c], 0))
+            }),
+            do_uneven_4way: std::array::from_fn(|p| {
+                std::array::from_fn(|c| make_cdf(&DO_UNEVEN_4WAY_ICDF[p][c], 0))
+            }),
+            eob_multi_16: std::array::from_fn(|i| make_cdf(&EOB_MULTI_16_ICDF[i], 0)),
+            eob_multi_64: std::array::from_fn(|i| make_cdf(&EOB_MULTI_64_ICDF[i], 0)),
+            eob_multi_256: std::array::from_fn(|i| make_cdf(&EOB_MULTI_256_ICDF[i], 0)),
+            eob_multi_512: std::array::from_fn(|i| make_cdf(&EOB_MULTI_512_ICDF[i], 0)),
         }
     }
 }
