@@ -170,6 +170,24 @@ fn extract_subblock(
     block
 }
 
+fn round_up_to_64(dim: u32) -> u32 {
+    (dim + 63) & !63
+}
+
+fn pad_plane(src: &[u8], orig_w: u32, orig_h: u32, padded_w: u32, padded_h: u32) -> Vec<u8> {
+    let (ow, oh, pw, ph) = (
+        orig_w as usize,
+        orig_h as usize,
+        padded_w as usize,
+        padded_h as usize,
+    );
+    let mut dst = vec![128u8; pw * ph];
+    for row in 0..oh {
+        dst[row * pw..row * pw + ow].copy_from_slice(&src[row * ow..row * ow + ow]);
+    }
+    dst
+}
+
 struct FrameEncodeParams {
     width: u32,
     height: u32,
@@ -922,5 +940,57 @@ mod tests {
         let pixels = vec![200u8; 4];
         let residual = compute_residual_block(&pixels, 2, 2, 150);
         assert!(residual.iter().all(|&r| r == 50));
+    }
+
+    #[test]
+    fn round_up_to_64_exact() {
+        assert_eq!(round_up_to_64(64), 64);
+        assert_eq!(round_up_to_64(128), 128);
+    }
+
+    #[test]
+    fn round_up_to_64_rounds_up() {
+        assert_eq!(round_up_to_64(4), 64);
+        assert_eq!(round_up_to_64(100), 128);
+        assert_eq!(round_up_to_64(1080), 1088);
+        assert_eq!(round_up_to_64(1920), 1920);
+    }
+
+    #[test]
+    fn pad_plane_no_padding_needed() {
+        let plane = vec![200u8; 64 * 64];
+        let padded = pad_plane(&plane, 64, 64, 64, 64);
+        assert_eq!(padded, plane);
+    }
+
+    #[test]
+    fn pad_plane_pads_right_and_bottom() {
+        let plane = vec![200u8; 4 * 4];
+        let padded = pad_plane(&plane, 4, 4, 64, 64);
+        assert_eq!(padded.len(), 64 * 64);
+        assert_eq!(padded[0], 200);
+        assert_eq!(padded[3], 200);
+        assert_eq!(padded[4], 128);
+        assert_eq!(padded[64 * 4], 128);
+    }
+
+    #[test]
+    fn pad_plane_preserves_original_pixels() {
+        let mut plane = vec![0u8; 100 * 100];
+        for i in 0..100 * 100 {
+            plane[i] = (i % 256) as u8;
+        }
+        let padded = pad_plane(&plane, 100, 100, 128, 128);
+        for row in 0..100 {
+            for col in 0..100 {
+                assert_eq!(
+                    padded[row * 128 + col],
+                    plane[row * 100 + col],
+                    "mismatch at ({}, {})",
+                    row,
+                    col
+                );
+            }
+        }
     }
 }
