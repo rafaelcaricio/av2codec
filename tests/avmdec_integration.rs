@@ -667,6 +667,163 @@ fn avmdec_testsrc2_psnr() {
 
 #[test]
 #[ignore]
+fn avmdec_wav2c_decoder_agreement_multi_sb() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let ffmpeg = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=256x192",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "/tmp/wav2c_regression_testsrc2.yuv",
+        ])
+        .output()
+        .expect("ffmpeg not found");
+    assert!(ffmpeg.status.success(), "ffmpeg failed");
+
+    let raw = fs::read("/tmp/wav2c_regression_testsrc2.yuv").unwrap();
+    let w = 256usize;
+    let h = 192usize;
+    let y_size = w * h;
+    let uv_size = (w / 2) * (h / 2);
+    let y_plane = raw[..y_size].to_vec();
+    let u_plane = raw[y_size..y_size + uv_size].to_vec();
+    let v_plane = raw[y_size + uv_size..].to_vec();
+
+    let bs = wav2c::encode::encode_video_yuv(
+        w as u32,
+        h as u32,
+        50,
+        &[(y_plane.clone(), u_plane.clone(), v_plane.clone())],
+    );
+    fs::write("/tmp/wav2c_regression_testsrc2.obu", &bs).unwrap();
+
+    let avmdec_raw = decode_with_avmdec(
+        "/tmp/wav2c_regression_testsrc2.obu",
+        "/tmp/wav2c_regression_testsrc2_avmdec.yuv",
+    );
+
+    let wav2c_frames =
+        wav2c::Decoder::decode_all(&bs).expect("wav2c decoder failed");
+    assert_eq!(wav2c_frames.len(), 1);
+    let wav2c_y = &wav2c_frames[0].y;
+    let wav2c_u = &wav2c_frames[0].u;
+    let wav2c_v = &wav2c_frames[0].v;
+
+    let avmdec_y = &avmdec_raw[..y_size];
+    let avmdec_u = &avmdec_raw[y_size..y_size + uv_size];
+    let avmdec_v = &avmdec_raw[y_size + uv_size..];
+
+    let y_psnr_avmdec = psnr(&y_plane, avmdec_y);
+    let y_psnr_wav2c = psnr(&y_plane, wav2c_y);
+    let decoder_y_psnr = psnr(avmdec_y, wav2c_y);
+    let decoder_u_psnr = psnr(avmdec_u, wav2c_u);
+    let decoder_v_psnr = psnr(avmdec_v, wav2c_v);
+
+    eprintln!(
+        "Regression test 256x192 testsrc2:\n  avmdec vs original Y PSNR: {:.1}dB\n  wav2c  vs original Y PSNR: {:.1}dB\n  avmdec vs wav2c Y PSNR: {:.1}dB  U: {:.1}dB  V: {:.1}dB",
+        y_psnr_avmdec, y_psnr_wav2c, decoder_y_psnr, decoder_u_psnr, decoder_v_psnr
+    );
+
+    assert!(
+        y_psnr_avmdec > 15.0,
+        "avmdec Y PSNR vs original too low: {:.1}dB (regression in encoder spec compliance)",
+        y_psnr_avmdec
+    );
+    assert!(
+        decoder_y_psnr > 20.0,
+        "avmdec vs wav2c Y PSNR too low: {:.1}dB (decoders diverging, possible spec violation)",
+        decoder_y_psnr
+    );
+    assert!(
+        decoder_u_psnr > 20.0,
+        "avmdec vs wav2c U PSNR too low: {:.1}dB",
+        decoder_u_psnr
+    );
+    assert!(
+        decoder_v_psnr > 20.0,
+        "avmdec vs wav2c V PSNR too low: {:.1}dB",
+        decoder_v_psnr
+    );
+}
+
+#[test]
+#[ignore]
+fn avmdec_wav2c_decoder_agreement_solid_colors() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let colors: [(u8, u8, u8, &str); 3] = [
+        (149, 43, 21, "green"),
+        (81, 90, 240, "red"),
+        (200, 100, 150, "mixed"),
+    ];
+
+    for &(y_val, u_val, v_val, name) in &colors {
+        let y_plane = vec![y_val; 128 * 128];
+        let u_plane = vec![u_val; 64 * 64];
+        let v_plane = vec![v_val; 64 * 64];
+        let bs = wav2c::encode::encode_video_yuv(
+            128,
+            128,
+            50,
+            &[(y_plane, u_plane, v_plane)],
+        );
+
+        let obu_path = format!("/tmp/wav2c_regression_{}.obu", name);
+        let yuv_path = format!("/tmp/wav2c_regression_{}_avmdec.yuv", name);
+        fs::write(&obu_path, &bs).unwrap();
+
+        let avmdec_raw = decode_with_avmdec(&obu_path, &yuv_path);
+
+        let wav2c_frames = wav2c::Decoder::decode_all(&bs).unwrap();
+        let wav2c_y = &wav2c_frames[0].y;
+        let wav2c_u = &wav2c_frames[0].u;
+        let wav2c_v = &wav2c_frames[0].v;
+
+        let y_size = 128 * 128;
+        let uv_size = 64 * 64;
+        let avmdec_y = &avmdec_raw[..y_size];
+        let avmdec_u = &avmdec_raw[y_size..y_size + uv_size];
+        let avmdec_v = &avmdec_raw[y_size + uv_size..];
+
+        for (plane_name, avmdec_plane, wav2c_plane, expected, size) in [
+            ("Y", avmdec_y, wav2c_y.as_slice(), y_val, y_size),
+            ("U", avmdec_u, wav2c_u.as_slice(), u_val, uv_size),
+            ("V", avmdec_v, wav2c_v.as_slice(), v_val, uv_size),
+        ] {
+            for i in 0..size {
+                let avmdec_diff = (avmdec_plane[i] as i32 - expected as i32).abs();
+                let wav2c_diff = (wav2c_plane[i] as i32 - expected as i32).abs();
+                assert!(
+                    avmdec_diff <= 3,
+                    "{} {} pixel {} avmdec={} expected={} diff={}",
+                    name, plane_name, i, avmdec_plane[i], expected, avmdec_diff
+                );
+                assert!(
+                    wav2c_diff <= 1,
+                    "{} {} pixel {} wav2c={} expected={} diff={}",
+                    name, plane_name, i, wav2c_plane[i], expected, wav2c_diff
+                );
+            }
+        }
+        eprintln!("  {} 128x128: avmdec and wav2c agree within tolerance", name);
+    }
+}
+
+#[test]
+#[ignore]
 fn avmdec_decodes_100x100_solid_red() {
     if !avmdec_available() {
         eprintln!("avmdec not found, skipping");
