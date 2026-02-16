@@ -194,4 +194,114 @@ mod tests {
         assert_eq!(frames[0].width, 128);
         assert_eq!(frames[0].height, 128);
     }
+
+    #[test]
+    fn decode_gradient_y() {
+        let mut y = vec![0u8; 128 * 128];
+        for row in 0..128 {
+            let val = (row * 4).min(255) as u8;
+            for col in 0..128 {
+                y[row * 128 + col] = val;
+            }
+        }
+        let u = vec![128u8; 64 * 64];
+        let v = vec![128u8; 64 * 64];
+        let bs = encode_video_yuv(128, 128, 50, &[(y.clone(), u, v)]);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 1);
+        for row in 0..128 {
+            let expected = (row * 4).min(255) as i32;
+            for col in 0..128 {
+                let actual = frames[0].y[row * 128 + col] as i32;
+                assert!(
+                    (actual - expected).abs() <= 2,
+                    "Y pixel ({},{}) = {}, expected ~{}",
+                    row,
+                    col,
+                    actual,
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_256x192() {
+        let y = vec![180u8; 256 * 192];
+        let u = vec![80u8; 128 * 96];
+        let v = vec![200u8; 128 * 96];
+        let bs = encode_video_yuv(256, 192, 50, &[(y, u, v)]);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].width, 256);
+        assert_eq!(frames[0].height, 192);
+        for (i, &p) in frames[0].y.iter().enumerate() {
+            assert!(
+                (p as i32 - 180).abs() <= 1,
+                "Y pixel {} = {}, expected ~180",
+                i,
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn decode_all_planes_exact() {
+        let y = vec![128u8; 64 * 64];
+        let u = vec![128u8; 32 * 32];
+        let v = vec![128u8; 32 * 32];
+        let bs = encode_video_yuv(64, 64, 50, &[(y, u, v)]);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].y.iter().all(|&p| p == 128));
+        assert!(frames[0].u.iter().all(|&p| p == 128));
+        assert!(frames[0].v.iter().all(|&p| p == 128));
+    }
+
+    #[test]
+    fn decode_multi_frame_values() {
+        let y_values = [80u8, 128u8, 200u8];
+        let frames_in: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = y_values
+            .iter()
+            .map(|&val| {
+                (
+                    vec![val; 64 * 64],
+                    vec![128u8; 32 * 32],
+                    vec![128u8; 32 * 32],
+                )
+            })
+            .collect();
+        let bs = encode_video_yuv(64, 64, 50, &frames_in);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 3);
+        for (idx, &expected_y) in y_values.iter().enumerate() {
+            let avg: f64 =
+                frames[idx].y.iter().map(|&p| p as f64).sum::<f64>() / frames[idx].y.len() as f64;
+            assert!(
+                (avg - expected_y as f64).abs() <= 2.0,
+                "Frame {} Y average = {:.1}, expected ~{}",
+                idx,
+                avg,
+                expected_y
+            );
+        }
+    }
+
+    #[test]
+    fn decode_low_qindex() {
+        let y = vec![100u8; 64 * 64];
+        let u = vec![60u8; 32 * 32];
+        let v = vec![220u8; 32 * 32];
+        let bs = encode_video_yuv(64, 64, 25, &[(y, u, v)]);
+        let frames = Decoder::decode_all(&bs).unwrap();
+        assert_eq!(frames.len(), 1);
+        for (i, &p) in frames[0].y.iter().enumerate() {
+            assert!(
+                (p as i32 - 100).abs() <= 1,
+                "Y pixel {} = {}, expected ~100",
+                i,
+                p
+            );
+        }
+    }
 }
