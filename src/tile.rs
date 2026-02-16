@@ -244,6 +244,19 @@ fn encode_eob(ec: &mut DaalaCoder, eob: u16, pl_ctx: usize) {
     }
 }
 
+fn stored_level(abs_level: usize, lf: bool, plane: usize) -> u8 {
+    let max = if lf {
+        if plane == 0 {
+            LF_MAX_BASE_BR_RANGE
+        } else {
+            LF_BASE_SYMBOLS - 1
+        }
+    } else {
+        MAX_BASE_BR_RANGE
+    };
+    abs_level.min(max) as u8
+}
+
 fn encode_high_range_full(
     ec: &mut DaalaCoder,
     level: usize,
@@ -349,7 +362,7 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
         }
     }
 
-    levels_buf[get_padded_idx(eob_pos, bwl)] = eob_abs_level as u8;
+    levels_buf[get_padded_idx(eob_pos, bwl)] = stored_level(eob_abs_level, eob_lf, plane);
 
     if eob > 1 {
         for c in (1..eob_scan_idx).rev() {
@@ -401,7 +414,7 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
                 }
             }
 
-            levels_buf[get_padded_idx(pos, bwl)] = abs_level as u8;
+            levels_buf[get_padded_idx(pos, bwl)] = stored_level(abs_level, lf, plane);
         }
 
         let dc_pos = DEFAULT_SCAN_32X32[0] as usize;
@@ -454,7 +467,7 @@ fn encode_plane_full(ec: &mut DaalaCoder, coeffs: &PlaneCoeffs, ctx: &PlaneEncod
                 encode_low_range(ec, dc_abs_level, NUM_BASE_LEVELS, &COEFF_BR_UV_ICDF[br_ctx]);
             }
         }
-        levels_buf[get_padded_idx(dc_pos, bwl)] = dc_abs_level as u8;
+        levels_buf[get_padded_idx(dc_pos, bwl)] = stored_level(dc_abs_level, dc_lf, plane);
     }
 
     let mut hr_avg = 0usize;
@@ -505,19 +518,35 @@ pub fn encode_tile_data_with_coeffs(
         levels: y_levels,
         eob: y_eob,
     };
-    encode_plane_full(&mut ec, &y_coeffs, &PlaneEncodeCtx {
-        plane: 0, txs_ctx_idx: 1, bwl: 5, height: 32,
-        txb_skip_icdf: &TXB_SKIP_Y_ICDF, dc_sign_ctx: 0,
-    });
+    encode_plane_full(
+        &mut ec,
+        &y_coeffs,
+        &PlaneEncodeCtx {
+            plane: 0,
+            txs_ctx_idx: 1,
+            bwl: 5,
+            height: 32,
+            txb_skip_icdf: &TXB_SKIP_Y_ICDF,
+            dc_sign_ctx: 0,
+        },
+    );
 
     let u_coeffs = PlaneCoeffs {
         levels: u_levels,
         eob: u_eob,
     };
-    encode_plane_full(&mut ec, &u_coeffs, &PlaneEncodeCtx {
-        plane: 1, txs_ctx_idx: 0, bwl: 5, height: 32,
-        txb_skip_icdf: &TXB_SKIP_U_ICDF, dc_sign_ctx: 0,
-    });
+    encode_plane_full(
+        &mut ec,
+        &u_coeffs,
+        &PlaneEncodeCtx {
+            plane: 1,
+            txs_ctx_idx: 0,
+            bwl: 5,
+            height: 32,
+            txb_skip_icdf: &TXB_SKIP_U_ICDF,
+            dc_sign_ctx: 0,
+        },
+    );
 
     let v_skip_icdf = if u_eob > 0 {
         &TXB_SKIP_V_U_NONZERO_ICDF
@@ -528,10 +557,18 @@ pub fn encode_tile_data_with_coeffs(
         levels: v_levels,
         eob: v_eob,
     };
-    encode_plane_full(&mut ec, &v_coeffs, &PlaneEncodeCtx {
-        plane: 2, txs_ctx_idx: 0, bwl: 5, height: 32,
-        txb_skip_icdf: v_skip_icdf, dc_sign_ctx: 0,
-    });
+    encode_plane_full(
+        &mut ec,
+        &v_coeffs,
+        &PlaneEncodeCtx {
+            plane: 2,
+            txs_ctx_idx: 0,
+            bwl: 5,
+            height: 32,
+            txb_skip_icdf: v_skip_icdf,
+            dc_sign_ctx: 0,
+        },
+    );
 
     ec.done()
 }
@@ -635,10 +672,18 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
                 levels: &sb.y_levels,
                 eob: sb.y_eob,
             };
-            encode_plane_full(&mut ec, &y_coeffs, &PlaneEncodeCtx {
-                plane: 0, txs_ctx_idx: 1, bwl: 5, height: 32,
-                txb_skip_icdf: &TXB_SKIP_Y_ICDF, dc_sign_ctx: y_dc_sign_ctx,
-            });
+            encode_plane_full(
+                &mut ec,
+                &y_coeffs,
+                &PlaneEncodeCtx {
+                    plane: 0,
+                    txs_ctx_idx: 1,
+                    bwl: 5,
+                    height: 32,
+                    txb_skip_icdf: &TXB_SKIP_Y_ICDF,
+                    dc_sign_ctx: y_dc_sign_ctx,
+                },
+            );
 
             let y_cul = compute_cul_level(&sb.y_levels, sb.y_eob);
             for v in &mut above_y[sb_col * 16..(sb_col + 1) * 16] {
@@ -652,10 +697,18 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
                 levels: &sb.u_levels,
                 eob: sb.u_eob,
             };
-            encode_plane_full(&mut ec, &u_coeffs, &PlaneEncodeCtx {
-                plane: 1, txs_ctx_idx: 0, bwl: 5, height: 32,
-                txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx], dc_sign_ctx: 0,
-            });
+            encode_plane_full(
+                &mut ec,
+                &u_coeffs,
+                &PlaneEncodeCtx {
+                    plane: 1,
+                    txs_ctx_idx: 0,
+                    bwl: 5,
+                    height: 32,
+                    txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
+                    dc_sign_ctx: 0,
+                },
+            );
 
             let u_cul = compute_cul_level(&sb.u_levels, sb.u_eob);
             for v in &mut above_u[sb_col * 8..(sb_col + 1) * 8] {
@@ -674,10 +727,18 @@ pub fn encode_tile_data_multi_sb(sb_cols: usize, sb_rows: usize, sb_grid: &[SbCo
                 levels: &sb.v_levels,
                 eob: sb.v_eob,
             };
-            encode_plane_full(&mut ec, &v_coeffs, &PlaneEncodeCtx {
-                plane: 2, txs_ctx_idx: 0, bwl: 5, height: 32,
-                txb_skip_icdf: v_skip_icdf, dc_sign_ctx: 0,
-            });
+            encode_plane_full(
+                &mut ec,
+                &v_coeffs,
+                &PlaneEncodeCtx {
+                    plane: 2,
+                    txs_ctx_idx: 0,
+                    bwl: 5,
+                    height: 32,
+                    txb_skip_icdf: v_skip_icdf,
+                    dc_sign_ctx: 0,
+                },
+            );
 
             let v_cul = compute_cul_level(&sb.v_levels, sb.v_eob);
             for v in &mut above_v[sb_col * 8..(sb_col + 1) * 8] {
@@ -879,7 +940,10 @@ mod tests {
             sb.v_eob,
         );
         let multi = encode_tile_data_multi_sb(1, 1, &[sb]);
-        assert_eq!(single, multi, "1x1 multi-SB should match single-SB encoding");
+        assert_eq!(
+            single, multi,
+            "1x1 multi-SB should match single-SB encoding"
+        );
     }
 
     #[test]

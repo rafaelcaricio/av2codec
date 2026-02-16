@@ -49,7 +49,9 @@ fn main() {
             process::exit(1);
         });
 
-        let pkt = enc.receive_packet().expect("expected packet after send_frame");
+        let pkt = enc
+            .receive_packet()
+            .expect("expected packet after send_frame");
         eprintln!("Frame {}: {} bytes", pkt.frame_number, pkt.data.len());
         output.extend_from_slice(&pkt.data);
         frame_count += 1;
@@ -90,7 +92,9 @@ fn parse_args(args: &[String]) -> Config {
         eprintln!();
         eprintln!("Example:");
         eprintln!("  ffmpeg -f lavfi -i testsrc2=size=128x128:duration=1:rate=25 \\");
-        eprintln!("    -pix_fmt yuv420p -f rawvideo - | cargo run --example encode -- output.obu --width 128 --height 128");
+        eprintln!(
+            "    -pix_fmt yuv420p -f rawvideo - | cargo run --example encode -- output.obu --width 128 --height 128"
+        );
         process::exit(1);
     }
 

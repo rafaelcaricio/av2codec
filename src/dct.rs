@@ -164,6 +164,64 @@ pub fn forward_dct2_32x32(residual: &[i32; 1024]) -> [i32; 1024] {
     output
 }
 
+pub fn inverse_dct2_32x32(coeffs: &[i32; 1024]) -> [i32; 1024] {
+    let mut temp = [[0i32; 32]; 32];
+
+    for col in 0..32 {
+        for spatial_row in 0..32 {
+            let mut sum = 0i64;
+            for freq_row in 0..32 {
+                sum +=
+                    FWD_DCT2_32[freq_row][spatial_row] as i64 * coeffs[freq_row * 32 + col] as i64;
+            }
+            temp[spatial_row][col] = round_shift(sum, 6);
+        }
+    }
+
+    let mut output = [0i32; 1024];
+    for spatial_row in 0..32 {
+        for spatial_col in 0..32 {
+            let mut sum = 0i64;
+            for freq_col in 0..32 {
+                sum +=
+                    FWD_DCT2_32[freq_col][spatial_col] as i64 * temp[spatial_row][freq_col] as i64;
+            }
+            output[spatial_row * 32 + spatial_col] = round_shift(sum, 13);
+        }
+    }
+
+    output
+}
+
+pub fn inverse_dct2_64x64(coeffs: &[i32; 1024]) -> [i32; 4096] {
+    let mut temp = [[0i32; 64]; 64];
+
+    for col in 0..64 {
+        for spatial_row in 0..64 {
+            let mut sum = 0i64;
+            for freq_row in 0..32 {
+                sum += FWD_DCT2_64[freq_row][spatial_row] as i64
+                    * coeffs[freq_row * 32 + col.min(31)] as i64;
+            }
+            temp[spatial_row][col] = round_shift(sum, 6);
+        }
+    }
+
+    let mut output = [0i32; 4096];
+    for spatial_row in 0..64 {
+        for spatial_col in 0..64 {
+            let mut sum = 0i64;
+            for freq_col in 0..32 {
+                sum += FWD_DCT2_64[freq_col][spatial_col] as i64
+                    * temp[spatial_row][freq_col.min(31)] as i64;
+            }
+            output[spatial_row * 64 + spatial_col] = round_shift(sum, 13);
+        }
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

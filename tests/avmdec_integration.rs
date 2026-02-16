@@ -480,6 +480,134 @@ fn avmdec_decodes_256x128_solid_red() {
 
 #[test]
 #[ignore]
+fn avmdec_decodes_256x192_smptebars() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let ffmpeg = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "smptebars=s=256x192",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "/tmp/wav2c_smptebars_256x192.yuv",
+        ])
+        .output()
+        .expect("ffmpeg not found");
+    assert!(ffmpeg.status.success(), "ffmpeg failed");
+
+    let raw = fs::read("/tmp/wav2c_smptebars_256x192.yuv").unwrap();
+    let w = 256usize;
+    let h = 192usize;
+    let y_size = w * h;
+    let uv_w = w / 2;
+    let uv_h = h / 2;
+    let uv_size = uv_w * uv_h;
+    assert_eq!(raw.len(), y_size + 2 * uv_size);
+
+    let y_plane = raw[..y_size].to_vec();
+    let u_plane = raw[y_size..y_size + uv_size].to_vec();
+    let v_plane = raw[y_size + uv_size..].to_vec();
+    let bs = wav2c::encode::encode_video_yuv(
+        w as u32,
+        h as u32,
+        50,
+        &[(y_plane.clone(), u_plane.clone(), v_plane.clone())],
+    );
+    fs::write("/tmp/wav2c_smptebars_256x192.obu", &bs).unwrap();
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_smptebars_256x192.obu",
+        "/tmp/wav2c_smptebars_256x192_out.yuv",
+    );
+    assert_eq!(decoded.len(), y_size + 2 * uv_size);
+
+    let y_psnr = psnr(&y_plane, &decoded[..y_size]);
+    let u_psnr = psnr(&u_plane, &decoded[y_size..y_size + uv_size]);
+    let v_psnr = psnr(&v_plane, &decoded[y_size + uv_size..]);
+
+    eprintln!(
+        "SMPTE bars 256x192 PSNR: Y={:.1}dB U={:.1}dB V={:.1}dB",
+        y_psnr, u_psnr, v_psnr
+    );
+    assert!(y_psnr > 8.0, "Y PSNR too low: {:.1}dB", y_psnr);
+    assert!(u_psnr > 8.0, "U PSNR too low: {:.1}dB", u_psnr);
+    assert!(v_psnr > 8.0, "V PSNR too low: {:.1}dB", v_psnr);
+}
+
+#[test]
+#[ignore]
+fn avmdec_decodes_256x192_testsrc2() {
+    if !avmdec_available() {
+        eprintln!("avmdec not found, skipping");
+        return;
+    }
+
+    let ffmpeg = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=256x192",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "/tmp/wav2c_testsrc2_256x192.yuv",
+        ])
+        .output()
+        .expect("ffmpeg not found");
+    assert!(ffmpeg.status.success(), "ffmpeg failed");
+
+    let raw = fs::read("/tmp/wav2c_testsrc2_256x192.yuv").unwrap();
+    let w = 256usize;
+    let h = 192usize;
+    let y_size = w * h;
+    let uv_w = w / 2;
+    let uv_h = h / 2;
+    let uv_size = uv_w * uv_h;
+    assert_eq!(raw.len(), y_size + 2 * uv_size);
+
+    let y_plane = raw[..y_size].to_vec();
+    let u_plane = raw[y_size..y_size + uv_size].to_vec();
+    let v_plane = raw[y_size + uv_size..].to_vec();
+    let bs = wav2c::encode::encode_video_yuv(
+        w as u32,
+        h as u32,
+        50,
+        &[(y_plane.clone(), u_plane.clone(), v_plane.clone())],
+    );
+    fs::write("/tmp/wav2c_testsrc2_256x192.obu", &bs).unwrap();
+
+    let decoded = decode_with_avmdec(
+        "/tmp/wav2c_testsrc2_256x192.obu",
+        "/tmp/wav2c_testsrc2_256x192_out.yuv",
+    );
+    assert_eq!(decoded.len(), y_size + 2 * uv_size);
+
+    let y_psnr = psnr(&y_plane, &decoded[..y_size]);
+    let u_psnr = psnr(&u_plane, &decoded[y_size..y_size + uv_size]);
+    let v_psnr = psnr(&v_plane, &decoded[y_size + uv_size..]);
+
+    eprintln!(
+        "Testsrc2 256x192 PSNR: Y={:.1}dB U={:.1}dB V={:.1}dB",
+        y_psnr, u_psnr, v_psnr
+    );
+    assert!(y_psnr > 8.0, "Y PSNR too low: {:.1}dB", y_psnr);
+    assert!(u_psnr > 8.0, "U PSNR too low: {:.1}dB", u_psnr);
+    assert!(v_psnr > 8.0, "V PSNR too low: {:.1}dB", v_psnr);
+}
+
+#[test]
+#[ignore]
 fn avmdec_testsrc2_psnr() {
     if !avmdec_available() {
         eprintln!("avmdec not found, skipping");

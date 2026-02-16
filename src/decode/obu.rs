@@ -1,0 +1,94 @@
+use super::bitreader::decode_leb128;
+
+pub struct RawObu<'a> {
+    pub obu_type: u8,
+    pub payload: &'a [u8],
+}
+
+pub fn decode_header_byte(byte: u8) -> (u8, bool) {
+    let extension_flag = (byte >> 7) & 1 == 1;
+    let obu_type = (byte >> 2) & 0x1F;
+    (obu_type, extension_flag)
+}
+
+pub fn parse_obus(data: &[u8]) -> Vec<RawObu<'_>> {
+    let mut obus = Vec::new();
+    let mut offset = 0;
+
+    while offset < data.len() {
+        let (obu_size, leb_bytes) = decode_leb128(&data[offset..]);
+        offset += leb_bytes;
+
+        let obu_size = obu_size as usize;
+        if obu_size == 0 || offset + obu_size > data.len() {
+            break;
+        }
+
+        let header_byte = data[offset];
+        let (obu_type, _extension_flag) = decode_header_byte(header_byte);
+
+        let payload_start = offset + 1;
+        let payload_end = offset + obu_size;
+        let payload = &data[payload_start..payload_end];
+
+        obus.push(RawObu { obu_type, payload });
+
+        offset += obu_size;
+    }
+
+    obus
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitstream::obu::{ObuType, ObuWriter};
+
+    #[test]
+    fn parse_single_obu() {
+        let packed = ObuWriter::pack_obu(ObuType::SequenceHeader, &[0xAA, 0xBB]);
+        let obus = parse_obus(&packed);
+        assert_eq!(obus.len(), 1);
+        assert_eq!(obus[0].obu_type, 1);
+        assert_eq!(obus[0].payload, &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn parse_multiple_obus() {
+        let mut data = ObuWriter::pack_obu(ObuType::SequenceHeader, &[0x01, 0x02]);
+        data.extend_from_slice(&ObuWriter::pack_obu(ObuType::Clk, &[0x03, 0x04, 0x05]));
+        let obus = parse_obus(&data);
+        assert_eq!(obus.len(), 2);
+        assert_eq!(obus[0].obu_type, 1);
+        assert_eq!(obus[0].payload, &[0x01, 0x02]);
+        assert_eq!(obus[1].obu_type, 4);
+        assert_eq!(obus[1].payload, &[0x03, 0x04, 0x05]);
+    }
+
+    #[test]
+    fn parse_header_byte() {
+        let (obu_type, extension_flag) = decode_header_byte(0b0000_0100);
+        assert_eq!(obu_type, 1);
+        assert!(!extension_flag);
+    }
+
+    #[test]
+    fn parse_empty_payload() {
+        let packed = ObuWriter::pack_obu(ObuType::TemporalDelimiter, &[]);
+        let obus = parse_obus(&packed);
+        assert_eq!(obus.len(), 1);
+        assert_eq!(obus[0].obu_type, 2);
+        assert!(obus[0].payload.is_empty());
+    }
+
+    #[test]
+    fn parse_large_payload() {
+        let payload: Vec<u8> = (0..300).map(|i| (i & 0xFF) as u8).collect();
+        let packed = ObuWriter::pack_obu(ObuType::RegularTileGroup, &payload);
+        let obus = parse_obus(&packed);
+        assert_eq!(obus.len(), 1);
+        assert_eq!(obus[0].obu_type, 7);
+        assert_eq!(obus[0].payload.len(), 300);
+        assert_eq!(obus[0].payload, &payload[..]);
+    }
+}

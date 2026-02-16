@@ -1,8 +1,8 @@
-const CDF_PROB_TOP: u32 = 32768;
-const EC_PROB_SHIFT: u32 = 7;
+pub const CDF_PROB_TOP: u32 = 32768;
+pub const EC_PROB_SHIFT: u32 = 7;
 
 #[rustfmt::skip]
-static PROB_INC_TBL: [[u16; 16]; 15] = [
+pub static PROB_INC_TBL: [[u16; 16]; 15] = [
     [8,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     [10, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     [12, 8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -20,12 +20,12 @@ static PROB_INC_TBL: [[u16; 16]; 15] = [
     [15,14,13,12,11,10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
 ];
 
-fn ilog_nz(x: u32) -> u32 {
+pub fn ilog_nz(x: u32) -> u32 {
     debug_assert!(x > 0);
     32 - x.leading_zeros()
 }
 
-fn prob_scale(p: u16, r: u32, n: usize, nsym: usize) -> u32 {
+pub fn prob_scale(p: u16, r: u32, n: usize, nsym: usize) -> u32 {
     let rr = r >> 8;
     let mut pp = (u32::from(p) >> EC_PROB_SHIFT) << 4;
     pp += u32::from(PROB_INC_TBL[nsym - 2][n]);
