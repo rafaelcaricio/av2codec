@@ -35,8 +35,10 @@ pub struct TileDecodeConfig {
     pub enable_ist: bool,
     pub enable_cctx: bool,
     pub tx_mode_select: bool,
+    pub reduced_tx_set_used: u8,
     pub reduced_tx_part_set: bool,
     pub allow_intrabc: bool,
+    pub allow_screen_content_tools: bool,
     pub enable_sdp: bool,
     pub cdef_frame_enable: bool,
     pub nb_cdef_strengths: u32,
@@ -55,8 +57,10 @@ impl Default for TileDecodeConfig {
             enable_ist: false,
             enable_cctx: false,
             tx_mode_select: false,
+            reduced_tx_set_used: 0,
             reduced_tx_part_set: false,
             allow_intrabc: false,
+            allow_screen_content_tools: false,
             enable_sdp: false,
             cdef_frame_enable: false,
             nb_cdef_strengths: 0,
@@ -855,6 +859,18 @@ pub struct TuData {
     pub levels: Vec<i32>,
     pub eob: u16,
     pub tx_size: TxSize,
+    pub row_offset: usize,
+    pub col_offset: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxPartitionType {
+    None,
+    Split,
+    Horz,
+    Vert,
+    Horz4,
+    Vert4,
 }
 
 pub struct DecodedBlock {
@@ -899,10 +915,13 @@ fn decode_eob_var(
     let num_coeffs = tx_size.num_coeffs();
     let (raw, extra_bits) = match num_coeffs {
         16 => (ec.decode_symbol_mut(&mut cdf.eob_multi_16[pl_ctx]), 0u32),
+        32 => (ec.decode_symbol_mut(&mut cdf.eob_multi_32[pl_ctx]), 0),
         64 => (ec.decode_symbol_mut(&mut cdf.eob_multi_64[pl_ctx]), 0),
+        128 => (ec.decode_symbol_mut(&mut cdf.eob_multi_128[pl_ctx]), 0),
         256 => (ec.decode_symbol_mut(&mut cdf.eob_multi_256[pl_ctx]), 1),
+        512 => (ec.decode_symbol_mut(&mut cdf.eob_multi_512[pl_ctx]), 2),
         1024 => (ec.decode_symbol_mut(&mut cdf.eob_multi_1024[pl_ctx]), 2),
-        _ => unreachable!(),
+        _ => unreachable!("unexpected num_coeffs: {num_coeffs}"),
     };
 
     let eob_token = if extra_bits > 0 && raw >= EOB_PT_INDEX_COUNT - 1 {
@@ -915,6 +934,122 @@ fn decode_eob_var(
     compute_eob_from_token(ec, eob_token, cdf)
 }
 
+fn read_tx_type(
+    ec: &mut DaalaDecoder,
+    tx_size: TxSize,
+    y_mode: u8,
+    fsc_mode: usize,
+    reduced_tx_set_used: u8,
+    cdf: &mut FrameCdfContext,
+) -> usize {
+    if fsc_mode != 0 {
+        return IDTX;
+    }
+
+    if reduced_tx_set_used == 2 {
+        return DCT_DCT;
+    }
+
+    let width = tx_size.width();
+    let square_tx_size = tx_size.txs_ctx();
+
+    let tx_size_sqr_up = tx_size.txs_ctx();
+
+    if tx_size_sqr_up > 3 {
+        if tx_size_sqr_up >= 3 && width >= 32 {
+            return DCT_DCT;
+        }
+        let _is_long_side_dct = if tx_size_sqr_up == 3 {
+            ec.decode_symbol_mut(&mut cdf.tx_ext_32_intra)
+        } else {
+            1
+        };
+        let short_side_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_short_side[square_tx_size.min(3)]);
+        ec.trace_state(&format!("after_tx_type_large short_side={}", short_side_idx));
+        return DCT_DCT;
+    }
+
+    if tx_size_sqr_up == 3 {
+        if reduced_tx_set_used == 0 {
+            return DCT_DCT;
+        }
+        let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_reduced);
+        ec.trace_state(&format!("after_tx_type_32x32_reduced={}", tx_type_idx));
+        return if tx_type_idx == 0 { DCT_DCT } else { IDTX };
+    }
+
+    if reduced_tx_set_used == 1 {
+        let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_reduced);
+        ec.trace_state(&format!("after_tx_type_reduced={}", tx_type_idx));
+        return if tx_type_idx == 0 { DCT_DCT } else { ADST_ADST };
+    }
+
+    let size_info = AV2_SIZE_CLASS[square_tx_size.min(4)];
+    let mode = y_mode as usize;
+    let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx[square_tx_size.min(3)]);
+    ec.trace_state(&format!("after_tx_type={} size={} mode={}", tx_type_idx, square_tx_size, mode));
+
+    if mode < 13 && tx_type_idx < 7 {
+        AV2_MD_IDX2TYPE[size_info][mode][tx_type_idx] as usize
+    } else {
+        DCT_DCT
+    }
+}
+
+fn read_sec_tx_type(
+    ec: &mut DaalaDecoder,
+    tx_size: TxSize,
+    primary_tx_type: usize,
+    y_mode: u8,
+    eob: usize,
+    cdf: &mut FrameCdfContext,
+) {
+    if primary_tx_type != DCT_DCT && primary_tx_type != ADST_ADST {
+        return;
+    }
+
+    if y_mode >= PAETH_PRED {
+        return;
+    }
+
+    let width = tx_size.width();
+    let height = tx_size.height();
+    let square_tx_size = tx_size.txs_ctx();
+
+    let (st_size_class, eob_limit) = if width == 4 || height == 4 {
+        (0, IST_4X4_HEIGHT)
+    } else if width == 8 && height == 8 && primary_tx_type == DCT_DCT {
+        (1, IST_8X8_HEIGHT_RED)
+    } else if width >= 8 && height >= 8 && primary_tx_type == DCT_DCT {
+        (2, IST_8X8_HEIGHT)
+    } else if width >= 8 && height >= 8 {
+        (3, IST_ADST_NZ_CNT)
+    } else {
+        return;
+    };
+
+    let _ = st_size_class;
+
+    if eob > eob_limit {
+        return;
+    }
+
+    let stx_idx = square_tx_size.min(4);
+    ec.trace_state(&format!("before_stx idx={} cdf={:?}", stx_idx, &cdf.stx[stx_idx]));
+    let stx_flag = ec.decode_symbol_mut(&mut cdf.stx[stx_idx]);
+    ec.trace_state(&format!("after_stx_flag={} txs={}", stx_flag, square_tx_size));
+
+    if stx_flag > 0 {
+        if primary_tx_type == ADST_ADST && width >= 8 && height >= 8 {
+            let _stx_set = ec.decode_symbol_mut(&mut cdf.most_probable_stx_set_adst_adst);
+            ec.trace_state(&format!("after_stx_set_adst={}", _stx_set));
+        } else {
+            let _stx_set = ec.decode_symbol_mut(&mut cdf.most_probable_stx_set);
+            ec.trace_state(&format!("after_stx_set={}", _stx_set));
+        }
+    }
+}
+
 fn decode_coeff_tu(
     ec: &mut DaalaDecoder,
     plane: usize,
@@ -922,12 +1057,14 @@ fn decode_coeff_tu(
     dc_sign_ctx: usize,
     entropy_ctx: usize,
     u_has_coeffs: bool,
-    _cfg: &TileDecodeConfig,
+    y_mode: u8,
+    fsc_mode: usize,
+    cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
 ) -> TuData {
     let bwl = tx_size.bwl();
-    let width = tx_size.width();
-    let height = width;
+    let width = tx_size.coded_width();
+    let height = tx_size.coded_height();
     let num_coeffs = tx_size.num_coeffs();
     let scan = get_scan(tx_size);
     let txs_idx = tx_size.txs_ctx();
@@ -952,14 +1089,33 @@ fn decode_coeff_tu(
             levels: vec![0; num_coeffs],
             eob: 0,
             tx_size,
+            row_offset: 0,
+            col_offset: 0,
         };
     }
 
     let pl_ctx = if plane == 0 { 0 } else { 2 };
     let eob = decode_eob_var(ec, tx_size, pl_ctx, cdf);
+    ec.trace_state(&format!("after_eob_{} eob={} txs={}", plane_name, eob, txs_idx));
+
+    let tx_type = if plane == 0 {
+        read_tx_type(ec, tx_size, y_mode, fsc_mode, cfg.reduced_tx_set_used, cdf)
+    } else {
+        DCT_DCT
+    };
+    ec.trace_state(&format!("after_tx_type_{} type={}", plane_name, tx_type));
+
+    if plane == 1 && cfg.enable_cctx && eob > 1 {
+        let _cctx = ec.decode_symbol_mut(&mut cdf.cctx_type);
+        ec.trace_state(&format!("after_cctx_type={}", _cctx));
+    }
 
     let padded_stride = width + TX_PAD_HOR;
     let padded_height = height + 2;
+    if plane == 0 && cfg.enable_ist && eob > 1 && fsc_mode == 0 {
+        read_sec_tx_type(ec, tx_size, tx_type, y_mode, eob as usize, cdf);
+    }
+
     let mut levels_buf = vec![0u8; padded_stride * padded_height];
     let mut abs_levels = vec![0usize; eob as usize];
 
@@ -1192,6 +1348,8 @@ fn decode_coeff_tu(
         levels,
         eob,
         tx_size,
+        row_offset: 0,
+        col_offset: 0,
     }
 }
 
@@ -1203,35 +1361,41 @@ fn decode_block_tus(
     dc_sign_ctx: usize,
     entropy_ctx: usize,
     u_has_coeffs: bool,
+    y_mode: u8,
     fsc_mode: usize,
     cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
 ) -> Vec<TuData> {
-    let tx_size = crate::block::tx_size_for_block(block_w, block_h);
-    let tx_w = tx_size.width();
-    let tx_h = tx_size.height();
-    let tu_cols = (block_w / tx_w).max(1);
-    let tu_rows = (block_h / tx_h).max(1);
+    let tx_partition = if cfg.tx_mode_select
+        && !(block_w == 4 && block_h == 4)
+        && plane == 0
+    {
+        read_tx_partition(ec, block_w, block_h, fsc_mode, cfg.reduced_tx_part_set, cdf)
+    } else {
+        TxPartitionType::None
+    };
 
-    if cfg.tx_mode_select && block_w > 4 && block_h > 4 && plane == 0 {
-        read_tx_partition(ec, block_w, block_h, fsc_mode, cfg.reduced_tx_part_set, cdf);
-    }
+    let max_tx_w = block_w.min(64);
+    let max_tx_h = block_h.min(64);
+    let sub_tus = get_tx_partition_sub_tus(tx_partition, max_tx_w, max_tx_h);
 
-    let mut tus = Vec::with_capacity(tu_cols * tu_rows);
-    for _tu_row in 0..tu_rows {
-        for _tu_col in 0..tu_cols {
-            let tu = decode_coeff_tu(
-                ec,
-                plane,
-                tx_size,
-                dc_sign_ctx,
-                entropy_ctx,
-                u_has_coeffs,
-                cfg,
-                cdf,
-            );
-            tus.push(tu);
-        }
+    let mut tus = Vec::with_capacity(sub_tus.len());
+    for (sub_tx_size, row_off, col_off) in &sub_tus {
+        let mut tu = decode_coeff_tu(
+            ec,
+            plane,
+            *sub_tx_size,
+            dc_sign_ctx,
+            entropy_ctx,
+            u_has_coeffs,
+            y_mode,
+            fsc_mode,
+            cfg,
+            cdf,
+        );
+        tu.row_offset = *row_off;
+        tu.col_offset = *col_off;
+        tus.push(tu);
     }
     tus
 }
@@ -1381,6 +1545,197 @@ impl ModeInfoGrid {
     }
 }
 
+fn get_palette_color_index_context(
+    color_map: &[u8],
+    stride: usize,
+    r: usize,
+    c: usize,
+    color_order: &mut [u8],
+    n_colors: usize,
+) -> usize {
+    let mut scores = [0u32; 8];
+
+    if c > 0 {
+        scores[color_map[r * stride + c - 1] as usize] += 2;
+    }
+    if r > 0 {
+        scores[color_map[(r - 1) * stride + c] as usize] += 2;
+    }
+    if c > 0 && r > 0 {
+        scores[color_map[(r - 1) * stride + c - 1] as usize] += 1;
+    }
+
+    let l = if c > 0 { color_map[r * stride + c - 1] } else { 255 };
+    let t = if r > 0 { color_map[(r - 1) * stride + c] } else { 255 };
+    let tl = if c > 0 && r > 0 { color_map[(r - 1) * stride + c - 1] } else { 255 };
+
+    let ctx = if c == 0 && r == 0 {
+        0
+    } else if c == 0 || r == 0 {
+        0
+    } else if l == tl && tl == t {
+        4
+    } else if l == t {
+        3
+    } else if l == tl || tl == t {
+        2
+    } else {
+        1
+    };
+
+    let mut order: Vec<(u32, u8)> = (0..n_colors as u8).map(|i| (scores[i as usize], i)).collect();
+    order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    for (i, (_, idx)) in order.iter().enumerate() {
+        color_order[i] = *idx;
+    }
+
+    ctx
+}
+
+fn read_palette_colors_y(
+    ec: &mut DaalaDecoder,
+    n: usize,
+    palette_cache: &[u16],
+) -> Vec<u16> {
+    let bit_depth = 8u32;
+    let n_cache = palette_cache.len();
+    let mut colors = Vec::with_capacity(n);
+
+    let mut idx = 0;
+    for i in 0..n_cache {
+        if idx >= n {
+            break;
+        }
+        let use_cache = ec.decode_bit();
+        if use_cache != 0 {
+            colors.push(palette_cache[i]);
+            idx += 1;
+        }
+    }
+
+    if idx < n {
+        colors.push(ec.decode_literal(bit_depth) as u16);
+        idx += 1;
+    }
+
+    if idx < n {
+        let min_bits = bit_depth - 3;
+        let mut bits = min_bits + ec.decode_literal(2);
+
+        for _ in idx..n {
+            let prev = *colors.last().unwrap();
+            let range = ((1u32 << bit_depth) - prev as u32 - 1) as i32;
+            if range <= 0 {
+                colors.push(((1u32 << bit_depth) - 1) as u16);
+            } else {
+                let delta = ec.decode_literal(bits) + 1;
+                let new_val = (prev as u32 + delta).min((1u32 << bit_depth) - 1);
+                colors.push(new_val as u16);
+                let new_range = range - (new_val as i32 - prev as i32);
+                if new_range > 0 {
+                    let log2_range = 32 - (new_range as u32).leading_zeros();
+                    bits = bits.min(log2_range);
+                } else {
+                    bits = 0;
+                }
+            }
+        }
+    }
+
+    for i in 0..colors.len() {
+        for j in 1..colors.len() - i {
+            if colors[j - 1] > colors[j] {
+                colors.swap(j - 1, j);
+            }
+        }
+    }
+
+    colors
+}
+
+fn decode_palette_map(
+    ec: &mut DaalaDecoder,
+    width: usize,
+    height: usize,
+    n_colors: usize,
+    cdf: &mut FrameCdfContext,
+) {
+    let transverse_allowed = width < 64 && height < 64;
+    let direction = if transverse_allowed {
+        ec.decode_bit() as usize
+    } else {
+        0
+    };
+
+    let (axis2_limit, axis1_limit) = if direction == 0 {
+        (height, width)
+    } else {
+        (width, height)
+    };
+
+    let plane_block_width = width;
+    let mut color_map = vec![0u8; width * height];
+    let ps = n_colors - 2;
+
+    let mut prev_identity_row_flag = 0usize;
+
+    for ax2 in 0..axis2_limit {
+        let ctx = if ax2 == 0 { 3 } else { prev_identity_row_flag };
+        let identity_row_flag = ec.decode_symbol_mut(&mut cdf.identity_row_y[ctx]);
+
+        if identity_row_flag == 2 && ax2 > 0 {
+            for ax1 in 0..axis1_limit {
+                let (r, c) = if direction == 0 { (ax2, ax1) } else { (ax1, ax2) };
+                let (pr, pc) = if direction == 0 { (ax2 - 1, ax1) } else { (ax1, ax2 - 1) };
+                color_map[r * plane_block_width + c] = color_map[pr * plane_block_width + pc];
+            }
+        } else if identity_row_flag == 1 {
+            for ax1 in 0..axis1_limit {
+                let (r, c) = if direction == 0 { (ax2, ax1) } else { (ax1, ax2) };
+                if ax1 == 0 {
+                    if ax2 == 0 {
+                        let val = ec.decode_uniform(n_colors as u32) as u8;
+                        color_map[r * plane_block_width + c] = val;
+                    } else {
+                        let mut color_order = [0u8; 8];
+                        let color_ctx = get_palette_color_index_context(
+                            &color_map, plane_block_width, r, c, &mut color_order, n_colors,
+                        );
+                        let color_idx = ec.decode_symbol_mut(&mut cdf.palette_y_color_index[ps][color_ctx]);
+                        color_map[r * plane_block_width + c] = color_order[color_idx];
+                    }
+                } else {
+                    let (nr, nc) = if direction == 0 {
+                        (r, c.wrapping_sub(1))
+                    } else {
+                        (r.wrapping_sub(1), c)
+                    };
+                    if nr < height && nc < width {
+                        color_map[r * plane_block_width + c] = color_map[nr * plane_block_width + nc];
+                    }
+                }
+            }
+        } else {
+            for ax1 in 0..axis1_limit {
+                let (r, c) = if direction == 0 { (ax2, ax1) } else { (ax1, ax2) };
+                if ax2 == 0 && ax1 == 0 {
+                    let val = ec.decode_uniform(n_colors as u32) as u8;
+                    color_map[r * plane_block_width + c] = val;
+                } else {
+                    let mut color_order = [0u8; 8];
+                    let color_ctx = get_palette_color_index_context(
+                        &color_map, plane_block_width, r, c, &mut color_order, n_colors,
+                    );
+                    let color_idx = ec.decode_symbol_mut(&mut cdf.palette_y_color_index[ps][color_ctx]);
+                    color_map[r * plane_block_width + c] = color_order[color_idx];
+                }
+            }
+        }
+
+        prev_identity_row_flag = identity_row_flag;
+    }
+}
+
 fn decode_leaf_block(
     ec: &mut DaalaDecoder,
     x: usize,
@@ -1464,11 +1819,39 @@ fn decode_leaf_block(
         uv_mode = read_uv_mode(ec, y_mode, width, height, cfl_ctx, cfg.enable_cfl_intra, cdf);
     }
 
+    let mut palette_y_active = false;
+    if tree_type != TreeType::Chroma
+        && cfg.allow_screen_content_tools
+        && y_mode == 0
+        && width * height >= 64
+        && width <= 64
+        && height <= 64
+    {
+        ec.trace_state(&format!("before_palette_y block=({},{}) {}x{}", x, y, width, height));
+        let palette_y = ec.decode_symbol_mut(&mut cdf.palette_y_mode);
+        ec.trace_state(&format!("after_palette_y={} block=({},{})", palette_y, x, y));
+
+        if palette_y == 1 {
+            palette_y_active = true;
+            let palette_size_raw = ec.decode_symbol_mut(&mut cdf.palette_y_size);
+            let n_colors = palette_size_raw + 2;
+            ec.trace_state(&format!("after_palette_size={} n_colors={} block=({},{})", palette_size_raw, n_colors, x, y));
+
+            let palette_cache: Vec<u16> = Vec::new();
+            let _palette_colors = read_palette_colors_y(ec, n_colors, &palette_cache);
+            ec.trace_state(&format!("after_palette_colors block=({},{})", x, y));
+
+            decode_palette_map(ec, width, height, n_colors, cdf);
+            ec.trace_state(&format!("after_palette_map block=({},{})", x, y));
+        }
+    }
+
     let is_cfl = uv_mode == 13;
     mi.fill(x, y, width, height, is_directional, is_cfl);
 
+    let _ = palette_y_active;
     let y_tu = if tree_type != TreeType::Chroma {
-        decode_block_tus(ec, 0, width, height, 0, 0, false, fsc_mode, cfg, cdf)
+        decode_block_tus(ec, 0, width, height, 0, 0, false, y_mode, fsc_mode, cfg, cdf)
     } else {
         vec![]
     };
@@ -1476,9 +1859,9 @@ fn decode_leaf_block(
     let uv_w = width / 2;
     let uv_h = height / 2;
     let (u_tu, v_tu) = if tree_type != TreeType::Luma && uv_w >= 4 && uv_h >= 4 {
-        let u_tu = decode_block_tus(ec, 1, uv_w, uv_h, 0, 0, false, 0, cfg, cdf);
+        let u_tu = decode_block_tus(ec, 1, uv_w, uv_h, 0, 0, false, y_mode, 0, cfg, cdf);
         let v_u_has = u_tu.iter().any(|t| t.eob > 0);
-        let v_tu = decode_block_tus(ec, 2, uv_w, uv_h, 0, 0, v_u_has, 0, cfg, cdf);
+        let v_tu = decode_block_tus(ec, 2, uv_w, uv_h, 0, 0, v_u_has, y_mode, 0, cfg, cdf);
         ec.trace_state(&format!("after_v_coeffs block=({},{})", x, y));
         (u_tu, v_tu)
     } else {
@@ -1916,9 +2299,9 @@ fn read_tx_partition(
     fsc_mode: usize,
     reduced_tx_part_set: bool,
     cdf: &mut FrameCdfContext,
-) {
+) -> TxPartitionType {
     if coding_block_disallows_tx_partitioning(block_w, block_h) {
-        return;
+        return TxPartitionType::None;
     }
 
     let max_tx_w = block_w.min(64);
@@ -1934,12 +2317,12 @@ fn read_tx_partition(
     };
 
     if !allow_horz && !allow_vert {
-        return;
+        return TxPartitionType::None;
     }
 
     let bsize_group = tx_part_group(block_w, block_h);
     if bsize_group >= TXFM_SPLIT_GROUP {
-        return;
+        return TxPartitionType::None;
     }
 
     let is_fsc = if fsc_mode != 0 { 1 } else { 0 };
@@ -1948,24 +2331,79 @@ fn read_tx_partition(
     let do_partition = ec.decode_symbol_mut(&mut cdf.txfm_do_partition[is_fsc][is_inter][bsize_group]);
     ec.trace_state(&format!("after_txfm_do_partition={} group={} bsize={}x{}", do_partition, bsize_group, block_w, block_h));
     if do_partition == 0 {
-        return;
+        return TxPartitionType::None;
     }
 
     if allow_horz && allow_vert {
         let txsize_group = tx_type_group_vert_and_horz(block_w, block_h);
         if txsize_group < 255 {
-            let _partition_type = ec.decode_symbol_mut(
+            let partition_type = ec.decode_symbol_mut(
                 &mut cdf.txfm_4way_partition_type[is_fsc][is_inter][txsize_group],
             );
-            ec.trace_state(&format!("after_txfm_4way_type={} tsg={}", _partition_type, txsize_group));
+            ec.trace_state(&format!("after_txfm_4way_type={} tsg={}", partition_type, txsize_group));
+            match partition_type {
+                0 => TxPartitionType::Split,
+                1 => TxPartitionType::Horz,
+                2 => TxPartitionType::Vert,
+                3 => TxPartitionType::Horz4,
+                4 => TxPartitionType::Vert4,
+                _ => TxPartitionType::Split,
+            }
+        } else {
+            TxPartitionType::Split
         }
     } else {
         let txsize_group = tx_type_group_vert_or_horz(block_w, block_h);
         if txsize_group > 0 && !reduced_tx_part_set {
-            let _partition_type = ec.decode_symbol_mut(
+            let partition_type = ec.decode_symbol_mut(
                 &mut cdf.txfm_2or3_way_partition_type[is_fsc][is_inter][txsize_group - 1],
             );
-            ec.trace_state(&format!("after_txfm_2or3way_type={} tsg={}", _partition_type, txsize_group));
+            ec.trace_state(&format!("after_txfm_2or3way_type={} tsg={}", partition_type, txsize_group));
+            if allow_horz {
+                if partition_type == 0 { TxPartitionType::Horz } else { TxPartitionType::Horz4 }
+            } else {
+                if partition_type == 0 { TxPartitionType::Vert } else { TxPartitionType::Vert4 }
+            }
+        } else {
+            if allow_horz { TxPartitionType::Horz } else { TxPartitionType::Vert }
+        }
+    }
+}
+
+fn get_tx_partition_sub_tus(
+    partition: TxPartitionType,
+    max_tx_w: usize,
+    max_tx_h: usize,
+) -> Vec<(TxSize, usize, usize)> {
+    match partition {
+        TxPartitionType::None => {
+            vec![(crate::block::max_txsize_rect_for_block(max_tx_w, max_tx_h), 0, 0)]
+        }
+        TxPartitionType::Split => {
+            let hw = max_tx_w / 2;
+            let hh = max_tx_h / 2;
+            let sub = crate::block::max_txsize_rect_for_block(hw, hh);
+            vec![(sub, 0, 0), (sub, 0, hw), (sub, hh, 0), (sub, hh, hw)]
+        }
+        TxPartitionType::Horz => {
+            let hh = max_tx_h / 2;
+            let sub = crate::block::max_txsize_rect_for_block(max_tx_w, hh);
+            vec![(sub, 0, 0), (sub, hh, 0)]
+        }
+        TxPartitionType::Vert => {
+            let hw = max_tx_w / 2;
+            let sub = crate::block::max_txsize_rect_for_block(hw, max_tx_h);
+            vec![(sub, 0, 0), (sub, 0, hw)]
+        }
+        TxPartitionType::Horz4 => {
+            let qh = max_tx_h / 4;
+            let sub = crate::block::max_txsize_rect_for_block(max_tx_w, qh);
+            vec![(sub, 0, 0), (sub, qh, 0), (sub, 2 * qh, 0), (sub, 3 * qh, 0)]
+        }
+        TxPartitionType::Vert4 => {
+            let qw = max_tx_w / 4;
+            let sub = crate::block::max_txsize_rect_for_block(qw, max_tx_h);
+            vec![(sub, 0, 0), (sub, 0, qw), (sub, 0, 2 * qw), (sub, 0, 3 * qw)]
         }
     }
 }
@@ -2054,10 +2492,10 @@ fn fsc_bsize_group(w: usize, h: usize) -> usize {
         (4, 4) => 0,
         (4, 8) | (8, 4) => 1,
         (8, 8) => 2,
-        (8, 16) | (16, 8) => 3,
-        (16, 16) => 4,
+        (8, 16) | (16, 8) | (4, 16) | (16, 4) => 3,
+        (16, 16) | (8, 32) | (32, 8) | (4, 32) | (32, 4) => 4,
         (16, 32) | (32, 16) | (32, 32) => 5,
-        _ => 6,
+        _ => unreachable!("unexpected block size for FSC: {}x{}", w, h),
     }
 }
 

@@ -51,7 +51,9 @@ pub struct FrameParams<'a> {
     pub tile_data: &'a [u8],
     pub disable_cdf_update: bool,
     pub tx_mode_select: bool,
+    pub reduced_tx_set_used: u8,
     pub allow_intrabc: bool,
+    pub allow_screen_content_tools: bool,
     pub cdef_frame_enable: bool,
     pub nb_cdef_strengths: u32,
     pub ccso_frame_enable: bool,
@@ -285,6 +287,7 @@ fn parse_frame_header_sph0<'a>(
         seq.force_screen_content_tools != 0
     };
 
+
     if allow_screen_content_tools && seq.force_integer_mv == 2 {
         let _cur_frame_force_integer_mv = r.read_bit();
     }
@@ -382,7 +385,7 @@ fn parse_frame_header_sph0<'a>(
         false
     };
 
-    let _reduced_tx_set = r.read_literal(2);
+    let reduced_tx_set_used = r.read_literal(2) as u8;
 
     if seq.film_grain_params_present && immediate_output_picture {
         let apply_grain = r.read_bit();
@@ -409,7 +412,9 @@ fn parse_frame_header_sph0<'a>(
         tile_data,
         disable_cdf_update,
         tx_mode_select,
+        reduced_tx_set_used,
         allow_intrabc,
+        allow_screen_content_tools,
         cdef_frame_enable,
         nb_cdef_strengths,
         ccso_frame_enable,
@@ -525,7 +530,7 @@ fn parse_frame_header_sph1<'a>(
         false
     };
 
-    let _reduced_tx_set = r.read_literal(2);
+    let reduced_tx_set_used = r.read_literal(2) as u8;
 
     let header_bits = r.total_bits_read();
     r.skip_to_byte_boundary();
@@ -535,9 +540,9 @@ fn parse_frame_header_sph1<'a>(
     } else {
         &[]
     };
-    eprintln!("[FH_SPH1] header_bits={} tile_data_len={} first8={:02x?} delta_q_present={} ccso_enable={:?} nb_cdef={} gdf_mode={}",
+    eprintln!("[FH_SPH1] header_bits={} tile_data_len={} first8={:02x?} delta_q_present={} ccso_enable={:?} nb_cdef={} gdf_mode={} reduced_tx_set={}",
         header_bits, tile_data.len(), &tile_data[..tile_data.len().min(8)],
-        delta_q_present, ccso_enable, nb_cdef_strengths, gdf_mode);
+        delta_q_present, ccso_enable, nb_cdef_strengths, gdf_mode, reduced_tx_set_used);
 
     Ok(FrameParams {
         base_qindex,
@@ -545,7 +550,9 @@ fn parse_frame_header_sph1<'a>(
         tile_data,
         disable_cdf_update,
         tx_mode_select,
+        reduced_tx_set_used,
         allow_intrabc,
+        allow_screen_content_tools,
         cdef_frame_enable,
         nb_cdef_strengths,
         ccso_frame_enable,

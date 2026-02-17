@@ -101,6 +101,19 @@ pub fn dequantize_and_inverse_var(
             arr.copy_from_slice(&dqcoeffs);
             dct::inverse_dct2_64x64_av2(&arr).to_vec()
         }
+        _ => {
+            let (shift1, shift2) = tx_size.inv_shifts();
+            dct::inverse_dct2_rect(
+                &dqcoeffs,
+                tx_size.width(),
+                tx_size.height(),
+                tx_size.coded_width(),
+                tx_size.coded_height(),
+                shift1,
+                shift2,
+                tx_size.needs_sqrt2(),
+            )
+        }
     }
 }
 

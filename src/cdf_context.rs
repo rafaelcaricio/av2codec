@@ -73,6 +73,18 @@ pub struct FrameCdfContext {
     pub intrabc: [Vec<u16>; 3],
     pub cdef_strength_index0: [Vec<u16>; 4],
     pub ccso: [[Vec<u16>; 4]; 3],
+    pub intra_ext_tx: [Vec<u16>; 4],
+    pub intra_ext_tx_reduced: Vec<u16>,
+    pub intra_ext_tx_short_side: [Vec<u16>; 4],
+    pub tx_ext_32_intra: Vec<u16>,
+    pub stx: [Vec<u16>; 5],
+    pub most_probable_stx_set: Vec<u16>,
+    pub most_probable_stx_set_adst_adst: Vec<u16>,
+    pub cctx_type: Vec<u16>,
+    pub palette_y_mode: Vec<u16>,
+    pub palette_y_size: Vec<u16>,
+    pub identity_row_y: [Vec<u16>; 4],
+    pub palette_y_color_index: [[Vec<u16>; 5]; 7],
 }
 
 impl Default for FrameCdfContext {
@@ -190,6 +202,23 @@ impl FrameCdfContext {
             cdef_strength_index0: std::array::from_fn(|i| make_cdf(&CDEF_STRENGTH_INDEX0_ICDF[i], CDEF_STRENGTH_INDEX0_PARA[i])),
             ccso: std::array::from_fn(|p| {
                 std::array::from_fn(|c| make_cdf(&CCSO_ICDF[p][c], CCSO_PARA[p][c]))
+            }),
+            intra_ext_tx: std::array::from_fn(|i| make_cdf(&INTRA_EXT_TX_ICDF[i], INTRA_EXT_TX_PARA[i])),
+            intra_ext_tx_reduced: make_cdf(&INTRA_EXT_TX_REDUCED_ICDF, INTRA_EXT_TX_REDUCED_PARA),
+            intra_ext_tx_short_side: std::array::from_fn(|i| make_cdf(&INTRA_EXT_TX_SHORT_SIDE_ICDF[i], INTRA_EXT_TX_SHORT_SIDE_PARA[i])),
+            tx_ext_32_intra: make_cdf(&TX_EXT_32_INTRA_ICDF, TX_EXT_32_INTRA_PARA),
+            stx: std::array::from_fn(|i| make_cdf(&STX_ICDF[i], STX_PARA[i])),
+            most_probable_stx_set: make_cdf(&MOST_PROBABLE_STX_SET_ICDF, MOST_PROBABLE_STX_SET_PARA),
+            most_probable_stx_set_adst_adst: make_cdf(&MOST_PROBABLE_STX_SET_ADST_ADST_ICDF, MOST_PROBABLE_STX_SET_ADST_ADST_PARA),
+            cctx_type: make_cdf(&CCTX_TYPE_ICDF, CCTX_TYPE_PARA),
+            palette_y_mode: make_cdf(&PALETTE_Y_MODE_ICDF, PALETTE_Y_MODE_PARA),
+            palette_y_size: make_cdf(&PALETTE_Y_SIZE_ICDF, PALETTE_Y_SIZE_PARA),
+            identity_row_y: std::array::from_fn(|i| make_cdf(&IDENTITY_ROW_Y_ICDF[i], IDENTITY_ROW_Y_PARA[i])),
+            palette_y_color_index: std::array::from_fn(|ps| {
+                std::array::from_fn(|ctx| {
+                    let n_colors = PALETTE_COLORS_PER_SIZE[ps];
+                    make_cdf(&PALETTE_Y_COLOR_INDEX_ICDF[ps][ctx][..n_colors], PALETTE_Y_COLOR_INDEX_PARA[ps][ctx])
+                })
             }),
         }
     }
@@ -375,6 +404,23 @@ impl FrameCdfContext {
             cdef_strength_index0: std::array::from_fn(|i| make_cdf(&CDEF_STRENGTH_INDEX0_ICDF[i], CDEF_STRENGTH_INDEX0_PARA[i])),
             ccso: std::array::from_fn(|p| {
                 std::array::from_fn(|c| make_cdf(&CCSO_ICDF[p][c], CCSO_PARA[p][c]))
+            }),
+            intra_ext_tx: std::array::from_fn(|i| make_cdf(&INTRA_EXT_TX_ICDF[i], INTRA_EXT_TX_PARA[i])),
+            intra_ext_tx_reduced: make_cdf(&INTRA_EXT_TX_REDUCED_ICDF, INTRA_EXT_TX_REDUCED_PARA),
+            intra_ext_tx_short_side: std::array::from_fn(|i| make_cdf(&INTRA_EXT_TX_SHORT_SIDE_ICDF[i], INTRA_EXT_TX_SHORT_SIDE_PARA[i])),
+            tx_ext_32_intra: make_cdf(&TX_EXT_32_INTRA_ICDF, TX_EXT_32_INTRA_PARA),
+            stx: std::array::from_fn(|i| make_cdf(&STX_ICDF[i], STX_PARA[i])),
+            most_probable_stx_set: make_cdf(&MOST_PROBABLE_STX_SET_ICDF, MOST_PROBABLE_STX_SET_PARA),
+            most_probable_stx_set_adst_adst: make_cdf(&MOST_PROBABLE_STX_SET_ADST_ADST_ICDF, MOST_PROBABLE_STX_SET_ADST_ADST_PARA),
+            cctx_type: make_cdf(&CCTX_TYPE_ICDF, CCTX_TYPE_PARA),
+            palette_y_mode: make_cdf(&PALETTE_Y_MODE_ICDF, PALETTE_Y_MODE_PARA),
+            palette_y_size: make_cdf(&PALETTE_Y_SIZE_ICDF, PALETTE_Y_SIZE_PARA),
+            identity_row_y: std::array::from_fn(|i| make_cdf(&IDENTITY_ROW_Y_ICDF[i], IDENTITY_ROW_Y_PARA[i])),
+            palette_y_color_index: std::array::from_fn(|ps| {
+                std::array::from_fn(|ctx| {
+                    let n_colors = PALETTE_COLORS_PER_SIZE[ps];
+                    make_cdf(&PALETTE_Y_COLOR_INDEX_ICDF[ps][ctx][..n_colors], PALETTE_Y_COLOR_INDEX_PARA[ps][ctx])
+                })
             }),
         }
     }

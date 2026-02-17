@@ -1,12 +1,41 @@
 use crate::block::TxSize;
+use std::sync::OnceLock;
 
 pub fn get_scan(tx_size: TxSize) -> &'static [u16] {
-    match tx_size {
-        TxSize::Tx4x4 => &DEFAULT_SCAN_4X4,
-        TxSize::Tx8x8 => &DEFAULT_SCAN_8X8,
-        TxSize::Tx16x16 => &DEFAULT_SCAN_16X16,
-        TxSize::Tx32x32 | TxSize::Tx64x64 => &DEFAULT_SCAN_32X32,
+    let cw = tx_size.coded_width();
+    let ch = tx_size.coded_height();
+    match (cw, ch) {
+        (4, 4) => &DEFAULT_SCAN_4X4,
+        (8, 8) => &DEFAULT_SCAN_8X8,
+        (16, 16) => &DEFAULT_SCAN_16X16,
+        (32, 32) => &DEFAULT_SCAN_32X32,
+        _ => get_rect_scan(cw, ch),
     }
+}
+
+fn get_rect_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
+    static RECT_SCANS: OnceLock<std::collections::HashMap<(usize, usize), Vec<u16>>> =
+        OnceLock::new();
+    let map = RECT_SCANS.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        for &(w, h) in &[
+            (4, 8),
+            (8, 4),
+            (4, 16),
+            (16, 4),
+            (8, 16),
+            (16, 8),
+            (8, 32),
+            (32, 8),
+            (16, 32),
+            (32, 16),
+        ] {
+            m.insert((w, h), generate_default_scan(w, h));
+        }
+        m
+    });
+    map.get(&(coded_w, coded_h))
+        .expect("unsupported rect scan size")
 }
 
 #[rustfmt::skip]
@@ -269,4 +298,42 @@ mod tests {
         assert_eq!(get_scan(TxSize::Tx32x32).len(), 1024);
         assert_eq!(get_scan(TxSize::Tx64x64).len(), 1024);
     }
+
+    #[test]
+    fn rect_scan_sizes() {
+        use crate::block::TxSize;
+        assert_eq!(get_scan(TxSize::Tx4x8).len(), 32);
+        assert_eq!(get_scan(TxSize::Tx8x4).len(), 32);
+        assert_eq!(get_scan(TxSize::Tx8x16).len(), 128);
+        assert_eq!(get_scan(TxSize::Tx16x8).len(), 128);
+        assert_eq!(get_scan(TxSize::Tx16x32).len(), 512);
+        assert_eq!(get_scan(TxSize::Tx32x16).len(), 512);
+        assert_eq!(get_scan(TxSize::Tx32x64).len(), 1024);
+        assert_eq!(get_scan(TxSize::Tx64x32).len(), 1024);
+    }
+
+    #[test]
+    fn generated_scan_matches_4x4() {
+        let scan = generate_default_scan(4, 4);
+        assert_eq!(scan.as_slice(), &DEFAULT_SCAN_4X4[..]);
+    }
+
+    #[test]
+    fn generated_scan_matches_8x8() {
+        let scan = generate_default_scan(8, 8);
+        assert_eq!(scan.as_slice(), &DEFAULT_SCAN_8X8[..]);
+    }
+}
+
+fn generate_default_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
+    let mut scan = Vec::with_capacity(coded_w * coded_h);
+    for sum in 0..(coded_w + coded_h - 1) {
+        let x_start = if sum < coded_h { 0 } else { sum - coded_h + 1 };
+        let x_end = sum.min(coded_w - 1);
+        for x in x_start..=x_end {
+            let y = sum - x;
+            scan.push((y * coded_w + x) as u16);
+        }
+    }
+    scan
 }

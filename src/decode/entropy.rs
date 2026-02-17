@@ -141,6 +141,24 @@ impl<'a> DaalaDecoder<'a> {
         ret
     }
 
+    pub fn decode_bit(&mut self) -> u32 {
+        self.decode_literal(1)
+    }
+
+    pub fn decode_uniform(&mut self, n: u32) -> u32 {
+        if n <= 1 {
+            return 0;
+        }
+        let l = 32 - n.leading_zeros();
+        let m = (1u32 << l) - n;
+        let v = self.decode_literal(l - 1);
+        if v < m {
+            v
+        } else {
+            (v << 1) - m + self.decode_literal(1)
+        }
+    }
+
     pub fn decode_literal(&mut self, n_bits: u32) -> u32 {
         let dif = self.dif;
         let r = self.rng;

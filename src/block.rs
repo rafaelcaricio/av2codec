@@ -81,19 +81,27 @@ pub enum TxSize {
     Tx16x16,
     Tx32x32,
     Tx64x64,
+    Tx4x8,
+    Tx8x4,
+    Tx4x16,
+    Tx16x4,
+    Tx8x16,
+    Tx16x8,
+    Tx8x32,
+    Tx32x8,
+    Tx16x32,
+    Tx32x16,
+    Tx16x64,
+    Tx64x16,
+    Tx32x64,
+    Tx64x32,
 }
+
+const AV2_TXFORM_COEFF_LIMIT: usize = 32;
 
 impl TxSize {
     pub fn from_block_size(bs: BlockSize) -> TxSize {
-        let min_dim = bs.width().min(bs.height());
-        match min_dim {
-            4 => TxSize::Tx4x4,
-            8 => TxSize::Tx8x8,
-            16 => TxSize::Tx16x16,
-            32 => TxSize::Tx32x32,
-            64 => TxSize::Tx64x64,
-            _ => unreachable!(),
-        }
+        max_txsize_rect_for_block(bs.width(), bs.height())
     }
 
     pub fn width(&self) -> usize {
@@ -103,67 +111,131 @@ impl TxSize {
             TxSize::Tx16x16 => 16,
             TxSize::Tx32x32 => 32,
             TxSize::Tx64x64 => 64,
+            TxSize::Tx4x8 | TxSize::Tx4x16 => 4,
+            TxSize::Tx8x4 | TxSize::Tx8x16 | TxSize::Tx8x32 => 8,
+            TxSize::Tx16x4 | TxSize::Tx16x8 | TxSize::Tx16x32 | TxSize::Tx16x64 => 16,
+            TxSize::Tx32x8 | TxSize::Tx32x16 | TxSize::Tx32x64 => 32,
+            TxSize::Tx64x16 | TxSize::Tx64x32 => 64,
         }
     }
 
     pub fn height(&self) -> usize {
-        self.width()
+        match self {
+            TxSize::Tx4x4 => 4,
+            TxSize::Tx8x8 => 8,
+            TxSize::Tx16x16 => 16,
+            TxSize::Tx32x32 => 32,
+            TxSize::Tx64x64 => 64,
+            TxSize::Tx8x4 | TxSize::Tx16x4 => 4,
+            TxSize::Tx4x8 | TxSize::Tx16x8 | TxSize::Tx32x8 => 8,
+            TxSize::Tx4x16 | TxSize::Tx8x16 | TxSize::Tx32x16 | TxSize::Tx64x16 => 16,
+            TxSize::Tx8x32 | TxSize::Tx16x32 | TxSize::Tx64x32 => 32,
+            TxSize::Tx16x64 | TxSize::Tx32x64 => 64,
+        }
+    }
+
+    pub fn coded_width(&self) -> usize {
+        self.width().min(AV2_TXFORM_COEFF_LIMIT)
+    }
+
+    pub fn coded_height(&self) -> usize {
+        self.height().min(AV2_TXFORM_COEFF_LIMIT)
     }
 
     pub fn bwl(&self) -> u32 {
-        match self {
-            TxSize::Tx4x4 => 2,
-            TxSize::Tx8x8 => 3,
-            TxSize::Tx16x16 => 4,
-            TxSize::Tx32x32 => 5,
-            TxSize::Tx64x64 => 6,
+        match self.coded_width() {
+            4 => 2,
+            8 => 3,
+            16 => 4,
+            32 => 5,
+            _ => unreachable!(),
         }
     }
 
     pub fn num_coeffs(&self) -> usize {
-        match self {
-            TxSize::Tx4x4 => 16,
-            TxSize::Tx8x8 => 64,
-            TxSize::Tx16x16 => 256,
-            TxSize::Tx32x32 => 1024,
-            TxSize::Tx64x64 => 1024,
-        }
+        self.coded_width() * self.coded_height()
     }
 
     pub fn log_scale(&self) -> u32 {
-        match self {
-            TxSize::Tx4x4 => 0,
-            TxSize::Tx8x8 => 0,
-            TxSize::Tx16x16 => 0,
-            TxSize::Tx32x32 => 1,
-            TxSize::Tx64x64 => 2,
-        }
+        let els = self.width() * self.height();
+        (els > 256) as u32 + (els > 1024) as u32
     }
 
     pub fn txs_ctx(&self) -> usize {
+        let max_dim = self.width().max(self.height());
+        match max_dim {
+            4 => 0,
+            8 => 1,
+            16 => 2,
+            32 => 3,
+            64 => 4,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn inv_shifts(&self) -> (u32, u32) {
         match self {
-            TxSize::Tx4x4 => 0,
-            TxSize::Tx8x8 => 1,
-            TxSize::Tx16x16 => 2,
-            TxSize::Tx32x32 => 3,
-            TxSize::Tx64x64 => 4,
+            TxSize::Tx4x4 => (7, 10),
+            TxSize::Tx8x8 => (7, 11),
+            TxSize::Tx16x16 => (6, 13),
+            TxSize::Tx32x32 => (6, 13),
+            TxSize::Tx64x64 => (6, 13),
+            TxSize::Tx4x8 | TxSize::Tx8x4 => (7, 10),
+            TxSize::Tx8x16 | TxSize::Tx16x8 => (7, 11),
+            TxSize::Tx16x32 | TxSize::Tx32x16 => (6, 12),
+            TxSize::Tx32x64 | TxSize::Tx64x32 => (6, 12),
+            TxSize::Tx4x16 | TxSize::Tx16x4 => (6, 12),
+            TxSize::Tx8x32 | TxSize::Tx32x8 => (6, 13),
+            TxSize::Tx16x64 | TxSize::Tx64x16 => (6, 13),
+        }
+    }
+
+    pub fn needs_sqrt2(&self) -> bool {
+        let log2w = (self.width() as f64).log2() as u32;
+        let log2h = (self.height() as f64).log2() as u32;
+        (log2w + log2h) & 1 != 0
+    }
+}
+
+pub fn max_txsize_rect_for_block(width: usize, height: usize) -> TxSize {
+    match (width, height) {
+        (4, 4) => TxSize::Tx4x4,
+        (4, 8) => TxSize::Tx4x8,
+        (8, 4) => TxSize::Tx8x4,
+        (8, 8) => TxSize::Tx8x8,
+        (8, 16) => TxSize::Tx8x16,
+        (16, 8) => TxSize::Tx16x8,
+        (16, 16) => TxSize::Tx16x16,
+        (16, 32) => TxSize::Tx16x32,
+        (32, 16) => TxSize::Tx32x16,
+        (32, 32) => TxSize::Tx32x32,
+        (32, 64) => TxSize::Tx32x64,
+        (64, 32) => TxSize::Tx64x32,
+        (64, 64) | (128, 128) | (64, 128) | (128, 64) => TxSize::Tx64x64,
+        (4, 16) => TxSize::Tx4x16,
+        (16, 4) => TxSize::Tx16x4,
+        (8, 32) => TxSize::Tx8x32,
+        (32, 8) => TxSize::Tx32x8,
+        (16, 64) => TxSize::Tx16x64,
+        (64, 16) => TxSize::Tx64x16,
+        _ => {
+            let w = width.min(64);
+            let h = height.min(64);
+            if w == width && h == height {
+                if h > w {
+                    max_txsize_rect_for_block(w, h / 2)
+                } else {
+                    max_txsize_rect_for_block(w / 2, h)
+                }
+            } else {
+                max_txsize_rect_for_block(w, h)
+            }
         }
     }
 }
 
 pub fn tx_size_for_block(width: usize, height: usize) -> TxSize {
-    let min_dim = width.min(height);
-    if min_dim >= 64 {
-        TxSize::Tx64x64
-    } else if min_dim >= 32 {
-        TxSize::Tx32x32
-    } else if min_dim >= 16 {
-        TxSize::Tx16x16
-    } else if min_dim >= 8 {
-        TxSize::Tx8x8
-    } else {
-        TxSize::Tx4x4
-    }
+    max_txsize_rect_for_block(width, height)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

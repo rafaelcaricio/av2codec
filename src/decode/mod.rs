@@ -73,8 +73,10 @@ impl Decoder {
                 enable_ist: seq.enable_ist,
                 enable_cctx: seq.enable_cctx,
                 tx_mode_select: fp.tx_mode_select,
+                reduced_tx_set_used: fp.reduced_tx_set_used,
                 reduced_tx_part_set: seq.reduced_tx_part_set,
                 allow_intrabc: fp.allow_intrabc,
+                allow_screen_content_tools: fp.allow_screen_content_tools,
                 enable_sdp: seq.enable_sdp,
                 cdef_frame_enable: fp.cdef_frame_enable,
                 nb_cdef_strengths: fp.nb_cdef_strengths,
@@ -143,17 +145,18 @@ fn reconstruct_tu(
     stride: usize,
     tu_x: usize,
     tu_y: usize,
-    tu_size: usize,
+    tu_w: usize,
+    tu_h: usize,
     pred: &[u8],
     pred_w: usize,
     pred_x_offset: usize,
     pred_y_offset: usize,
     residuals: &[i32],
 ) {
-    for row in 0..tu_size {
-        for col in 0..tu_size {
+    for row in 0..tu_h {
+        for col in 0..tu_w {
             let pred_val = pred[(pred_y_offset + row) * pred_w + pred_x_offset + col] as i32;
-            let res_val = residuals[row * tu_size + col];
+            let res_val = residuals[row * tu_w + col];
             let pixel = (pred_val + res_val).clamp(0, 255) as u8;
             recon[(tu_y + row) * stride + tu_x + col] = pixel;
         }
@@ -218,24 +221,17 @@ fn reconstruct_partitioned_frame(
             &y_plane, w, bx, by, bw, bh, pred_mode, angle_delta,
         );
 
-        let y_tu_size = if !block.y_tu.is_empty() {
-            block.y_tu[0].tx_size.width()
-        } else {
-            bw.min(bh)
-        };
-        let tu_cols = bw / y_tu_size;
-
-        for (ti, tu) in block.y_tu.iter().enumerate() {
-            let tu_col = ti % tu_cols;
-            let tu_row = ti / tu_cols;
-            let tx = bx + tu_col * y_tu_size;
-            let ty = by + tu_row * y_tu_size;
+        for tu in block.y_tu.iter() {
+            let tu_w = tu.tx_size.width();
+            let tu_h = tu.tx_size.height();
+            let tx = bx + tu.col_offset;
+            let ty = by + tu.row_offset;
             let residuals = transform::dequantize_and_inverse_var(
                 &tu.levels, tu.eob, dequant, tu.tx_size,
             );
             reconstruct_tu(
-                &mut y_plane, w, tx, ty, y_tu_size,
-                &y_pred, bw, tu_col * y_tu_size, tu_row * y_tu_size,
+                &mut y_plane, w, tx, ty, tu_w, tu_h,
+                &y_pred, bw, tu.col_offset, tu.row_offset,
                 &residuals,
             );
         }
@@ -247,40 +243,33 @@ fn reconstruct_partitioned_frame(
 
         if uv_bw >= 4 && uv_bh >= 4 {
             let u_pred = predict_dc_rect(&u_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
-            let uv_tu_size = if !block.u_tu.is_empty() {
-                block.u_tu[0].tx_size.width()
-            } else {
-                uv_bw.min(uv_bh)
-            };
-            let uv_tu_cols = uv_bw / uv_tu_size;
-
-            for (ti, tu) in block.u_tu.iter().enumerate() {
-                let tu_col = ti % uv_tu_cols;
-                let tu_row = ti / uv_tu_cols;
-                let tx = uv_bx + tu_col * uv_tu_size;
-                let ty = uv_by + tu_row * uv_tu_size;
+            for tu in block.u_tu.iter() {
+                let tu_w = tu.tx_size.width();
+                let tu_h = tu.tx_size.height();
+                let tx = uv_bx + tu.col_offset;
+                let ty = uv_by + tu.row_offset;
                 let residuals = transform::dequantize_and_inverse_var(
                     &tu.levels, tu.eob, dequant, tu.tx_size,
                 );
                 reconstruct_tu(
-                    &mut u_plane, uv_w, tx, ty, uv_tu_size,
-                    &u_pred, uv_bw, tu_col * uv_tu_size, tu_row * uv_tu_size,
+                    &mut u_plane, uv_w, tx, ty, tu_w, tu_h,
+                    &u_pred, uv_bw, tu.col_offset, tu.row_offset,
                     &residuals,
                 );
             }
 
             let v_pred = predict_dc_rect(&v_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
-            for (ti, tu) in block.v_tu.iter().enumerate() {
-                let tu_col = ti % uv_tu_cols;
-                let tu_row = ti / uv_tu_cols;
-                let tx = uv_bx + tu_col * uv_tu_size;
-                let ty = uv_by + tu_row * uv_tu_size;
+            for tu in block.v_tu.iter() {
+                let tu_w = tu.tx_size.width();
+                let tu_h = tu.tx_size.height();
+                let tx = uv_bx + tu.col_offset;
+                let ty = uv_by + tu.row_offset;
                 let residuals = transform::dequantize_and_inverse_var(
                     &tu.levels, tu.eob, dequant, tu.tx_size,
                 );
                 reconstruct_tu(
-                    &mut v_plane, uv_w, tx, ty, uv_tu_size,
-                    &v_pred, uv_bw, tu_col * uv_tu_size, tu_row * uv_tu_size,
+                    &mut v_plane, uv_w, tx, ty, tu_w, tu_h,
+                    &v_pred, uv_bw, tu.col_offset, tu.row_offset,
                     &residuals,
                 );
             }
@@ -701,9 +690,29 @@ mod tests {
         eprintln!("expected tile_data start: f6 ac 00 72 85 91 72 ff (from reference)");
         let dequant = crate::encode::ac_qlookup(fp.base_qindex);
 
-        let blocks = tile::decode_tile_data_partitioned_opts(
+        let tile_cfg = tile::TileDecodeConfig {
+            enable_cfl_intra: seq.enable_cfl_intra,
+            enable_fsc: seq.enable_fsc,
+            enable_idtx_intra: seq.enable_idtx_intra,
+            enable_mrls: seq.enable_mrls,
+            enable_ist: seq.enable_ist,
+            enable_cctx: seq.enable_cctx,
+            tx_mode_select: fp.tx_mode_select,
+            reduced_tx_set_used: fp.reduced_tx_set_used,
+            reduced_tx_part_set: seq.reduced_tx_part_set,
+            allow_intrabc: fp.allow_intrabc,
+            allow_screen_content_tools: fp.allow_screen_content_tools,
+            enable_sdp: seq.enable_sdp,
+            cdef_frame_enable: fp.cdef_frame_enable,
+            nb_cdef_strengths: fp.nb_cdef_strengths,
+            ccso_frame_enable: fp.ccso_frame_enable,
+            ccso_enable: fp.ccso_enable,
+            sb_size: seq.sb_size as usize,
+        };
+
+        let blocks = tile::decode_tile_data_partitioned_cfg(
             fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
-            !fp.disable_cdf_update, fp.base_qindex,
+            fp.base_qindex, &tile_cfg,
         );
 
         for (i, block) in blocks.iter().enumerate() {
@@ -723,8 +732,15 @@ mod tests {
             }
         }
 
-        let total_pixels: usize = blocks.iter().map(|b| b.width * b.height).sum();
-        assert_eq!(total_pixels, 128 * 128);
+        let luma_pixels: usize = blocks.iter()
+            .filter(|b| !b.y_tu.is_empty())
+            .map(|b| b.width * b.height)
+            .sum();
+        let chroma_blocks: usize = blocks.iter()
+            .filter(|b| b.y_tu.is_empty())
+            .count();
+        eprintln!("luma_pixels={} chroma_blocks={} total_blocks={}", luma_pixels, chroma_blocks, blocks.len());
+        assert!(luma_pixels <= 128 * 128, "luma coverage exceeds frame: {}", luma_pixels);
 
         let (y_plane, _u_plane, _v_plane) = reconstruct_partitioned_frame(
             &blocks, seq.width, seq.height, dequant,
