@@ -99,7 +99,7 @@ pub fn dequantize_and_inverse_var(
         TxSize::Tx64x64 => {
             let mut arr = [0i32; 1024];
             arr.copy_from_slice(&dqcoeffs);
-            dct::inverse_dct2_64x64(&arr).to_vec()
+            dct::inverse_dct2_64x64_av2(&arr).to_vec()
         }
     }
 }

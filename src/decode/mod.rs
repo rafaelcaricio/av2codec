@@ -2,6 +2,7 @@ pub mod bitreader;
 pub mod entropy;
 pub mod frame;
 pub mod obu;
+pub mod predict;
 pub mod sequence;
 pub mod tile;
 pub mod transform;
@@ -99,25 +100,7 @@ fn predict_dc_rect(
     w: usize,
     h: usize,
 ) -> Vec<u8> {
-    let has_above = y > 0;
-    let has_left = x > 0;
-    let val = match (has_above, has_left) {
-        (false, false) => 128u8,
-        (true, false) => {
-            let sum: u32 = (0..w).map(|i| recon[(y - 1) * stride + x + i] as u32).sum();
-            ((sum + w as u32 / 2) / w as u32) as u8
-        }
-        (false, true) => {
-            let sum: u32 = (0..h).map(|j| recon[(y + j) * stride + x - 1] as u32).sum();
-            ((sum + h as u32 / 2) / h as u32) as u8
-        }
-        (true, true) => {
-            let sum_above: u32 = (0..w).map(|i| recon[(y - 1) * stride + x + i] as u32).sum();
-            let sum_left: u32 = (0..h).map(|j| recon[(y + j) * stride + x - 1] as u32).sum();
-            ((sum_above + sum_left + (w + h) as u32 / 2) / (w + h) as u32) as u8
-        }
-    };
-    vec![val; w * h]
+    predict::predict_intra(recon, stride, x, y, w, h, predict::PredictionMode::DcPred, 0)
 }
 
 fn reconstruct_tu(
@@ -156,13 +139,49 @@ fn reconstruct_partitioned_frame(
     let mut u_plane = vec![128u8; uv_w * uv_h];
     let mut v_plane = vec![128u8; uv_w * uv_h];
 
+    let mi_cols = (w + 3) / 4;
+    let mi_rows = (h + 3) / 4;
+    let mut joint_grid = vec![0u8; mi_cols * mi_rows];
+
     for block in blocks {
         let bx = block.x;
         let by = block.y;
         let bw = block.width;
         let bh = block.height;
 
-        let y_pred = predict_dc_rect(&y_plane, w, bx, by, bw, bh);
+        let mi_x = bx / 4;
+        let mi_y = by / 4;
+        let mi_w = bw / 4;
+        let mi_h = bh / 4;
+
+        let bottom_left_joint = if mi_x > 0 && mi_y + mi_h < mi_rows {
+            Some(joint_grid[(mi_y + mi_h) * mi_cols + (mi_x - 1)])
+        } else {
+            None
+        };
+        let above_right_joint = if mi_y > 0 && mi_x + mi_w < mi_cols {
+            Some(joint_grid[(mi_y - 1) * mi_cols + (mi_x + mi_w)])
+        } else {
+            None
+        };
+
+        let is_small_block = bw < 8 || bh < 8;
+        let is_large_block = bw * bh > 64;
+        let mode_list = predict::build_y_intra_mode_list(
+            bottom_left_joint, above_right_joint, is_small_block, is_large_block,
+        );
+        let joint = mode_list[block.y_mode as usize];
+        let (pred_mode, angle_delta) = predict::decode_prediction_mode(joint);
+
+        for r in 0..mi_h {
+            for c in 0..mi_w {
+                joint_grid[(mi_y + r) * mi_cols + mi_x + c] = joint;
+            }
+        }
+
+        let y_pred = predict::predict_intra(
+            &y_plane, w, bx, by, bw, bh, pred_mode, angle_delta,
+        );
 
         let y_tu_size = if !block.y_tu.is_empty() {
             block.y_tu[0].tx_size.width()
@@ -608,16 +627,14 @@ mod tests {
             .sum::<f64>() / (w / 2 * h / 2) as f64;
         let u_psnr = if u_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / u_mse).log10() } else { 100.0 };
 
-        eprintln!("Y PSNR: {:.2} dB (MSE={:.2})", y_psnr, y_mse);
-        eprintln!("U PSNR: {:.2} dB (MSE={:.2})", u_psnr, u_mse);
+        let ref_v = &ref_y4m[header_len + w * h + w / 2 * h / 2..header_len + w * h + 2 * (w / 2 * h / 2)];
+        let v_mse: f64 = v_plane.iter().zip(ref_v.iter())
+            .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+            .sum::<f64>() / (w / 2 * h / 2) as f64;
+        let v_psnr = if v_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / v_mse).log10() } else { 100.0 };
 
-        for (i, block) in blocks.iter().enumerate() {
-            eprintln!("Block {}: ({},{}) {}x{} y_mode={} uv_mode={} y_tus={} u_tus={} v_tus={}",
-                i, block.x, block.y, block.width, block.height,
-                block.y_mode, block.uv_mode,
-                block.y_tu.len(), block.u_tu.len(), block.v_tu.len());
-        }
-
-        assert!(y_psnr > 30.0, "Y PSNR too low: {:.2}", y_psnr);
+        assert!(y_psnr >= 100.0, "Y PSNR={:.2} dB, expected perfect reconstruction", y_psnr);
+        assert!(u_psnr >= 100.0, "U PSNR={:.2} dB, expected perfect reconstruction", u_psnr);
+        assert!(v_psnr >= 100.0, "V PSNR={:.2} dB, expected perfect reconstruction", v_psnr);
     }
 }

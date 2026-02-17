@@ -262,6 +262,23 @@ pub fn inverse_dct2_64x64(coeffs: &[i32; 1024]) -> [i32; 4096] {
     output
 }
 
+pub fn inverse_dct2_64x64_av2(coeffs: &[i32; 1024]) -> [i32; 4096] {
+    let base = inverse_dct2_32x32(coeffs);
+
+    let mut output = [0i32; 4096];
+    for row32 in 0..32 {
+        for col32 in 0..32 {
+            let val = base[row32 * 32 + col32];
+            output[(2 * row32) * 64 + 2 * col32] = val;
+            output[(2 * row32) * 64 + 2 * col32 + 1] = val;
+            output[(2 * row32 + 1) * 64 + 2 * col32] = val;
+            output[(2 * row32 + 1) * 64 + 2 * col32 + 1] = val;
+        }
+    }
+
+    output
+}
+
 pub fn forward_dct2_4x4(residual: &[i32; 16]) -> [i32; 16] {
     let mut temp = [[0i32; 4]; 4];
 
