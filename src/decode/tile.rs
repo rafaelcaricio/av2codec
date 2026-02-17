@@ -1,13 +1,14 @@
+use crate::block::{PartitionType, TxSize, PARTITION_PLOFFSET, PARTITION_CONTEXTS, SQUARE_SPLIT_CONTEXTS};
 use crate::cdf_context::FrameCdfContext;
 use crate::cdf_tables::*;
 use crate::decode::entropy::DaalaDecoder;
-use crate::scan::DEFAULT_SCAN_32X32;
+use crate::scan::{get_scan, DEFAULT_SCAN_32X32};
 
 const DO_SPLIT_ICDF: [u16; 2] = [12276, 0];
-const Y_MODE_SET_ICDF: [u16; 4] = [3905, 1746, 1044, 0];
-const Y_MODE_IDX_ICDF: [u16; 8] = [17593, 12693, 11040, 8670, 6363, 5113, 3908, 0];
-const UV_MODE_ICDF: [u16; 8] = [23405, 11811, 9903, 8015, 6357, 4785, 2340, 0];
-const TXB_SKIP_Y_ICDF: [u16; 2] = [29968, 0];
+const FIRST_MODE_COUNT: usize = 13;
+const SECOND_MODE_COUNT: usize = 16;
+const NON_DIRECTIONAL_MODES_COUNT: usize = 5;
+const CFL_SIGNS: usize = 3;
 
 const ADAPTIVE_TABLE: [usize; 5] = [4, 8, 16, 32, 64];
 
@@ -353,7 +354,7 @@ fn decode_plane_full(
 
     let skip = if let Some(ref mut cdf) = cdf_ctx {
         let txb_skip_cdf = match ctx.plane {
-            0 => &mut cdf.txb_skip_y,
+            0 => &mut cdf.txb_skip_y[txs_ctx_idx][ctx.entropy_ctx],
             1 => &mut cdf.txb_skip_u[ctx.entropy_ctx],
             _ => if ctx.u_has_coeffs {
                 &mut cdf.txb_skip_v_u_nz[ctx.entropy_ctx]
@@ -695,14 +696,14 @@ pub fn decode_tile_data_multi_sb(
                 ec.decode_symbol(&Y_MODE_SET_ICDF)
             };
             let y_mode = if let Some(ref mut ctx) = cdf_ctx {
-                ec.decode_symbol_mut(&mut ctx.y_mode_idx) as u8
+                ec.decode_symbol_mut(&mut ctx.y_mode_idx[0]) as u8
             } else {
-                ec.decode_symbol(&Y_MODE_IDX_ICDF) as u8
+                ec.decode_symbol(&Y_MODE_IDX_ICDF[0]) as u8
             };
             let uv_mode = if let Some(ref mut ctx) = cdf_ctx {
-                ec.decode_symbol_mut(&mut ctx.uv_mode) as u8
+                ec.decode_symbol_mut(&mut ctx.uv_mode[0]) as u8
             } else {
-                ec.decode_symbol(&UV_MODE_ICDF) as u8
+                ec.decode_symbol(&UV_MODE_ICDF[0]) as u8
             };
 
             let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
@@ -711,10 +712,10 @@ pub fn decode_tile_data_multi_sb(
                 &mut ec,
                 &PlaneDecodeCtx {
                     plane: 0,
-                    txs_ctx_idx: 1,
+                    txs_ctx_idx: 4,
                     bwl: 5,
                     height: 32,
-                    txb_skip_icdf: &TXB_SKIP_Y_ICDF,
+                    txb_skip_icdf: &TXB_SKIP_Y_ICDF[4][0],
                     dc_sign_ctx: y_dc_sign_ctx,
                     entropy_ctx: 0,
                     u_has_coeffs: false,
@@ -734,7 +735,7 @@ pub fn decode_tile_data_multi_sb(
                 &mut ec,
                 &PlaneDecodeCtx {
                     plane: 1,
-                    txs_ctx_idx: 0,
+                    txs_ctx_idx: 3,
                     bwl: 5,
                     height: 32,
                     txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
@@ -762,7 +763,7 @@ pub fn decode_tile_data_multi_sb(
                 &mut ec,
                 &PlaneDecodeCtx {
                     plane: 2,
-                    txs_ctx_idx: 0,
+                    txs_ctx_idx: 3,
                     bwl: 5,
                     height: 32,
                     txb_skip_icdf: v_skip_icdf,
@@ -793,6 +794,966 @@ pub fn decode_tile_data_multi_sb(
     }
 
     result
+}
+
+pub struct TuData {
+    pub levels: Vec<i32>,
+    pub eob: u16,
+    pub tx_size: TxSize,
+}
+
+pub struct DecodedBlock {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub y_mode: u8,
+    pub uv_mode: u8,
+    pub y_tu: Vec<TuData>,
+    pub u_tu: Vec<TuData>,
+    pub v_tu: Vec<TuData>,
+}
+
+fn compute_eob_from_token(
+    ec: &mut DaalaDecoder,
+    eob_token: usize,
+    cdf: &mut FrameCdfContext,
+) -> u16 {
+    let eob_pt = eob_token + 1;
+    let bits = EOB_OFFSET_BITS[eob_pt] as u32;
+    let base = EOB_GROUP_START[eob_pt];
+    if bits > 0 {
+        let msb = ec.decode_symbol_mut(&mut cdf.eob_extra) as u16;
+        let rest = if bits > 1 {
+            ec.decode_literal(bits - 1) as u16
+        } else {
+            0
+        };
+        base + (msb << (bits - 1)) | rest
+    } else {
+        base
+    }
+}
+
+fn decode_eob_var(
+    ec: &mut DaalaDecoder,
+    tx_size: TxSize,
+    pl_ctx: usize,
+    cdf: &mut FrameCdfContext,
+) -> u16 {
+    let num_coeffs = tx_size.num_coeffs();
+    let (raw, extra_bits) = match num_coeffs {
+        16 => (ec.decode_symbol_mut(&mut cdf.eob_multi_16[pl_ctx]), 0u32),
+        64 => (ec.decode_symbol_mut(&mut cdf.eob_multi_64[pl_ctx]), 0),
+        256 => (ec.decode_symbol_mut(&mut cdf.eob_multi_256[pl_ctx]), 1),
+        1024 => (ec.decode_symbol_mut(&mut cdf.eob_multi_1024[pl_ctx]), 2),
+        _ => unreachable!(),
+    };
+
+    let eob_token = if extra_bits > 0 && raw >= EOB_PT_INDEX_COUNT - 1 {
+        let extra = ec.decode_literal(extra_bits) as usize;
+        (EOB_PT_INDEX_COUNT - 1) + extra
+    } else {
+        raw
+    };
+
+    compute_eob_from_token(ec, eob_token, cdf)
+}
+
+fn decode_coeff_tu(
+    ec: &mut DaalaDecoder,
+    plane: usize,
+    tx_size: TxSize,
+    dc_sign_ctx: usize,
+    entropy_ctx: usize,
+    u_has_coeffs: bool,
+    cdf: &mut FrameCdfContext,
+) -> TuData {
+    let bwl = tx_size.bwl();
+    let width = tx_size.width();
+    let height = width;
+    let num_coeffs = tx_size.num_coeffs();
+    let scan = get_scan(tx_size);
+    let txs_idx = tx_size.txs_ctx();
+
+    let plane_name = match plane { 0 => "y", 1 => "u", _ => "v" };
+    ec.trace_state(&format!("before_txb_skip_{} txs_ctx={} skip_ctx={}", plane_name, txs_idx, entropy_ctx));
+
+    let skip = match plane {
+        0 => ec.decode_symbol_mut(&mut cdf.txb_skip_y[txs_idx][entropy_ctx]),
+        1 => ec.decode_symbol_mut(&mut cdf.txb_skip_u[entropy_ctx]),
+        _ => {
+            if u_has_coeffs {
+                ec.decode_symbol_mut(&mut cdf.txb_skip_v_u_nz[entropy_ctx])
+            } else {
+                ec.decode_symbol_mut(&mut cdf.txb_skip_v[entropy_ctx])
+            }
+        }
+    };
+
+    if skip == 1 {
+        return TuData {
+            levels: vec![0; num_coeffs],
+            eob: 0,
+            tx_size,
+        };
+    }
+
+    let pl_ctx = if plane == 0 { 0 } else { 2 };
+    let eob = decode_eob_var(ec, tx_size, pl_ctx, cdf);
+
+    let padded_stride = width + TX_PAD_HOR;
+    let padded_height = height + 2;
+    let mut levels_buf = vec![0u8; padded_stride * padded_height];
+    let mut abs_levels = vec![0usize; eob as usize];
+
+    let eob_scan_idx = (eob - 1) as usize;
+    let eob_pos = scan[eob_scan_idx] as usize;
+    let eob_row = eob_pos >> bwl;
+    let eob_col = eob_pos - (eob_row << bwl);
+    let eob_lf = is_lf_2d(eob_row, eob_col, plane);
+
+    let coeff_ctx = get_lower_levels_ctx_eob(bwl, height, eob_scan_idx);
+
+    if plane == 0 {
+        if eob_lf {
+            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_eob_y[txs_idx][coeff_ctx]);
+            let base_value = sym + 1;
+            if base_value > LF_NUM_BASE_LEVELS {
+                let br_ctx = get_br_ctx_lf_eob_2d(eob_pos);
+                abs_levels[eob_scan_idx] = decode_low_range(
+                    ec,
+                    LF_NUM_BASE_LEVELS,
+                    &COEFF_BR_LF_Y_ICDF[br_ctx],
+                    Some(&mut cdf.coeff_br_lf_y[br_ctx]),
+                );
+            } else {
+                abs_levels[eob_scan_idx] = base_value;
+            }
+        } else {
+            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_eob_y[txs_idx][coeff_ctx]);
+            let base_value = sym + 1;
+            if base_value > NUM_BASE_LEVELS {
+                abs_levels[eob_scan_idx] = decode_low_range(
+                    ec,
+                    NUM_BASE_LEVELS,
+                    &COEFF_BR_Y_ICDF[0],
+                    Some(&mut cdf.coeff_br_y[0]),
+                );
+            } else {
+                abs_levels[eob_scan_idx] = base_value;
+            }
+        }
+    } else if eob_lf {
+        let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_eob_uv[coeff_ctx]);
+        abs_levels[eob_scan_idx] = sym + 1;
+    } else {
+        let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_eob_uv[coeff_ctx]);
+        let base_value = sym + 1;
+        if base_value > NUM_BASE_LEVELS {
+            abs_levels[eob_scan_idx] = decode_low_range(
+                ec,
+                NUM_BASE_LEVELS,
+                &COEFF_BR_UV_ICDF[0],
+                Some(&mut cdf.coeff_br_uv[0]),
+            );
+        } else {
+            abs_levels[eob_scan_idx] = base_value;
+        }
+    }
+
+    levels_buf[get_padded_idx(eob_pos, bwl)] =
+        stored_level(abs_levels[eob_scan_idx], eob_lf, plane);
+
+    if eob > 1 {
+        for c in (1..eob_scan_idx).rev() {
+            let pos = scan[c] as usize;
+            let row = pos >> bwl;
+            let col = pos - (row << bwl);
+            let lf = is_lf_2d(row, col, plane);
+
+            if plane == 0 {
+                if lf {
+                    let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, pos, bwl);
+                    let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_idx][lctx]);
+                    if sym > LF_NUM_BASE_LEVELS {
+                        let br_ctx = get_br_lf_ctx_2d(&levels_buf, pos, bwl);
+                        abs_levels[c] = decode_low_range(
+                            ec,
+                            LF_NUM_BASE_LEVELS,
+                            &COEFF_BR_LF_Y_ICDF[br_ctx],
+                            Some(&mut cdf.coeff_br_lf_y[br_ctx]),
+                        );
+                    } else {
+                        abs_levels[c] = sym;
+                    }
+                } else {
+                    let lctx = get_lower_levels_ctx_2d(&levels_buf, pos, bwl, plane);
+                    let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_idx][lctx]);
+                    if sym > NUM_BASE_LEVELS {
+                        let br_ctx = get_br_ctx_2d(&levels_buf, pos, bwl);
+                        abs_levels[c] = decode_low_range(
+                            ec,
+                            NUM_BASE_LEVELS,
+                            &COEFF_BR_Y_ICDF[br_ctx],
+                            Some(&mut cdf.coeff_br_y[br_ctx]),
+                        );
+                    } else {
+                        abs_levels[c] = sym;
+                    }
+                }
+            } else if lf {
+                let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, pos, bwl, plane);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx]);
+                abs_levels[c] = sym;
+            } else {
+                let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, pos, bwl, plane);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx]);
+                if sym > NUM_BASE_LEVELS {
+                    let br_ctx = get_br_ctx_2d_chroma(&levels_buf, pos, bwl);
+                    abs_levels[c] = decode_low_range(
+                        ec,
+                        NUM_BASE_LEVELS,
+                        &COEFF_BR_UV_ICDF[br_ctx],
+                        Some(&mut cdf.coeff_br_uv[br_ctx]),
+                    );
+                } else {
+                    abs_levels[c] = sym;
+                }
+            }
+
+            levels_buf[get_padded_idx(pos, bwl)] = stored_level(abs_levels[c], lf, plane);
+        }
+
+        let dc_pos = scan[0] as usize;
+        let dc_row = dc_pos >> bwl;
+        let dc_col = dc_pos - (dc_row << bwl);
+        let dc_lf = is_lf_2d(dc_row, dc_col, plane);
+
+        if plane == 0 {
+            if dc_lf {
+                let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, dc_pos, bwl);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_idx][lctx]);
+                if sym > LF_NUM_BASE_LEVELS {
+                    let br_ctx = get_br_lf_ctx_dc_2d(&levels_buf, dc_pos, bwl);
+                    abs_levels[0] = decode_low_range(
+                        ec,
+                        LF_NUM_BASE_LEVELS,
+                        &COEFF_BR_LF_Y_ICDF[br_ctx],
+                        Some(&mut cdf.coeff_br_lf_y[br_ctx]),
+                    );
+                } else {
+                    abs_levels[0] = sym;
+                }
+            } else {
+                let lctx = get_lower_levels_ctx_2d(&levels_buf, dc_pos, bwl, plane);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_idx][lctx]);
+                if sym > NUM_BASE_LEVELS {
+                    let br_ctx = get_br_ctx_2d(&levels_buf, dc_pos, bwl);
+                    abs_levels[0] = decode_low_range(
+                        ec,
+                        NUM_BASE_LEVELS,
+                        &COEFF_BR_Y_ICDF[br_ctx],
+                        Some(&mut cdf.coeff_br_y[br_ctx]),
+                    );
+                } else {
+                    abs_levels[0] = sym;
+                }
+            }
+        } else if dc_lf {
+            let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, dc_pos, bwl, plane);
+            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx]);
+            abs_levels[0] = sym;
+        } else {
+            let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, dc_pos, bwl, plane);
+            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx]);
+            if sym > NUM_BASE_LEVELS {
+                let br_ctx = get_br_ctx_2d_chroma(&levels_buf, dc_pos, bwl);
+                abs_levels[0] = decode_low_range(
+                    ec,
+                    NUM_BASE_LEVELS,
+                    &COEFF_BR_UV_ICDF[br_ctx],
+                    Some(&mut cdf.coeff_br_uv[br_ctx]),
+                );
+            } else {
+                abs_levels[0] = sym;
+            }
+        }
+
+        levels_buf[get_padded_idx(dc_pos, bwl)] = stored_level(abs_levels[0], dc_lf, plane);
+    }
+
+    let mut levels = vec![0i32; num_coeffs];
+    let mut hr_avg = 0usize;
+    for c in (0..eob as usize).rev() {
+        let pos = scan[c] as usize;
+        let abs_level = abs_levels[c];
+        if abs_level == 0 {
+            continue;
+        }
+
+        let row = pos >> bwl;
+        let col = pos - (row << bwl);
+        let is_dc_2d = c == 0;
+
+        let sign = if is_dc_2d {
+            if plane == 0 {
+                ec.decode_symbol_mut(&mut cdf.dc_sign_y[dc_sign_ctx])
+            } else {
+                ec.decode_literal(1) as usize
+            }
+        } else {
+            ec.decode_literal(1) as usize
+        };
+
+        let lf = is_lf_2d(row, col, plane);
+        let max_br = if lf {
+            if plane == 0 {
+                LF_MAX_BASE_BR_RANGE
+            } else {
+                LF_NUM_BASE_LEVELS + 1
+            }
+        } else {
+            MAX_BASE_BR_RANGE
+        };
+
+        let final_level = if abs_level >= max_br {
+            let hr = decode_adaptive_hr(ec, hr_avg);
+            hr_avg = (hr_avg + hr) >> 1;
+            abs_level + hr
+        } else {
+            abs_level
+        };
+
+        levels[c] = if sign == 1 {
+            -(final_level as i32)
+        } else {
+            final_level as i32
+        };
+    }
+
+    TuData {
+        levels,
+        eob,
+        tx_size,
+    }
+}
+
+fn decode_block_tus(
+    ec: &mut DaalaDecoder,
+    plane: usize,
+    block_w: usize,
+    block_h: usize,
+    dc_sign_ctx: usize,
+    entropy_ctx: usize,
+    u_has_coeffs: bool,
+    cdf: &mut FrameCdfContext,
+) -> Vec<TuData> {
+    let tx_size = crate::block::tx_size_for_block(block_w, block_h);
+    let tx_w = tx_size.width();
+    let tx_h = tx_size.height();
+    let tu_cols = (block_w / tx_w).max(1);
+    let tu_rows = (block_h / tx_h).max(1);
+
+    let mut tus = Vec::with_capacity(tu_cols * tu_rows);
+    for _tu_row in 0..tu_rows {
+        for _tu_col in 0..tu_cols {
+            let tu = decode_coeff_tu(
+                ec,
+                plane,
+                tx_size,
+                dc_sign_ctx,
+                entropy_ctx,
+                u_has_coeffs,
+                cdf,
+            );
+            tus.push(tu);
+        }
+    }
+    tus
+}
+
+fn read_y_mode(ec: &mut DaalaDecoder, y_mode_ctx: usize, cdf: &mut FrameCdfContext) -> u8 {
+    ec.trace_state("before_mode_set");
+    let mode_set = ec.decode_symbol_mut(&mut cdf.y_mode_set);
+    ec.trace_state(&format!("after_mode_set={}", mode_set));
+    if mode_set == 0 {
+        let mut mode_idx = ec.decode_symbol_mut(&mut cdf.y_mode_idx[y_mode_ctx]);
+        ec.trace_state(&format!("after_mode_idx={} ctx={}", mode_idx, y_mode_ctx));
+        if mode_idx == 7 {
+            let offset = ec.decode_symbol_mut(&mut cdf.y_mode_idx_offset[y_mode_ctx]);
+            ec.trace_state(&format!("after_mode_offset={}", offset));
+            mode_idx += offset;
+        }
+        mode_idx as u8
+    } else {
+        let literal = ec.decode_literal(4) as usize;
+        (FIRST_MODE_COUNT + (mode_set - 1) * SECOND_MODE_COUNT + literal) as u8
+    }
+}
+
+fn is_cfl_allowed(block_w: usize, block_h: usize) -> bool {
+    let uv_w = block_w / 2;
+    let uv_h = block_h / 2;
+    uv_w >= 4 && uv_h >= 4 && uv_w == uv_h
+}
+
+fn read_uv_mode(
+    ec: &mut DaalaDecoder,
+    y_mode: u8,
+    block_w: usize,
+    block_h: usize,
+    cfl_ctx: usize,
+    enable_cfl_intra: bool,
+    cdf: &mut FrameCdfContext,
+) -> u8 {
+    if is_cfl_allowed(block_w, block_h) {
+        ec.trace_state(&format!("before_is_cfl ctx={}", cfl_ctx));
+        let is_cfl = ec.decode_symbol_mut(&mut cdf.cfl[cfl_ctx]);
+        ec.trace_state(&format!("after_is_cfl={}", is_cfl));
+        if is_cfl == 1 {
+            if enable_cfl_intra {
+                let cfl_idx = ec.decode_symbol_mut(&mut cdf.cfl_index);
+                ec.trace_state(&format!("after_cfl_index={}", cfl_idx));
+                if cfl_idx != 0 {
+                    return 13;
+                }
+            }
+            let joint_sign = ec.decode_symbol_mut(&mut cdf.cfl_sign);
+            ec.trace_state(&format!("after_cfl_sign={}", joint_sign));
+            let u_sign = (joint_sign + 1) / CFL_SIGNS;
+            let v_sign = (joint_sign + 1) % CFL_SIGNS;
+            if u_sign != 0 {
+                let alpha_u_ctx = joint_sign - 2;
+                let _alpha_u = ec.decode_symbol_mut(&mut cdf.cfl_alpha[alpha_u_ctx]);
+                ec.trace_state(&format!("after_cfl_alpha_u={} ctx={}", _alpha_u, alpha_u_ctx));
+            }
+            if v_sign != 0 {
+                let alpha_v_ctx = v_sign * CFL_SIGNS + u_sign - CFL_SIGNS;
+                let _alpha_v = ec.decode_symbol_mut(&mut cdf.cfl_alpha[alpha_v_ctx]);
+                ec.trace_state(&format!("after_cfl_alpha_v={} ctx={}", _alpha_v, alpha_v_ctx));
+            }
+            return 13;
+        }
+    }
+
+    let uv_ctx = if (y_mode as usize) >= NON_DIRECTIONAL_MODES_COUNT { 1 } else { 0 };
+    ec.trace_state(&format!("before_uv_mode ctx={}", uv_ctx));
+    let mut uv_mode_idx = ec.decode_symbol_mut(&mut cdf.uv_mode[uv_ctx]);
+    if uv_mode_idx == 7 {
+        uv_mode_idx += ec.decode_literal(3) as usize;
+    }
+    uv_mode_idx as u8
+}
+
+struct ModeInfoGrid {
+    mi_cols: usize,
+    is_directional: Vec<bool>,
+    is_cfl: Vec<bool>,
+}
+
+impl ModeInfoGrid {
+    fn new(frame_w: usize, frame_h: usize) -> Self {
+        let mi_cols = (frame_w + 3) / 4;
+        let mi_rows = (frame_h + 3) / 4;
+        let n = mi_cols * mi_rows;
+        Self {
+            mi_cols,
+            is_directional: vec![false; n],
+            is_cfl: vec![false; n],
+        }
+    }
+
+    fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, directional: bool, cfl: bool) {
+        let mi_x = x / 4;
+        let mi_y = y / 4;
+        let mi_w = w / 4;
+        let mi_h = h / 4;
+        for r in mi_y..mi_y + mi_h {
+            for c in mi_x..mi_x + mi_w {
+                let idx = r * self.mi_cols + c;
+                self.is_directional[idx] = directional;
+                self.is_cfl[idx] = cfl;
+            }
+        }
+    }
+
+    fn y_mode_ctx(&self, x: usize, y: usize) -> usize {
+        let mi_x = x / 4;
+        let mi_y = y / 4;
+        let mut cnt = 0;
+        if mi_y > 0 {
+            let above = (mi_y - 1) * self.mi_cols + mi_x;
+            if self.is_directional[above] {
+                cnt += 1;
+            }
+        }
+        if mi_x > 0 {
+            let left = mi_y * self.mi_cols + (mi_x - 1);
+            if self.is_directional[left] {
+                cnt += 1;
+            }
+        }
+        cnt
+    }
+
+    fn cfl_ctx(&self, x: usize, y: usize) -> usize {
+        let mi_x = x / 4;
+        let mi_y = y / 4;
+        let mut cnt = 0;
+        if mi_y > 0 {
+            let above = (mi_y - 1) * self.mi_cols + mi_x;
+            if self.is_cfl[above] {
+                cnt += 1;
+            }
+        }
+        if mi_x > 0 {
+            let left = mi_y * self.mi_cols + (mi_x - 1);
+            if self.is_cfl[left] {
+                cnt += 1;
+            }
+        }
+        cnt
+    }
+}
+
+fn decode_leaf_block(
+    ec: &mut DaalaDecoder,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    enable_cfl_intra: bool,
+    cdf: &mut FrameCdfContext,
+    mi: &mut ModeInfoGrid,
+    blocks: &mut Vec<DecodedBlock>,
+) {
+    let y_mode_ctx = mi.y_mode_ctx(x, y);
+    let cfl_ctx = mi.cfl_ctx(x, y);
+    let y_mode = read_y_mode(ec, y_mode_ctx, cdf);
+    let uv_mode = read_uv_mode(ec, y_mode, width, height, cfl_ctx, enable_cfl_intra, cdf);
+
+    let is_directional = y_mode >= 5;
+    let is_cfl = uv_mode == 13;
+    mi.fill(x, y, width, height, is_directional, is_cfl);
+
+    let y_tu = decode_block_tus(ec, 0, width, height, 0, 0, false, cdf);
+
+    let uv_w = width / 2;
+    let uv_h = height / 2;
+    let u_tu = if uv_w >= 4 && uv_h >= 4 {
+        decode_block_tus(ec, 1, uv_w, uv_h, 0, 0, false, cdf)
+    } else {
+        vec![]
+    };
+
+    let v_u_has = u_tu.iter().any(|t| t.eob > 0);
+    let v_tu = if uv_w >= 4 && uv_h >= 4 {
+        decode_block_tus(ec, 2, uv_w, uv_h, 0, 0, v_u_has, cdf)
+    } else {
+        vec![]
+    };
+
+    ec.trace_state(&format!("after_v_coeffs block=({},{})", x, y));
+
+    blocks.push(DecodedBlock {
+        x,
+        y,
+        width,
+        height,
+        y_mode,
+        uv_mode,
+        y_tu,
+        u_tu,
+        v_tu,
+    });
+}
+
+fn subblock_offsets(
+    partition: PartitionType,
+    w: usize,
+    h: usize,
+) -> Vec<(usize, usize, usize, usize)> {
+    match partition {
+        PartitionType::None => vec![(0, 0, w, h)],
+        PartitionType::Horz => vec![(0, 0, w, h / 2), (0, h / 2, w, h / 2)],
+        PartitionType::Vert => vec![(0, 0, w / 2, h), (w / 2, 0, w / 2, h)],
+        PartitionType::Split => {
+            let hw = w / 2;
+            let hh = h / 2;
+            vec![
+                (0, 0, hw, hh),
+                (hw, 0, hw, hh),
+                (0, hh, hw, hh),
+                (hw, hh, hw, hh),
+            ]
+        }
+        PartitionType::Horz3 => {
+            let qh = h / 4;
+            let hw = w / 2;
+            let hh = h / 2;
+            vec![
+                (0, 0, w, qh),
+                (0, qh, hw, hh),
+                (hw, qh, hw, hh),
+                (0, qh + hh, w, qh),
+            ]
+        }
+        PartitionType::Vert3 => {
+            let qw = w / 4;
+            let hw = w / 2;
+            let hh = h / 2;
+            vec![
+                (0, 0, qw, h),
+                (qw, 0, hw, hh),
+                (qw, hh, hw, hh),
+                (qw + hw, 0, qw, h),
+            ]
+        }
+        PartitionType::Horz4A => {
+            let e = h / 8;
+            vec![
+                (0, 0, w, e),
+                (0, e, w, 2 * e),
+                (0, 3 * e, w, 4 * e),
+                (0, 7 * e, w, e),
+            ]
+        }
+        PartitionType::Horz4B => {
+            let e = h / 8;
+            vec![
+                (0, 0, w, e),
+                (0, e, w, 4 * e),
+                (0, 5 * e, w, 2 * e),
+                (0, 7 * e, w, e),
+            ]
+        }
+        PartitionType::Vert4A => {
+            let e = w / 8;
+            vec![
+                (0, 0, e, h),
+                (e, 0, 2 * e, h),
+                (3 * e, 0, 4 * e, h),
+                (7 * e, 0, e, h),
+            ]
+        }
+        PartitionType::Vert4B => {
+            let e = w / 8;
+            vec![
+                (0, 0, e, h),
+                (e, 0, 4 * e, h),
+                (5 * e, 0, 2 * e, h),
+                (7 * e, 0, e, h),
+            ]
+        }
+    }
+}
+
+fn bsize_map_val(w: usize, h: usize) -> usize {
+    match (w, h) {
+        (4, 4) | (4, 8) | (8, 4) | (8, 8) => 0,
+        (8, 16) | (16, 8) | (16, 16) => 1,
+        (16, 32) | (32, 16) | (32, 32) => 2,
+        (32, 64) | (64, 32) | (64, 64) => 3,
+        (64, 128) => 4,
+        (128, 64) => 5,
+        (128, 128) => 6,
+        (4, 16) => 10,
+        (16, 4) => 11,
+        (8, 32) => 12,
+        (32, 8) => 13,
+        (16, 64) => 14,
+        (64, 16) => 15,
+        _ => 0,
+    }
+}
+
+fn bsize_rect_map_val(w: usize, h: usize) -> usize {
+    match (w, h) {
+        (4, 4) | (4, 8) | (8, 4) | (8, 8) | (16, 16) => 0,
+        (8, 16) | (16, 32) => 1,
+        (16, 8) | (32, 16) => 2,
+        (32, 32) => 3,
+        (32, 64) => 4,
+        (64, 32) => 5,
+        (64, 64) => 6,
+        (64, 128) => 7,
+        (128, 64) => 8,
+        (128, 128) => 9,
+        (4, 16) | (8, 32) | (16, 64) => 13,
+        (16, 4) | (32, 8) | (64, 16) => 14,
+        _ => 0,
+    }
+}
+
+fn is_partition_point(w: usize, h: usize) -> bool {
+    matches!(
+        (w, h),
+        (4, 8)
+            | (8, 4)
+            | (8, 8)
+            | (8, 16)
+            | (16, 8)
+            | (16, 16)
+            | (16, 32)
+            | (32, 16)
+            | (32, 32)
+            | (32, 64)
+            | (64, 32)
+            | (64, 64)
+            | (64, 128)
+            | (128, 64)
+            | (128, 128)
+            | (4, 16)
+            | (16, 4)
+            | (8, 32)
+            | (32, 8)
+            | (16, 64)
+            | (64, 16)
+    )
+}
+
+fn is_square_split_eligible(w: usize, h: usize) -> bool {
+    w == h && (w == 128 || w == 256)
+}
+
+fn rect_type_implied(w: usize, h: usize) -> Option<usize> {
+    match (w, h) {
+        (4, 8) | (64, 128) | (4, 16) => Some(0),
+        (8, 4) | (128, 64) | (16, 4) => Some(1),
+        _ => None,
+    }
+}
+
+fn is_ext_partition_valid(w: usize, h: usize, rect_type: usize) -> bool {
+    if w.min(h) < 16 {
+        return false;
+    }
+    let (sub_w, sub_h) = if rect_type == 0 {
+        (w, h / 4)
+    } else {
+        (w / 4, h)
+    };
+    sub_w >= 4 && sub_h >= 4 && is_partition_point(sub_w, sub_h)
+}
+
+fn is_3way_valid(w: usize, h: usize, rect_type: usize) -> bool {
+    let (sub_w, sub_h) = if rect_type == 0 {
+        (w / 2, h / 2)
+    } else {
+        (w / 2, h / 2)
+    };
+    sub_w >= 4 && sub_h >= 4
+}
+
+fn is_4way_valid(w: usize, h: usize, rect_type: usize) -> bool {
+    let min_sub = if rect_type == 0 { h / 8 } else { w / 8 };
+    min_sub >= 4
+}
+
+fn partition_split_ctx(w: usize, h: usize) -> usize {
+    (bsize_map_val(w, h) * PARTITION_PLOFFSET).min(PARTITION_CONTEXTS - 1)
+}
+
+fn partition_rect_ctx(w: usize, h: usize) -> usize {
+    (bsize_rect_map_val(w, h) * PARTITION_PLOFFSET).min(PARTITION_CONTEXTS - 1)
+}
+
+fn partition_sq_split_ctx(w: usize, _h: usize) -> usize {
+    if w == 256 { PARTITION_PLOFFSET } else { 0 }
+}
+
+fn read_partition_type(
+    ec: &mut DaalaDecoder,
+    w: usize,
+    h: usize,
+    cdf: &mut FrameCdfContext,
+) -> PartitionType {
+    let plane = 0;
+
+    let split_ctx = partition_split_ctx(w, h);
+    ec.trace_state(&format!("before_do_split bsize={}x{} ctx={}", w, h, split_ctx));
+    let do_split = ec.decode_symbol_mut(&mut cdf.do_split_part[plane][split_ctx.min(63)]);
+    if do_split == 0 {
+        return PartitionType::None;
+    }
+
+    if is_square_split_eligible(w, h) {
+        let sq_ctx = partition_sq_split_ctx(w, h).min(SQUARE_SPLIT_CONTEXTS - 1);
+        let do_sq = ec.decode_symbol_mut(&mut cdf.do_square_split[plane][sq_ctx]);
+        if do_sq == 1 {
+            return PartitionType::Split;
+        }
+    }
+
+    let rect_type = if let Some(implied) = rect_type_implied(w, h) {
+        implied
+    } else {
+        let rect_ctx = partition_rect_ctx(w, h);
+        ec.decode_symbol_mut(&mut cdf.rect_type[plane][rect_ctx.min(63)])
+    };
+
+    let base_type = if rect_type == 0 {
+        PartitionType::Horz
+    } else {
+        PartitionType::Vert
+    };
+
+    if !is_ext_partition_valid(w, h, rect_type) {
+        return base_type;
+    }
+
+    let ext_3way = is_3way_valid(w, h, rect_type);
+    let ext_4way = is_4way_valid(w, h, rect_type);
+
+    if !ext_3way && !ext_4way {
+        return base_type;
+    }
+
+    let do_ext = if ext_3way || ext_4way {
+        let ext_ctx = partition_split_ctx(w, h);
+        ec.decode_symbol_mut(&mut cdf.do_ext_partition[plane][ext_ctx.min(63)])
+    } else {
+        0
+    };
+
+    if do_ext == 0 {
+        return base_type;
+    }
+
+    if !ext_4way {
+        return match base_type {
+            PartitionType::Horz => PartitionType::Horz3,
+            PartitionType::Vert => PartitionType::Vert3,
+            _ => base_type,
+        };
+    }
+
+    if !ext_3way {
+        let four_way_type = ec.decode_literal(1);
+        return match (base_type, four_way_type) {
+            (PartitionType::Horz, 0) => PartitionType::Horz4A,
+            (PartitionType::Horz, _) => PartitionType::Horz4B,
+            (PartitionType::Vert, 0) => PartitionType::Vert4A,
+            (PartitionType::Vert, _) => PartitionType::Vert4B,
+            _ => base_type,
+        };
+    }
+
+    let uneven_ctx = partition_split_ctx(w, h);
+    let uneven = ec.decode_symbol_mut(&mut cdf.do_uneven_4way[plane][uneven_ctx.min(63)]);
+    if uneven == 0 {
+        return match base_type {
+            PartitionType::Horz => PartitionType::Horz3,
+            PartitionType::Vert => PartitionType::Vert3,
+            _ => base_type,
+        };
+    }
+
+    let four_way_type = ec.decode_literal(1);
+    match (base_type, four_way_type) {
+        (PartitionType::Horz, 0) => PartitionType::Horz4A,
+        (PartitionType::Horz, _) => PartitionType::Horz4B,
+        (PartitionType::Vert, 0) => PartitionType::Vert4A,
+        (PartitionType::Vert, _) => PartitionType::Vert4B,
+        _ => base_type,
+    }
+}
+
+fn decode_partition(
+    ec: &mut DaalaDecoder,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    frame_w: usize,
+    frame_h: usize,
+    enable_cfl_intra: bool,
+    cdf: &mut FrameCdfContext,
+    mi: &mut ModeInfoGrid,
+    blocks: &mut Vec<DecodedBlock>,
+) {
+    if x >= frame_w || y >= frame_h {
+        return;
+    }
+
+    if !is_partition_point(w, h) {
+        decode_leaf_block(ec, x, y, w, h, enable_cfl_intra, cdf, mi, blocks);
+        return;
+    }
+
+    let partition = read_partition_type(ec, w, h, cdf);
+
+    match partition {
+        PartitionType::None => {
+            decode_leaf_block(ec, x, y, w, h, enable_cfl_intra, cdf, mi, blocks);
+        }
+        PartitionType::Split => {
+            let hw = w / 2;
+            let hh = h / 2;
+            decode_partition(ec, x, y, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x + hw, y, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x, y + hh, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x + hw, y + hh, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+        }
+        PartitionType::Horz => {
+            let hh = h / 2;
+            decode_partition(ec, x, y, w, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x, y + hh, w, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+        }
+        PartitionType::Vert => {
+            let hw = w / 2;
+            decode_partition(ec, x, y, hw, h, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x + hw, y, hw, h, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+        }
+        _ => {
+            let subs = subblock_offsets(partition, w, h);
+            for (dx, dy, sw, sh) in subs {
+                if sw > 0 && sh > 0 {
+                    decode_partition(ec, x + dx, y + dy, sw, sh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+                }
+            }
+        }
+    }
+}
+
+pub fn decode_tile_data_partitioned(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    sb_size: usize,
+) -> Vec<DecodedBlock> {
+    decode_tile_data_partitioned_opts(data, width, height, sb_size, false, 0)
+}
+
+pub fn decode_tile_data_partitioned_opts(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    sb_size: usize,
+    enable_cfl_intra: bool,
+    base_qindex: u8,
+) -> Vec<DecodedBlock> {
+    let mut ec = DaalaDecoder::new(data);
+    let mut cdf = FrameCdfContext::new_with_qindex(base_qindex);
+    let mut mi = ModeInfoGrid::new(width, height);
+    let mut blocks = Vec::new();
+
+    let sb_cols = (width + sb_size - 1) / sb_size;
+    let sb_rows = (height + sb_size - 1) / sb_size;
+
+    for sb_row in 0..sb_rows {
+        for sb_col in 0..sb_cols {
+            let x = sb_col * sb_size;
+            let y = sb_row * sb_size;
+            decode_partition(
+                &mut ec, x, y, sb_size, sb_size, width, height,
+                enable_cfl_intra, &mut cdf, &mut mi, &mut blocks,
+            );
+        }
+    }
+
+    blocks
 }
 
 #[cfg(test)]

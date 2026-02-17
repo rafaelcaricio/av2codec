@@ -2,6 +2,7 @@ pub mod bitstream;
 pub mod block;
 pub mod cdf_context;
 pub mod cdf_tables;
+pub mod cdf_tables_qctx;
 pub mod dct;
 pub mod decode;
 pub mod encode;

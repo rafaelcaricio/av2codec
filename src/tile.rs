@@ -7,7 +7,6 @@ const DO_SPLIT_ICDF: [u16; 2] = [12276, 0];
 const Y_MODE_SET_ICDF: [u16; 4] = [3905, 1746, 1044, 0];
 const Y_MODE_IDX_ICDF: [u16; 8] = [17593, 12693, 11040, 8670, 6363, 5113, 3908, 0];
 const UV_MODE_ICDF: [u16; 8] = [23405, 11811, 9903, 8015, 6357, 4785, 2340, 0];
-const TXB_SKIP_Y_ICDF: [u16; 2] = [29968, 0];
 const TXB_SKIP_U_ICDF: [u16; 2] = [31468, 0];
 const TXB_SKIP_V_ICDF: [u16; 2] = [31329, 0];
 const TXB_SKIP_V_U_NONZERO_ICDF: [u16; 2] = [25120, 0];
@@ -341,7 +340,7 @@ fn encode_plane_full(
     let skip_sym = if eob == 0 { 1 } else { 0 };
     if let Some(ref mut cdf) = cdf_ctx {
         let txb_skip_cdf = match plane {
-            0 => &mut cdf.txb_skip_y,
+            0 => &mut cdf.txb_skip_y[txs_ctx_idx][ctx.entropy_ctx],
             1 => &mut cdf.txb_skip_u[ctx.entropy_ctx],
             _ => if ctx.u_has_coeffs {
                 &mut cdf.txb_skip_v_u_nz[ctx.entropy_ctx]
@@ -694,10 +693,10 @@ pub fn encode_tile_data_with_coeffs(
         &y_coeffs,
         &PlaneEncodeCtx {
             plane: 0,
-            txs_ctx_idx: 1,
+            txs_ctx_idx: 4,
             bwl: 5,
             height: 32,
-            txb_skip_icdf: &TXB_SKIP_Y_ICDF,
+            txb_skip_icdf: &TXB_SKIP_Y_ICDF[4][0],
             dc_sign_ctx: 0,
             entropy_ctx: 0,
             u_has_coeffs: false,
@@ -714,7 +713,7 @@ pub fn encode_tile_data_with_coeffs(
         &u_coeffs,
         &PlaneEncodeCtx {
             plane: 1,
-            txs_ctx_idx: 0,
+            txs_ctx_idx: 3,
             bwl: 5,
             height: 32,
             txb_skip_icdf: &TXB_SKIP_U_ICDF,
@@ -739,7 +738,7 @@ pub fn encode_tile_data_with_coeffs(
         &v_coeffs,
         &PlaneEncodeCtx {
             plane: 2,
-            txs_ctx_idx: 0,
+            txs_ctx_idx: 3,
             bwl: 5,
             height: 32,
             txb_skip_icdf: v_skip_icdf,
@@ -857,8 +856,8 @@ pub fn encode_tile_data_multi_sb(
             if let Some(ref mut ctx) = cdf_ctx {
                 ec.encode_symbol_mut(0, &mut ctx.do_split);
                 ec.encode_symbol_mut(0, &mut ctx.y_mode_set);
-                ec.encode_symbol_mut(sb.y_mode as usize, &mut ctx.y_mode_idx);
-                ec.encode_symbol_mut(sb.uv_mode as usize, &mut ctx.uv_mode);
+                ec.encode_symbol_mut(sb.y_mode as usize, &mut ctx.y_mode_idx[0]);
+                ec.encode_symbol_mut(sb.uv_mode as usize, &mut ctx.uv_mode[0]);
             } else {
                 ec.encode_symbol(0, &DO_SPLIT_ICDF);
                 ec.encode_symbol(0, &Y_MODE_SET_ICDF);
@@ -877,10 +876,10 @@ pub fn encode_tile_data_multi_sb(
                 &y_coeffs,
                 &PlaneEncodeCtx {
                     plane: 0,
-                    txs_ctx_idx: 1,
+                    txs_ctx_idx: 4,
                     bwl: 5,
                     height: 32,
-                    txb_skip_icdf: &TXB_SKIP_Y_ICDF,
+                    txb_skip_icdf: &TXB_SKIP_Y_ICDF[4][0],
                     dc_sign_ctx: y_dc_sign_ctx,
                     entropy_ctx: 0,
                     u_has_coeffs: false,
@@ -905,7 +904,7 @@ pub fn encode_tile_data_multi_sb(
                 &u_coeffs,
                 &PlaneEncodeCtx {
                     plane: 1,
-                    txs_ctx_idx: 0,
+                    txs_ctx_idx: 3,
                     bwl: 5,
                     height: 32,
                     txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
@@ -938,7 +937,7 @@ pub fn encode_tile_data_multi_sb(
                 &v_coeffs,
                 &PlaneEncodeCtx {
                     plane: 2,
-                    txs_ctx_idx: 0,
+                    txs_ctx_idx: 3,
                     bwl: 5,
                     height: 32,
                     txb_skip_icdf: v_skip_icdf,

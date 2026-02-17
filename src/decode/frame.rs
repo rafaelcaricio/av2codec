@@ -117,41 +117,43 @@ fn parse_frame_header_sph1<'a>(
 ) -> Result<FrameParams<'a>, DecodeError> {
     let mut r = BitReader::new(payload);
 
+    let _is_first_tile_group = r.read_bit();
+
     let _mfh_id = r.read_uvlc();
     let _seq_header_id = r.read_uvlc();
 
-    // sph=1 CLK KEY_FRAME: frame_type, show_existing_frame, order_hint,
-    // refresh_frame_flags are all derived — 0 bits read
-    // setup_frame_size with override=0: 0 bits
-
-    // read_screen_content_params: force_screen_content_tools=2 for sph=1
     let allow_screen_content_tools = r.read_bit();
     if allow_screen_content_tools {
-        // force_integer_mv=2 for sph=1
         let _cur_frame_force_integer_mv = r.read_bit();
     }
 
-    // read_intrabc_params
-    let allow_intrabc = r.read_bit();
-    if allow_intrabc {
-        let allow_global_intrabc = r.read_bit();
-        if allow_global_intrabc {
-            let _allow_local_intrabc = r.read_bit();
+    if allow_screen_content_tools {
+        let allow_intrabc = r.read_bit();
+        if allow_intrabc {
+            let allow_global_intrabc = r.read_bit();
+            if allow_global_intrabc {
+                let _allow_local_intrabc = r.read_bit();
+            }
         }
     }
 
-    // disable_cdf_update
     let disable_cdf_update = r.read_bit();
 
-    // read_tile_info
     parse_tile_info(&mut r, seq.width, seq.height);
 
-    // setup_quantization: base_qindex (8 bits for 8-bit profile 0)
-    let base_qindex = if r.has_remaining() {
-        r.read_literal(8) as u8
-    } else {
-        0
-    };
+    let base_qindex = r.read_literal(8) as u8;
+
+    let _seg_enabled = r.read_bit();
+    let _using_qmatrix = r.read_bit();
+
+    if base_qindex > 0 {
+        let _delta_q_present = r.read_bit();
+    }
+
+    parse_loopfilter_sph1(&mut r);
+
+    let _tx_mode = r.read_bit();
+    let _reduced_tx_set = r.read_literal(2);
 
     r.skip_to_byte_boundary();
 
@@ -167,6 +169,29 @@ fn parse_frame_header_sph1<'a>(
         tile_data,
         disable_cdf_update,
     })
+}
+
+fn parse_loopfilter_sph1(r: &mut BitReader) {
+    let lf0 = r.read_bit();
+    let lf1 = r.read_bit();
+
+    if lf0 || lf1 {
+        let lf_u = r.read_bit();
+        let lf_v = r.read_bit();
+
+        if lf0 {
+            let _lf_delta_0 = r.read_bit();
+        }
+        if lf1 {
+            let _lf_delta_1 = r.read_bit();
+        }
+        if lf_u {
+            let _lf_delta_u = r.read_bit();
+        }
+        if lf_v {
+            let _lf_delta_v = r.read_bit();
+        }
+    }
 }
 
 #[cfg(test)]

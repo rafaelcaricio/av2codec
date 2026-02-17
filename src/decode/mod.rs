@@ -91,6 +91,151 @@ impl Decoder {
     }
 }
 
+fn predict_dc_rect(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) -> Vec<u8> {
+    let has_above = y > 0;
+    let has_left = x > 0;
+    let val = match (has_above, has_left) {
+        (false, false) => 128u8,
+        (true, false) => {
+            let sum: u32 = (0..w).map(|i| recon[(y - 1) * stride + x + i] as u32).sum();
+            ((sum + w as u32 / 2) / w as u32) as u8
+        }
+        (false, true) => {
+            let sum: u32 = (0..h).map(|j| recon[(y + j) * stride + x - 1] as u32).sum();
+            ((sum + h as u32 / 2) / h as u32) as u8
+        }
+        (true, true) => {
+            let sum_above: u32 = (0..w).map(|i| recon[(y - 1) * stride + x + i] as u32).sum();
+            let sum_left: u32 = (0..h).map(|j| recon[(y + j) * stride + x - 1] as u32).sum();
+            ((sum_above + sum_left + (w + h) as u32 / 2) / (w + h) as u32) as u8
+        }
+    };
+    vec![val; w * h]
+}
+
+fn reconstruct_tu(
+    recon: &mut [u8],
+    stride: usize,
+    tu_x: usize,
+    tu_y: usize,
+    tu_size: usize,
+    pred: &[u8],
+    pred_w: usize,
+    pred_x_offset: usize,
+    pred_y_offset: usize,
+    residuals: &[i32],
+) {
+    for row in 0..tu_size {
+        for col in 0..tu_size {
+            let pred_val = pred[(pred_y_offset + row) * pred_w + pred_x_offset + col] as i32;
+            let res_val = residuals[row * tu_size + col];
+            let pixel = (pred_val + res_val).clamp(0, 255) as u8;
+            recon[(tu_y + row) * stride + tu_x + col] = pixel;
+        }
+    }
+}
+
+fn reconstruct_partitioned_frame(
+    blocks: &[tile::DecodedBlock],
+    width: u32,
+    height: u32,
+    dequant: i32,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let w = width as usize;
+    let h = height as usize;
+    let uv_w = w / 2;
+    let uv_h = h / 2;
+    let mut y_plane = vec![128u8; w * h];
+    let mut u_plane = vec![128u8; uv_w * uv_h];
+    let mut v_plane = vec![128u8; uv_w * uv_h];
+
+    for block in blocks {
+        let bx = block.x;
+        let by = block.y;
+        let bw = block.width;
+        let bh = block.height;
+
+        let y_pred = predict_dc_rect(&y_plane, w, bx, by, bw, bh);
+
+        let y_tu_size = if !block.y_tu.is_empty() {
+            block.y_tu[0].tx_size.width()
+        } else {
+            bw.min(bh)
+        };
+        let tu_cols = bw / y_tu_size;
+
+        for (ti, tu) in block.y_tu.iter().enumerate() {
+            let tu_col = ti % tu_cols;
+            let tu_row = ti / tu_cols;
+            let tx = bx + tu_col * y_tu_size;
+            let ty = by + tu_row * y_tu_size;
+            let residuals = transform::dequantize_and_inverse_var(
+                &tu.levels, tu.eob, dequant, tu.tx_size,
+            );
+            reconstruct_tu(
+                &mut y_plane, w, tx, ty, y_tu_size,
+                &y_pred, bw, tu_col * y_tu_size, tu_row * y_tu_size,
+                &residuals,
+            );
+        }
+
+        let uv_bx = bx / 2;
+        let uv_by = by / 2;
+        let uv_bw = bw / 2;
+        let uv_bh = bh / 2;
+
+        if uv_bw >= 4 && uv_bh >= 4 {
+            let u_pred = predict_dc_rect(&u_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
+            let uv_tu_size = if !block.u_tu.is_empty() {
+                block.u_tu[0].tx_size.width()
+            } else {
+                uv_bw.min(uv_bh)
+            };
+            let uv_tu_cols = uv_bw / uv_tu_size;
+
+            for (ti, tu) in block.u_tu.iter().enumerate() {
+                let tu_col = ti % uv_tu_cols;
+                let tu_row = ti / uv_tu_cols;
+                let tx = uv_bx + tu_col * uv_tu_size;
+                let ty = uv_by + tu_row * uv_tu_size;
+                let residuals = transform::dequantize_and_inverse_var(
+                    &tu.levels, tu.eob, dequant, tu.tx_size,
+                );
+                reconstruct_tu(
+                    &mut u_plane, uv_w, tx, ty, uv_tu_size,
+                    &u_pred, uv_bw, tu_col * uv_tu_size, tu_row * uv_tu_size,
+                    &residuals,
+                );
+            }
+
+            let v_pred = predict_dc_rect(&v_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
+            for (ti, tu) in block.v_tu.iter().enumerate() {
+                let tu_col = ti % uv_tu_cols;
+                let tu_row = ti / uv_tu_cols;
+                let tx = uv_bx + tu_col * uv_tu_size;
+                let ty = uv_by + tu_row * uv_tu_size;
+                let residuals = transform::dequantize_and_inverse_var(
+                    &tu.levels, tu.eob, dequant, tu.tx_size,
+                );
+                reconstruct_tu(
+                    &mut v_plane, uv_w, tx, ty, uv_tu_size,
+                    &v_pred, uv_bw, tu_col * uv_tu_size, tu_row * uv_tu_size,
+                    &residuals,
+                );
+            }
+        }
+    }
+
+    (y_plane, u_plane, v_plane)
+}
+
 fn gray_frame(width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let w = width as usize;
     let h = height as usize;
@@ -361,5 +506,118 @@ mod tests {
         for &p in &frames[0].y {
             assert!((p as i32 - 160).abs() <= 1, "Y pixel = {}, expected ~160", p);
         }
+    }
+
+    #[test]
+    fn parse_avmenc_minimal_obus() {
+        let data = std::fs::read("tests/fixtures/avmenc_minimal.obu").unwrap();
+        let obus = obu::parse_obus(&data);
+        assert_eq!(obus.len(), 2, "Expected 2 OBUs, got {}", obus.len());
+        assert_eq!(obus[0].obu_type, 1, "First OBU should be sequence header");
+        assert_eq!(obus[1].obu_type, 4, "Second OBU should be CLK");
+    }
+
+    #[test]
+    fn parse_avmenc_minimal_seq_header() {
+        let data = std::fs::read("tests/fixtures/avmenc_minimal.obu").unwrap();
+        let obus = obu::parse_obus(&data);
+        let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
+        assert_eq!(seq.width, 256);
+        assert_eq!(seq.height, 128);
+        assert!(seq.single_picture_header_flag);
+    }
+
+    #[test]
+    fn parse_avmenc_minimal_frame_header() {
+        let data = std::fs::read("tests/fixtures/avmenc_minimal.obu").unwrap();
+        let obus = obu::parse_obus(&data);
+        let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
+        let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
+        assert_eq!(fp.base_qindex, 100);
+        assert!(!fp.disable_cdf_update);
+        assert!(!fp.tile_data.is_empty());
+    }
+
+    #[test]
+    fn decode_avmenc_minimal_tile_data() {
+        let data = std::fs::read("tests/fixtures/avmenc_minimal.obu").unwrap();
+        let obus = obu::parse_obus(&data);
+        let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
+        let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
+
+        let blocks = tile::decode_tile_data_partitioned_opts(
+            fp.tile_data, seq.width as usize, seq.height as usize, 64, true, fp.base_qindex,
+        );
+
+        for (i, block) in blocks.iter().enumerate() {
+            eprintln!("Block {}: ({},{}) {}x{} y_mode={} uv_mode={}",
+                i, block.x, block.y, block.width, block.height,
+                block.y_mode, block.uv_mode);
+        }
+
+        assert_eq!(blocks.len(), 8, "256x128 / 64x64 SBs = 4x2 = 8 blocks");
+
+        let mut total_y_pixels = 0usize;
+        for block in &blocks {
+            assert_eq!(block.width, 64);
+            assert_eq!(block.height, 64);
+            total_y_pixels += block.width * block.height;
+        }
+        assert_eq!(total_y_pixels, 256 * 128);
+
+        assert_eq!(blocks[0].y_mode, 7, "First block Y mode_idx = 7 (D45 via y_intra_mode_list)");
+        for block in &blocks[1..] {
+            assert_eq!(block.y_mode, 0, "Remaining blocks Y mode = DC");
+        }
+    }
+
+    #[test]
+    fn reconstruct_avmenc_minimal_frame() {
+        let data = std::fs::read("tests/fixtures/avmenc_minimal.obu").unwrap();
+        let obus = obu::parse_obus(&data);
+        let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
+        let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
+        let dequant = crate::encode::ac_qlookup(fp.base_qindex);
+
+        let blocks = tile::decode_tile_data_partitioned_opts(
+            fp.tile_data, seq.width as usize, seq.height as usize, 64, true, fp.base_qindex,
+        );
+        let (y_plane, u_plane, v_plane) = reconstruct_partitioned_frame(
+            &blocks, seq.width, seq.height, dequant,
+        );
+
+        let w = seq.width as usize;
+        let h = seq.height as usize;
+        assert_eq!(y_plane.len(), w * h);
+        assert_eq!(u_plane.len(), w / 2 * h / 2);
+        assert_eq!(v_plane.len(), w / 2 * h / 2);
+
+        let ref_y4m = std::fs::read("/tmp/minimal_sph1_decoded.y4m").unwrap();
+        let y4m_header = "YUV4MPEG2 W256 H128 F0:0 Ip C420jpeg\nFRAME\n";
+        let header_len = y4m_header.len();
+        let ref_y = &ref_y4m[header_len..header_len + w * h];
+        let ref_u = &ref_y4m[header_len + w * h..header_len + w * h + w / 2 * h / 2];
+
+        let y_mse: f64 = y_plane.iter().zip(ref_y.iter())
+            .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+            .sum::<f64>() / (w * h) as f64;
+        let y_psnr = if y_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / y_mse).log10() } else { 100.0 };
+
+        let u_mse: f64 = u_plane.iter().zip(ref_u.iter())
+            .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+            .sum::<f64>() / (w / 2 * h / 2) as f64;
+        let u_psnr = if u_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / u_mse).log10() } else { 100.0 };
+
+        eprintln!("Y PSNR: {:.2} dB (MSE={:.2})", y_psnr, y_mse);
+        eprintln!("U PSNR: {:.2} dB (MSE={:.2})", u_psnr, u_mse);
+
+        for (i, block) in blocks.iter().enumerate() {
+            eprintln!("Block {}: ({},{}) {}x{} y_mode={} uv_mode={} y_tus={} u_tus={} v_tus={}",
+                i, block.x, block.y, block.width, block.height,
+                block.y_mode, block.uv_mode,
+                block.y_tu.len(), block.u_tu.len(), block.v_tu.len());
+        }
+
+        assert!(y_psnr > 30.0, "Y PSNR too low: {:.2}", y_psnr);
     }
 }

@@ -139,6 +139,31 @@ impl TxSize {
             TxSize::Tx64x64 => 2,
         }
     }
+
+    pub fn txs_ctx(&self) -> usize {
+        match self {
+            TxSize::Tx4x4 => 0,
+            TxSize::Tx8x8 => 1,
+            TxSize::Tx16x16 => 2,
+            TxSize::Tx32x32 => 3,
+            TxSize::Tx64x64 => 4,
+        }
+    }
+}
+
+pub fn tx_size_for_block(width: usize, height: usize) -> TxSize {
+    let min_dim = width.min(height);
+    if min_dim >= 64 {
+        TxSize::Tx64x64
+    } else if min_dim >= 32 {
+        TxSize::Tx32x32
+    } else if min_dim >= 16 {
+        TxSize::Tx16x16
+    } else if min_dim >= 8 {
+        TxSize::Tx8x8
+    } else {
+        TxSize::Tx4x4
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
