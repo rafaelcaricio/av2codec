@@ -2,6 +2,7 @@ use super::writer::BitWriter;
 
 const QINDEX_BITS_UNEXT: u8 = 8;
 const ORDER_HINT_BITS: u8 = 6;
+const NUMBER_OF_BITS_FOR_LT_FRAME_ID: u8 = 3;
 
 pub struct FrameHeaderConfig {
     pub width: u32,
@@ -31,13 +32,17 @@ fn write_uncompressed_header(w: &mut BitWriter, config: &FrameHeaderConfig) {
     w.write_uvlc(0);
     w.write_uvlc(0);
 
+    w.write_literal(0, NUMBER_OF_BITS_FOR_LT_FRAME_ID);
+
     w.write_bit(true);
-    w.write_bit(config.disable_cdf_update);
+
+    w.write_bit(false);
+
     w.write_literal(config.order_hint, ORDER_HINT_BITS);
 
     w.write_bit(false);
 
-    w.write_bit(true);
+    w.write_bit(config.disable_cdf_update);
 
     write_tile_info(w, config.width, config.height);
 
@@ -49,11 +54,16 @@ fn write_uncompressed_header(w: &mut BitWriter, config: &FrameHeaderConfig) {
         w.write_bit(false);
     }
 
-    if config.base_qindex > 0 {
-        encode_loopfilter(w);
+    let coded_lossless = config.base_qindex == 0;
+
+    if !coded_lossless {
+        w.write_bit(false);
+        w.write_bit(false);
     }
 
-    w.write_bit(false);
+    if !coded_lossless {
+        w.write_bit(false);
+    }
 
     w.write_literal(0, 2);
 }
@@ -116,11 +126,6 @@ fn encode_qm_params(w: &mut BitWriter) {
     w.write_bit(false);
 }
 
-fn encode_loopfilter(w: &mut BitWriter) {
-    w.write_bit(false);
-    w.write_bit(false);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +151,7 @@ mod tests {
         let mut w = BitWriter::new();
         w.write_bit(true);
         write_uncompressed_header(&mut w, &config_64x64());
-        assert_eq!(w.total_bits_written(), 30);
+        assert_eq!(w.total_bits_written(), 33);
     }
 
     #[test]
@@ -161,15 +166,15 @@ mod tests {
         let mut w = BitWriter::new();
         w.write_bit(true);
         write_uncompressed_header(&mut w, &config);
-        assert_eq!(w.total_bits_written(), 32);
+        assert_eq!(w.total_bits_written(), 35);
     }
 
     #[test]
     fn clk_payload_structure() {
         let fake_tile_data = vec![0xAA, 0xBB, 0xCC];
         let payload = write_clk_obu_payload(&config_64x64(), &fake_tile_data);
-        assert_eq!(payload.len(), 4 + 3);
-        assert_eq!(&payload[4..], &[0xAA, 0xBB, 0xCC]);
+        assert_eq!(payload.len(), 5 + 3);
+        assert_eq!(&payload[5..], &[0xAA, 0xBB, 0xCC]);
     }
 
     #[test]

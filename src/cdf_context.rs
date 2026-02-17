@@ -64,6 +64,15 @@ pub struct FrameCdfContext {
     pub eob_multi_128: [Vec<u16>; 3],
     pub eob_multi_256: [Vec<u16>; 3],
     pub eob_multi_512: [Vec<u16>; 3],
+    pub fsc_mode: [[Vec<u16>; 6]; 4],
+    pub mrl_index: [Vec<u16>; 3],
+    pub multi_line_mrl: [Vec<u16>; 3],
+    pub txfm_do_partition: [[[Vec<u16>; 9]; 2]; 2],
+    pub txfm_4way_partition_type: [[[Vec<u16>; 14]; 2]; 2],
+    pub txfm_2or3_way_partition_type: [[[Vec<u16>; 2]; 2]; 2],
+    pub intrabc: [Vec<u16>; 3],
+    pub cdef_strength_index0: [Vec<u16>; 4],
+    pub ccso: [[Vec<u16>; 4]; 3],
 }
 
 impl Default for FrameCdfContext {
@@ -137,19 +146,19 @@ impl FrameCdfContext {
             coeff_br_lf_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_LF_UV_ICDF[i], 0)),
             coeff_br_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_UV_ICDF[i], 0)),
             do_split_part: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_SPLIT_PART_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_SPLIT_PART_ICDF[p][c], DO_SPLIT_PART_PARA[p][c]))
             }),
             do_square_split: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_SQUARE_SPLIT_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_SQUARE_SPLIT_ICDF[p][c], DO_SQUARE_SPLIT_PARA[p][c]))
             }),
             rect_type: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&RECT_TYPE_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&RECT_TYPE_ICDF[p][c], RECT_TYPE_PARA[p][c]))
             }),
             do_ext_partition: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_EXT_PARTITION_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_EXT_PARTITION_ICDF[p][c], DO_EXT_PARTITION_PARA[p][c]))
             }),
             do_uneven_4way: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_UNEVEN_4WAY_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_UNEVEN_4WAY_ICDF[p][c], DO_UNEVEN_4WAY_PARA[p][c]))
             }),
             eob_multi_16: std::array::from_fn(|i| make_cdf(&EOB_MULTI_16_ICDF[i], 0)),
             eob_multi_32: std::array::from_fn(|i| make_cdf(&EOB_MULTI_32_ICDF[i], 0)),
@@ -157,6 +166,31 @@ impl FrameCdfContext {
             eob_multi_128: std::array::from_fn(|i| make_cdf(&EOB_MULTI_128_ICDF[i], 0)),
             eob_multi_256: std::array::from_fn(|i| make_cdf(&EOB_MULTI_256_ICDF[i], 0)),
             eob_multi_512: std::array::from_fn(|i| make_cdf(&EOB_MULTI_512_ICDF[i], 0)),
+            fsc_mode: std::array::from_fn(|ctx| {
+                std::array::from_fn(|bg| make_cdf(&FSC_MODE_ICDF[ctx][bg], FSC_MODE_PARA[ctx][bg]))
+            }),
+            mrl_index: std::array::from_fn(|i| make_cdf(&MRL_INDEX_ICDF[i], MRL_INDEX_PARA[i])),
+            multi_line_mrl: std::array::from_fn(|i| make_cdf(&MULTI_LINE_MRL_ICDF[i], MULTI_LINE_MRL_PARA[i])),
+            txfm_do_partition: std::array::from_fn(|fsc| {
+                std::array::from_fn(|inter| {
+                    std::array::from_fn(|g| make_cdf(&TXFM_DO_PARTITION_ICDF[fsc][inter][g], TXFM_DO_PARTITION_PARA[fsc][inter][g]))
+                })
+            }),
+            txfm_4way_partition_type: std::array::from_fn(|fsc| {
+                std::array::from_fn(|inter| {
+                    std::array::from_fn(|g| make_cdf(&TXFM_4WAY_PARTITION_TYPE_ICDF[fsc][inter][g], TXFM_4WAY_PARTITION_TYPE_PARA[fsc][inter][g]))
+                })
+            }),
+            txfm_2or3_way_partition_type: std::array::from_fn(|fsc| {
+                std::array::from_fn(|inter| {
+                    std::array::from_fn(|g| make_cdf(&TXFM_2OR3_WAY_PARTITION_TYPE_ICDF[fsc][inter][g], TXFM_2OR3_WAY_PARTITION_TYPE_PARA[fsc][inter][g]))
+                })
+            }),
+            intrabc: std::array::from_fn(|i| make_cdf(&INTRABC_ICDF[i], INTRABC_PARA[i])),
+            cdef_strength_index0: std::array::from_fn(|i| make_cdf(&CDEF_STRENGTH_INDEX0_ICDF[i], CDEF_STRENGTH_INDEX0_PARA[i])),
+            ccso: std::array::from_fn(|p| {
+                std::array::from_fn(|c| make_cdf(&CCSO_ICDF[p][c], CCSO_PARA[p][c]))
+            }),
         }
     }
 
@@ -279,19 +313,19 @@ impl FrameCdfContext {
                 COEFF_BR_UV_QCTX_PARA[q][i],
             )),
             do_split_part: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_SPLIT_PART_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_SPLIT_PART_ICDF[p][c], DO_SPLIT_PART_PARA[p][c]))
             }),
             do_square_split: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_SQUARE_SPLIT_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_SQUARE_SPLIT_ICDF[p][c], DO_SQUARE_SPLIT_PARA[p][c]))
             }),
             rect_type: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&RECT_TYPE_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&RECT_TYPE_ICDF[p][c], RECT_TYPE_PARA[p][c]))
             }),
             do_ext_partition: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_EXT_PARTITION_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_EXT_PARTITION_ICDF[p][c], DO_EXT_PARTITION_PARA[p][c]))
             }),
             do_uneven_4way: std::array::from_fn(|p| {
-                std::array::from_fn(|c| make_cdf(&DO_UNEVEN_4WAY_ICDF[p][c], 0))
+                std::array::from_fn(|c| make_cdf(&DO_UNEVEN_4WAY_ICDF[p][c], DO_UNEVEN_4WAY_PARA[p][c]))
             }),
             eob_multi_16: std::array::from_fn(|i| make_cdf(
                 &EOB_MULTI_16_QCTX_ICDF[q][i],
@@ -317,6 +351,31 @@ impl FrameCdfContext {
                 &EOB_MULTI_512_QCTX_ICDF[q][i],
                 EOB_MULTI_512_QCTX_PARA[q][i],
             )),
+            fsc_mode: std::array::from_fn(|ctx| {
+                std::array::from_fn(|bg| make_cdf(&FSC_MODE_ICDF[ctx][bg], FSC_MODE_PARA[ctx][bg]))
+            }),
+            mrl_index: std::array::from_fn(|i| make_cdf(&MRL_INDEX_ICDF[i], MRL_INDEX_PARA[i])),
+            multi_line_mrl: std::array::from_fn(|i| make_cdf(&MULTI_LINE_MRL_ICDF[i], MULTI_LINE_MRL_PARA[i])),
+            txfm_do_partition: std::array::from_fn(|fsc| {
+                std::array::from_fn(|inter| {
+                    std::array::from_fn(|g| make_cdf(&TXFM_DO_PARTITION_ICDF[fsc][inter][g], TXFM_DO_PARTITION_PARA[fsc][inter][g]))
+                })
+            }),
+            txfm_4way_partition_type: std::array::from_fn(|fsc| {
+                std::array::from_fn(|inter| {
+                    std::array::from_fn(|g| make_cdf(&TXFM_4WAY_PARTITION_TYPE_ICDF[fsc][inter][g], TXFM_4WAY_PARTITION_TYPE_PARA[fsc][inter][g]))
+                })
+            }),
+            txfm_2or3_way_partition_type: std::array::from_fn(|fsc| {
+                std::array::from_fn(|inter| {
+                    std::array::from_fn(|g| make_cdf(&TXFM_2OR3_WAY_PARTITION_TYPE_ICDF[fsc][inter][g], TXFM_2OR3_WAY_PARTITION_TYPE_PARA[fsc][inter][g]))
+                })
+            }),
+            intrabc: std::array::from_fn(|i| make_cdf(&INTRABC_ICDF[i], INTRABC_PARA[i])),
+            cdef_strength_index0: std::array::from_fn(|i| make_cdf(&CDEF_STRENGTH_INDEX0_ICDF[i], CDEF_STRENGTH_INDEX0_PARA[i])),
+            ccso: std::array::from_fn(|p| {
+                std::array::from_fn(|c| make_cdf(&CCSO_ICDF[p][c], CCSO_PARA[p][c]))
+            }),
         }
     }
 

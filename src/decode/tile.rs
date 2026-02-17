@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::block::{PartitionType, TxSize, PARTITION_PLOFFSET, PARTITION_CONTEXTS, SQUARE_SPLIT_CONTEXTS};
 use crate::cdf_context::FrameCdfContext;
 use crate::cdf_tables::*;
@@ -11,6 +12,60 @@ const NON_DIRECTIONAL_MODES_COUNT: usize = 5;
 const CFL_SIGNS: usize = 3;
 
 const ADAPTIVE_TABLE: [usize; 5] = [4, 8, 16, 32, 64];
+const CDEF_UNIT_SIZE: usize = 64;
+const CCSO_UNIT_SIZE: usize = 256;
+
+#[derive(Clone, Copy, PartialEq)]
+enum TreeType {
+    Shared,
+    Luma,
+    Chroma,
+}
+
+struct TileState {
+    cdef_read: HashSet<(usize, usize)>,
+    ccso_read: [HashSet<(usize, usize)>; 3],
+}
+
+pub struct TileDecodeConfig {
+    pub enable_cfl_intra: bool,
+    pub enable_fsc: bool,
+    pub enable_idtx_intra: bool,
+    pub enable_mrls: bool,
+    pub enable_ist: bool,
+    pub enable_cctx: bool,
+    pub tx_mode_select: bool,
+    pub reduced_tx_part_set: bool,
+    pub allow_intrabc: bool,
+    pub enable_sdp: bool,
+    pub cdef_frame_enable: bool,
+    pub nb_cdef_strengths: u32,
+    pub ccso_frame_enable: bool,
+    pub ccso_enable: [bool; 3],
+    pub sb_size: usize,
+}
+
+impl Default for TileDecodeConfig {
+    fn default() -> Self {
+        Self {
+            enable_cfl_intra: false,
+            enable_fsc: false,
+            enable_idtx_intra: false,
+            enable_mrls: false,
+            enable_ist: false,
+            enable_cctx: false,
+            tx_mode_select: false,
+            reduced_tx_part_set: false,
+            allow_intrabc: false,
+            enable_sdp: false,
+            cdef_frame_enable: false,
+            nb_cdef_strengths: 0,
+            ccso_frame_enable: false,
+            ccso_enable: [false; 3],
+            sb_size: 128,
+        }
+    }
+}
 
 const COEFF_CONTEXT_BITS: u32 = 3;
 const COEFF_CONTEXT_MASK: u8 = (1 << COEFF_CONTEXT_BITS) - 1;
@@ -867,6 +922,7 @@ fn decode_coeff_tu(
     dc_sign_ctx: usize,
     entropy_ctx: usize,
     u_has_coeffs: bool,
+    _cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
 ) -> TuData {
     let bwl = tx_size.bwl();
@@ -1147,6 +1203,8 @@ fn decode_block_tus(
     dc_sign_ctx: usize,
     entropy_ctx: usize,
     u_has_coeffs: bool,
+    fsc_mode: usize,
+    cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
 ) -> Vec<TuData> {
     let tx_size = crate::block::tx_size_for_block(block_w, block_h);
@@ -1154,6 +1212,10 @@ fn decode_block_tus(
     let tx_h = tx_size.height();
     let tu_cols = (block_w / tx_w).max(1);
     let tu_rows = (block_h / tx_h).max(1);
+
+    if cfg.tx_mode_select && block_w > 4 && block_h > 4 && plane == 0 {
+        read_tx_partition(ec, block_w, block_h, fsc_mode, cfg.reduced_tx_part_set, cdf);
+    }
 
     let mut tus = Vec::with_capacity(tu_cols * tu_rows);
     for _tu_row in 0..tu_rows {
@@ -1165,6 +1227,7 @@ fn decode_block_tus(
                 dc_sign_ctx,
                 entropy_ctx,
                 u_has_coeffs,
+                cfg,
                 cdf,
             );
             tus.push(tu);
@@ -1269,8 +1332,9 @@ impl ModeInfoGrid {
         let mi_y = y / 4;
         let mi_w = w / 4;
         let mi_h = h / 4;
-        for r in mi_y..mi_y + mi_h {
-            for c in mi_x..mi_x + mi_w {
+        let mi_rows = self.is_directional.len() / self.mi_cols;
+        for r in mi_y..(mi_y + mi_h).min(mi_rows) {
+            for c in mi_x..(mi_x + mi_w).min(self.mi_cols) {
                 let idx = r * self.mi_cols + c;
                 self.is_directional[idx] = directional;
                 self.is_cfl[idx] = cfl;
@@ -1323,38 +1387,106 @@ fn decode_leaf_block(
     y: usize,
     width: usize,
     height: usize,
-    enable_cfl_intra: bool,
+    tree_type: TreeType,
+    cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
     mi: &mut ModeInfoGrid,
     blocks: &mut Vec<DecodedBlock>,
+    state: &mut TileState,
 ) {
-    let y_mode_ctx = mi.y_mode_ctx(x, y);
-    let cfl_ctx = mi.cfl_ctx(x, y);
-    let y_mode = read_y_mode(ec, y_mode_ctx, cdf);
-    let uv_mode = read_uv_mode(ec, y_mode, width, height, cfl_ctx, enable_cfl_intra, cdf);
+    if tree_type != TreeType::Chroma {
+        if cfg.allow_intrabc && !(width == 64 && height == 64) && width <= 64 && height <= 64 {
+            let ctx = 0;
+            let _use_intrabc = ec.decode_symbol_mut(&mut cdf.intrabc[ctx]);
+            ec.trace_state(&format!("after_use_intrabc={} block=({},{})", _use_intrabc, x, y));
+        }
 
-    let is_directional = y_mode >= 5;
+        if cfg.cdef_frame_enable && cfg.nb_cdef_strengths >= 2 {
+            let cdef_unit = (x / CDEF_UNIT_SIZE, y / CDEF_UNIT_SIZE);
+            if !state.cdef_read.contains(&cdef_unit) {
+                let ctx = 0;
+                let _cdef_strength_idx0 = ec.decode_symbol_mut(&mut cdf.cdef_strength_index0[ctx]);
+                ec.trace_state(&format!("after_cdef_idx0={} block=({},{})", _cdef_strength_idx0, x, y));
+                state.cdef_read.insert(cdef_unit);
+            }
+        }
+
+        if cfg.ccso_frame_enable {
+            let ccso_unit = (x / CCSO_UNIT_SIZE, y / CCSO_UNIT_SIZE);
+            for plane in 0..3 {
+                if cfg.ccso_enable[plane] && !state.ccso_read[plane].contains(&ccso_unit) {
+                    let ctx = 0;
+                    let _ccso_blk = ec.decode_symbol_mut(&mut cdf.ccso[plane][ctx]);
+                    ec.trace_state(&format!("after_ccso_p{}={} block=({},{})", plane, _ccso_blk, x, y));
+                    state.ccso_read[plane].insert(ccso_unit);
+                }
+            }
+        }
+    }
+
+    let mut y_mode = 0u8;
+    let mut fsc_mode = 0usize;
+    let mut is_directional = false;
+
+    if tree_type != TreeType::Chroma {
+        let y_mode_ctx = mi.y_mode_ctx(x, y);
+        y_mode = read_y_mode(ec, y_mode_ctx, cdf);
+
+        fsc_mode = if cfg.enable_idtx_intra && allow_fsc_intra(width, height) {
+            let bsize_group = fsc_bsize_group(width, height);
+            let ctx = 0;
+            let fsc = ec.decode_symbol_mut(&mut cdf.fsc_mode[ctx][bsize_group]);
+            ec.trace_state(&format!("after_fsc_mode={} bsg={} block=({},{})", fsc, bsize_group, x, y));
+            fsc
+        } else {
+            0
+        };
+
+        is_directional = y_mode >= 1 && y_mode <= 8;
+        let _mrl_index = if cfg.enable_mrls && is_directional {
+            let ctx = 0;
+            let mrl = ec.decode_symbol_mut(&mut cdf.mrl_index[ctx]);
+            ec.trace_state(&format!("after_mrl_index={} block=({},{})", mrl, x, y));
+            if mrl > 0 {
+                let multi_ctx = 0;
+                let _multi = ec.decode_symbol_mut(&mut cdf.multi_line_mrl[multi_ctx]);
+                ec.trace_state(&format!("after_multi_line_mrl={} block=({},{})", _multi, x, y));
+            }
+            mrl
+        } else {
+            0
+        };
+    }
+
+    let mut uv_mode = 0u8;
+    if tree_type != TreeType::Luma {
+        let cfl_ctx = mi.cfl_ctx(x, y);
+        uv_mode = read_uv_mode(ec, y_mode, width, height, cfl_ctx, cfg.enable_cfl_intra, cdf);
+    }
+
     let is_cfl = uv_mode == 13;
     mi.fill(x, y, width, height, is_directional, is_cfl);
 
-    let y_tu = decode_block_tus(ec, 0, width, height, 0, 0, false, cdf);
+    let y_tu = if tree_type != TreeType::Chroma {
+        decode_block_tus(ec, 0, width, height, 0, 0, false, fsc_mode, cfg, cdf)
+    } else {
+        vec![]
+    };
 
     let uv_w = width / 2;
     let uv_h = height / 2;
-    let u_tu = if uv_w >= 4 && uv_h >= 4 {
-        decode_block_tus(ec, 1, uv_w, uv_h, 0, 0, false, cdf)
+    let (u_tu, v_tu) = if tree_type != TreeType::Luma && uv_w >= 4 && uv_h >= 4 {
+        let u_tu = decode_block_tus(ec, 1, uv_w, uv_h, 0, 0, false, 0, cfg, cdf);
+        let v_u_has = u_tu.iter().any(|t| t.eob > 0);
+        let v_tu = decode_block_tus(ec, 2, uv_w, uv_h, 0, 0, v_u_has, 0, cfg, cdf);
+        ec.trace_state(&format!("after_v_coeffs block=({},{})", x, y));
+        (u_tu, v_tu)
     } else {
-        vec![]
+        if tree_type != TreeType::Chroma {
+            ec.trace_state(&format!("after_luma_coeffs block=({},{})", x, y));
+        }
+        (vec![], vec![])
     };
-
-    let v_u_has = u_tu.iter().any(|t| t.eob > 0);
-    let v_tu = if uv_w >= 4 && uv_h >= 4 {
-        decode_block_tus(ec, 2, uv_w, uv_h, 0, 0, v_u_has, cdf)
-    } else {
-        vec![]
-    };
-
-    ec.trace_state(&format!("after_v_coeffs block=({},{})", x, y));
 
     blocks.push(DecodedBlock {
         x,
@@ -1504,6 +1636,9 @@ fn is_partition_point(w: usize, h: usize) -> bool {
             | (64, 128)
             | (128, 64)
             | (128, 128)
+            | (256, 256)
+            | (256, 128)
+            | (128, 256)
             | (4, 16)
             | (16, 4)
             | (8, 32)
@@ -1574,6 +1709,7 @@ fn read_partition_type(
     let split_ctx = partition_split_ctx(w, h);
     ec.trace_state(&format!("before_do_split bsize={}x{} ctx={}", w, h, split_ctx));
     let do_split = ec.decode_symbol_mut(&mut cdf.do_split_part[plane][split_ctx.min(63)]);
+    ec.trace_state(&format!("after_do_split={} bsize={}x{}", do_split, w, h));
     if do_split == 0 {
         return PartitionType::None;
     }
@@ -1581,6 +1717,7 @@ fn read_partition_type(
     if is_square_split_eligible(w, h) {
         let sq_ctx = partition_sq_split_ctx(w, h).min(SQUARE_SPLIT_CONTEXTS - 1);
         let do_sq = ec.decode_symbol_mut(&mut cdf.do_square_split[plane][sq_ctx]);
+        ec.trace_state(&format!("after_do_sq_split={} bsize={}x{}", do_sq, w, h));
         if do_sq == 1 {
             return PartitionType::Split;
         }
@@ -1590,7 +1727,9 @@ fn read_partition_type(
         implied
     } else {
         let rect_ctx = partition_rect_ctx(w, h);
-        ec.decode_symbol_mut(&mut cdf.rect_type[plane][rect_ctx.min(63)])
+        let rt = ec.decode_symbol_mut(&mut cdf.rect_type[plane][rect_ctx.min(63)]);
+        ec.trace_state(&format!("after_rect_type={} ctx={} bsize={}x{}", rt, rect_ctx, w, h));
+        rt
     };
 
     let base_type = if rect_type == 0 {
@@ -1612,7 +1751,10 @@ fn read_partition_type(
 
     let do_ext = if ext_3way || ext_4way {
         let ext_ctx = partition_split_ctx(w, h);
-        ec.decode_symbol_mut(&mut cdf.do_ext_partition[plane][ext_ctx.min(63)])
+        eprintln!("[CDF] do_ext_partition[{}][{}] = {:?}", plane, ext_ctx.min(63), &cdf.do_ext_partition[plane][ext_ctx.min(63)]);
+        let ext = ec.decode_symbol_mut(&mut cdf.do_ext_partition[plane][ext_ctx.min(63)]);
+        ec.trace_state(&format!("after_do_ext={} ctx={} bsize={}x{}", ext, ext_ctx, w, h));
+        ext
     } else {
         0
     };
@@ -1660,6 +1802,42 @@ fn read_partition_type(
     }
 }
 
+fn implied_boundary_partition(
+    x: usize, y: usize, w: usize, h: usize,
+    frame_w: usize, frame_h: usize,
+) -> Option<PartitionType> {
+    let has_rows = (y + h / 2) < frame_h;
+    let has_cols = (x + w / 2) < frame_w;
+
+    if has_rows && has_cols {
+        return None;
+    }
+
+    if w == h {
+        if has_rows && !has_cols {
+            Some(PartitionType::Vert)
+        } else {
+            Some(PartitionType::Horz)
+        }
+    } else if h > w {
+        if !has_rows {
+            Some(PartitionType::Horz)
+        } else if !has_cols && (w < 16 || (x + w / 4) >= frame_w) {
+            Some(PartitionType::Horz)
+        } else {
+            None
+        }
+    } else {
+        if !has_cols {
+            Some(PartitionType::Vert)
+        } else if !has_rows && (h < 16 || (y + h / 4) >= frame_h) {
+            Some(PartitionType::Vert)
+        } else {
+            None
+        }
+    }
+}
+
 fn decode_partition(
     ec: &mut DaalaDecoder,
     x: usize,
@@ -1668,52 +1846,218 @@ fn decode_partition(
     h: usize,
     frame_w: usize,
     frame_h: usize,
-    enable_cfl_intra: bool,
+    tree_type: TreeType,
+    cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
     mi: &mut ModeInfoGrid,
     blocks: &mut Vec<DecodedBlock>,
+    state: &mut TileState,
 ) {
     if x >= frame_w || y >= frame_h {
         return;
     }
 
-    if !is_partition_point(w, h) {
-        decode_leaf_block(ec, x, y, w, h, enable_cfl_intra, cdf, mi, blocks);
+    if cfg.enable_sdp && w == 64 && h == 64 && tree_type == TreeType::Shared {
+        decode_partition(ec, x, y, w, h, frame_w, frame_h, TreeType::Luma, cfg, cdf, mi, blocks, state);
+        decode_partition(ec, x, y, w, h, frame_w, frame_h, TreeType::Chroma, cfg, cdf, mi, blocks, state);
         return;
     }
 
-    let partition = read_partition_type(ec, w, h, cdf);
+    if !is_partition_point(w, h) {
+        let cw = w.min(frame_w - x);
+        let ch = h.min(frame_h - y);
+        decode_leaf_block(ec, x, y, cw, ch, tree_type, cfg, cdf, mi, blocks, state);
+        return;
+    }
+
+    let partition = if let Some(implied) = implied_boundary_partition(x, y, w, h, frame_w, frame_h) {
+        implied
+    } else {
+        read_partition_type(ec, w, h, cdf)
+    };
 
     match partition {
         PartitionType::None => {
-            decode_leaf_block(ec, x, y, w, h, enable_cfl_intra, cdf, mi, blocks);
+            decode_leaf_block(ec, x, y, w, h, tree_type, cfg, cdf, mi, blocks, state);
         }
         PartitionType::Split => {
             let hw = w / 2;
             let hh = h / 2;
-            decode_partition(ec, x, y, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
-            decode_partition(ec, x + hw, y, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
-            decode_partition(ec, x, y + hh, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
-            decode_partition(ec, x + hw, y + hh, hw, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x, y, hw, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
+            decode_partition(ec, x + hw, y, hw, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
+            decode_partition(ec, x, y + hh, hw, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
+            decode_partition(ec, x + hw, y + hh, hw, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
         }
         PartitionType::Horz => {
             let hh = h / 2;
-            decode_partition(ec, x, y, w, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
-            decode_partition(ec, x, y + hh, w, hh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x, y, w, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
+            decode_partition(ec, x, y + hh, w, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
         }
         PartitionType::Vert => {
             let hw = w / 2;
-            decode_partition(ec, x, y, hw, h, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
-            decode_partition(ec, x + hw, y, hw, h, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+            decode_partition(ec, x, y, hw, h, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
+            decode_partition(ec, x + hw, y, hw, h, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
         }
         _ => {
             let subs = subblock_offsets(partition, w, h);
             for (dx, dy, sw, sh) in subs {
                 if sw > 0 && sh > 0 {
-                    decode_partition(ec, x + dx, y + dy, sw, sh, frame_w, frame_h, enable_cfl_intra, cdf, mi, blocks);
+                    decode_partition(ec, x + dx, y + dy, sw, sh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state);
                 }
             }
         }
+    }
+}
+
+fn read_tx_partition(
+    ec: &mut DaalaDecoder,
+    block_w: usize,
+    block_h: usize,
+    fsc_mode: usize,
+    reduced_tx_part_set: bool,
+    cdf: &mut FrameCdfContext,
+) {
+    if coding_block_disallows_tx_partitioning(block_w, block_h) {
+        return;
+    }
+
+    let max_tx_w = block_w.min(64);
+    let max_tx_h = block_h.min(64);
+
+    let allow_horz = {
+        let sub_h = max_tx_h >> 1;
+        sub_h >= 4 && is_valid_tx_size(max_tx_w, sub_h)
+    };
+    let allow_vert = {
+        let sub_w = max_tx_w >> 1;
+        sub_w >= 4 && is_valid_tx_size(sub_w, max_tx_h)
+    };
+
+    if !allow_horz && !allow_vert {
+        return;
+    }
+
+    let bsize_group = tx_part_group(block_w, block_h);
+    if bsize_group >= TXFM_SPLIT_GROUP {
+        return;
+    }
+
+    let is_fsc = if fsc_mode != 0 { 1 } else { 0 };
+    let is_inter = 0;
+
+    let do_partition = ec.decode_symbol_mut(&mut cdf.txfm_do_partition[is_fsc][is_inter][bsize_group]);
+    ec.trace_state(&format!("after_txfm_do_partition={} group={} bsize={}x{}", do_partition, bsize_group, block_w, block_h));
+    if do_partition == 0 {
+        return;
+    }
+
+    if allow_horz && allow_vert {
+        let txsize_group = tx_type_group_vert_and_horz(block_w, block_h);
+        if txsize_group < 255 {
+            let _partition_type = ec.decode_symbol_mut(
+                &mut cdf.txfm_4way_partition_type[is_fsc][is_inter][txsize_group],
+            );
+            ec.trace_state(&format!("after_txfm_4way_type={} tsg={}", _partition_type, txsize_group));
+        }
+    } else {
+        let txsize_group = tx_type_group_vert_or_horz(block_w, block_h);
+        if txsize_group > 0 && !reduced_tx_part_set {
+            let _partition_type = ec.decode_symbol_mut(
+                &mut cdf.txfm_2or3_way_partition_type[is_fsc][is_inter][txsize_group - 1],
+            );
+            ec.trace_state(&format!("after_txfm_2or3way_type={} tsg={}", _partition_type, txsize_group));
+        }
+    }
+}
+
+const TXFM_SPLIT_GROUP: usize = 9;
+
+fn coding_block_disallows_tx_partitioning(w: usize, h: usize) -> bool {
+    (w >= 64 && h >= 128) || (w >= 128 && h >= 64)
+}
+
+fn is_valid_tx_size(w: usize, h: usize) -> bool {
+    matches!(
+        (w, h),
+        (4, 4)
+            | (8, 8)
+            | (16, 16)
+            | (32, 32)
+            | (64, 64)
+            | (4, 8)
+            | (8, 4)
+            | (8, 16)
+            | (16, 8)
+            | (16, 32)
+            | (32, 16)
+            | (32, 64)
+            | (64, 32)
+            | (4, 16)
+            | (16, 4)
+            | (8, 32)
+            | (32, 8)
+            | (16, 64)
+            | (64, 16)
+    )
+}
+
+fn tx_part_group(w: usize, h: usize) -> usize {
+    match (w, h) {
+        (4, 4) | (4, 8) | (8, 4) => 0,
+        (8, 8) => 1,
+        (8, 16) | (16, 8) => 2,
+        (16, 16) => 3,
+        (16, 32) | (32, 16) => 4,
+        (32, 32) => 5,
+        (32, 64) | (64, 32) => 6,
+        (64, 64) | (64, 128) | (128, 64) | (128, 128) => 7,
+        (4, 16) | (16, 4) | (8, 32) | (32, 8) | (16, 64) | (64, 16) | (4, 32) | (32, 4) | (8, 64) | (64, 8) => 8,
+        _ => TXFM_SPLIT_GROUP,
+    }
+}
+
+fn tx_type_group_vert_and_horz(w: usize, h: usize) -> usize {
+    match (w, h) {
+        (8, 8) => 0,
+        (8, 16) => 1,
+        (16, 8) => 2,
+        (16, 16) => 3,
+        (16, 32) => 4,
+        (32, 16) => 5,
+        (32, 32) => 6,
+        (32, 64) => 7,
+        (64, 32) => 8,
+        (64, 64) | (64, 128) | (128, 64) | (128, 128) => 9,
+        (8, 32) | (8, 64) => 10,
+        (32, 8) | (64, 8) => 11,
+        (16, 64) => 12,
+        (64, 16) => 13,
+        _ => 255,
+    }
+}
+
+fn tx_type_group_vert_or_horz(w: usize, h: usize) -> usize {
+    match (w, h) {
+        (4, 4) | (4, 8) | (8, 4) => 0,
+        (4, 16) | (4, 32) => 1,
+        (16, 4) | (32, 4) => 2,
+        _ => 0,
+    }
+}
+
+fn allow_fsc_intra(block_w: usize, block_h: usize) -> bool {
+    block_w >= 4 && block_h >= 4 && block_w <= 32 && block_h <= 32
+}
+
+fn fsc_bsize_group(w: usize, h: usize) -> usize {
+    match (w, h) {
+        (4, 4) => 0,
+        (4, 8) | (8, 4) => 1,
+        (8, 8) => 2,
+        (8, 16) | (16, 8) => 3,
+        (16, 16) => 4,
+        (16, 32) | (32, 16) | (32, 32) => 5,
+        _ => 6,
     }
 }
 
@@ -1734,10 +2078,28 @@ pub fn decode_tile_data_partitioned_opts(
     enable_cfl_intra: bool,
     base_qindex: u8,
 ) -> Vec<DecodedBlock> {
+    decode_tile_data_partitioned_cfg(data, width, height, sb_size, base_qindex, &TileDecodeConfig {
+        enable_cfl_intra,
+        ..TileDecodeConfig::default()
+    })
+}
+
+pub fn decode_tile_data_partitioned_cfg(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    sb_size: usize,
+    base_qindex: u8,
+    cfg: &TileDecodeConfig,
+) -> Vec<DecodedBlock> {
     let mut ec = DaalaDecoder::new(data);
     let mut cdf = FrameCdfContext::new_with_qindex(base_qindex);
     let mut mi = ModeInfoGrid::new(width, height);
     let mut blocks = Vec::new();
+    let mut state = TileState {
+        cdef_read: HashSet::new(),
+        ccso_read: [HashSet::new(), HashSet::new(), HashSet::new()],
+    };
 
     let sb_cols = (width + sb_size - 1) / sb_size;
     let sb_rows = (height + sb_size - 1) / sb_size;
@@ -1748,7 +2110,7 @@ pub fn decode_tile_data_partitioned_opts(
             let y = sb_row * sb_size;
             decode_partition(
                 &mut ec, x, y, sb_size, sb_size, width, height,
-                enable_cfl_intra, &mut cdf, &mut mi, &mut blocks,
+                TreeType::Shared, cfg, &mut cdf, &mut mi, &mut blocks, &mut state,
             );
         }
     }

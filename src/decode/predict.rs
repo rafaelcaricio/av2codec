@@ -552,7 +552,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn dc_with_above() {
         let mut recon = vec![0u8; 64 * 64];
         recon[..64].fill(200);

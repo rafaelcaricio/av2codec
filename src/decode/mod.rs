@@ -54,7 +54,7 @@ impl Decoder {
         let mut frames = Vec::new();
         let mut frame_number = 0u64;
 
-        let sb_aligned = seq.width % 64 == 0 && seq.height % 64 == 0 && seq.width > 0 && seq.height > 0;
+        let sb_aligned = seq.sb_size == 64 && seq.width % 64 == 0 && seq.height % 64 == 0 && seq.width > 0 && seq.height > 0;
 
         for raw_obu in &obus[1..] {
             if raw_obu.obu_type != 4 {
@@ -65,14 +65,49 @@ impl Decoder {
             let sb_cols = (seq.width / 64) as usize;
             let sb_rows = (seq.height / 64) as usize;
 
-            let (y_plane, u_plane, v_plane) = if sb_aligned && !fp.tile_data.is_empty() {
-                let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let decoded_sbs = tile::decode_tile_data_multi_sb(fp.tile_data, sb_cols, sb_rows, !fp.disable_cdf_update);
-                    reconstruct_frame(&decoded_sbs, sb_cols, sb_rows, seq.width, seq.height, dequant)
-                }));
-                match decode_result {
-                    Ok(planes) => planes,
-                    Err(_) => gray_frame(seq.width, seq.height),
+            let tile_cfg = tile::TileDecodeConfig {
+                enable_cfl_intra: seq.enable_cfl_intra,
+                enable_fsc: seq.enable_fsc,
+                enable_idtx_intra: seq.enable_idtx_intra,
+                enable_mrls: seq.enable_mrls,
+                enable_ist: seq.enable_ist,
+                enable_cctx: seq.enable_cctx,
+                tx_mode_select: fp.tx_mode_select,
+                reduced_tx_part_set: seq.reduced_tx_part_set,
+                allow_intrabc: fp.allow_intrabc,
+                enable_sdp: seq.enable_sdp,
+                cdef_frame_enable: fp.cdef_frame_enable,
+                nb_cdef_strengths: fp.nb_cdef_strengths,
+                ccso_frame_enable: fp.ccso_frame_enable,
+                ccso_enable: fp.ccso_enable,
+                sb_size: seq.sb_size as usize,
+            };
+
+            let (y_plane, u_plane, v_plane) = if !fp.tile_data.is_empty() {
+                if sb_aligned {
+                    let legacy_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let decoded_sbs = tile::decode_tile_data_multi_sb(fp.tile_data, sb_cols, sb_rows, !fp.disable_cdf_update);
+                        reconstruct_frame(&decoded_sbs, sb_cols, sb_rows, seq.width, seq.height, dequant)
+                    }));
+                    match legacy_result {
+                        Ok(planes) => planes,
+                        Err(_) => {
+                            let partitioned_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let blocks = tile::decode_tile_data_partitioned_cfg(
+                                    fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
+                                    fp.base_qindex, &tile_cfg,
+                                );
+                                reconstruct_partitioned_frame(&blocks, seq.width, seq.height, dequant)
+                            }));
+                            partitioned_result.unwrap_or_else(|_| gray_frame(seq.width, seq.height))
+                        }
+                    }
+                } else {
+                    let blocks = tile::decode_tile_data_partitioned_cfg(
+                        fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
+                        fp.base_qindex, &tile_cfg,
+                    );
+                    reconstruct_partitioned_frame(&blocks, seq.width, seq.height, dequant)
                 }
             } else {
                 gray_frame(seq.width, seq.height)
@@ -544,6 +579,7 @@ mod tests {
         assert_eq!(seq.width, 256);
         assert_eq!(seq.height, 128);
         assert!(seq.single_picture_header_flag);
+        eprintln!("avmenc_minimal sb_size={}", seq.sb_size);
     }
 
     #[test]
@@ -565,7 +601,7 @@ mod tests {
         let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
 
         let blocks = tile::decode_tile_data_partitioned_opts(
-            fp.tile_data, seq.width as usize, seq.height as usize, 64, true, fp.base_qindex,
+            fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize, true, fp.base_qindex,
         );
 
         for (i, block) in blocks.iter().enumerate() {
@@ -599,7 +635,7 @@ mod tests {
         let dequant = crate::encode::ac_qlookup(fp.base_qindex);
 
         let blocks = tile::decode_tile_data_partitioned_opts(
-            fp.tile_data, seq.width as usize, seq.height as usize, 64, true, fp.base_qindex,
+            fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize, true, fp.base_qindex,
         );
         let (y_plane, u_plane, v_plane) = reconstruct_partitioned_frame(
             &blocks, seq.width, seq.height, dequant,
@@ -636,5 +672,109 @@ mod tests {
         assert!(y_psnr >= 100.0, "Y PSNR={:.2} dB, expected perfect reconstruction", y_psnr);
         assert!(u_psnr >= 100.0, "U PSNR={:.2} dB, expected perfect reconstruction", u_psnr);
         assert!(v_psnr >= 100.0, "V PSNR={:.2} dB, expected perfect reconstruction", v_psnr);
+    }
+
+    #[test]
+    fn decode_avmenc_128x128_q30() {
+        let data = std::fs::read("tests/fixtures/avmenc_128x128_q30.obu").unwrap();
+        let obus = obu::parse_obus(&data);
+        let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
+        assert_eq!(seq.width, 128);
+        assert_eq!(seq.height, 128);
+
+        eprintln!("SEQ: sph={} sb_size={} enable_sdp={} enable_cfl={} oh_bits={} lt_id_bits={} force_sct={} force_imv={} bvp_drl={} tcq={} ph={} sep_uv={} eq_dc={} y_dc={} uv_dc={} uv_ac={} cdef={} gdf={} rest={} ccso={} df_par={} fg={}",
+            seq.single_picture_header_flag, seq.sb_size, seq.enable_sdp, seq.enable_cfl_intra,
+            seq.order_hint_bits, seq.number_of_bits_for_lt_frame_id,
+            seq.force_screen_content_tools, seq.force_integer_mv,
+            seq.allow_frame_max_bvp_drl_bits,
+            seq.enable_tcq, seq.enable_parity_hiding,
+            seq.separate_uv_delta_q, seq.equal_ac_dc_q,
+            seq.y_dc_delta_q_enabled, seq.uv_dc_delta_q_enabled, seq.uv_ac_delta_q_enabled,
+            seq.enable_cdef, seq.enable_gdf, seq.enable_restoration, seq.enable_ccso,
+            seq.df_par_bits, seq.film_grain_params_present);
+
+        let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
+        let header_bytes = obus[1].payload.len() - fp.tile_data.len();
+        eprintln!("FRAME: qindex={} disable_cdf={} oh={} header_bytes={} tile_data_len={}",
+            fp.base_qindex, fp.disable_cdf_update, fp.order_hint, header_bytes, fp.tile_data.len());
+        eprintln!("tile_data first 16 bytes: {:02x?}", &fp.tile_data[..fp.tile_data.len().min(16)]);
+        eprintln!("expected tile_data start: f6 ac 00 72 85 91 72 ff (from reference)");
+        let dequant = crate::encode::ac_qlookup(fp.base_qindex);
+
+        let blocks = tile::decode_tile_data_partitioned_opts(
+            fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
+            !fp.disable_cdf_update, fp.base_qindex,
+        );
+
+        for (i, block) in blocks.iter().enumerate() {
+            let y_eob: u32 = block.y_tu.iter().map(|t| t.eob as u32).sum();
+            eprintln!("Block[{:2}]: ({:3},{:3}) {:3}x{:3} y_mode={:2} y_tu={} y_eob={}",
+                i, block.x, block.y, block.width, block.height,
+                block.y_mode, block.y_tu.len(), y_eob);
+            for (ti, tu) in block.y_tu.iter().enumerate() {
+                let residuals = transform::dequantize_and_inverse_var(
+                    &tu.levels, tu.eob, dequant, tu.tx_size,
+                );
+                let nonzero: usize = residuals.iter().filter(|&&v| v != 0).count();
+                let dc = if !tu.levels.is_empty() { tu.levels[0] } else { 0 };
+                eprintln!("  TU[{}]: tx={:?} eob={} dc_level={} nonzero_residuals={} first_res=[{}, {}, {}, {}]",
+                    ti, tu.tx_size, tu.eob, dc, nonzero,
+                    residuals[0], residuals[1], residuals[2], residuals[3]);
+            }
+        }
+
+        let total_pixels: usize = blocks.iter().map(|b| b.width * b.height).sum();
+        assert_eq!(total_pixels, 128 * 128);
+
+        let (y_plane, _u_plane, _v_plane) = reconstruct_partitioned_frame(
+            &blocks, seq.width, seq.height, dequant,
+        );
+
+        let avmdec = "/Users/rafaelcaricio/development/avm_build/avmdec";
+        let output = std::process::Command::new(avmdec)
+            .args(["--codec=av2", "-o", "/tmp/avmenc_128x128_q30_ref.y4m",
+                   "tests/fixtures/avmenc_128x128_q30.obu"])
+            .output()
+            .expect("avmdec not found");
+        assert!(output.status.success(), "avmdec failed");
+
+        let ref_y4m = std::fs::read("/tmp/avmenc_128x128_q30_ref.y4m").unwrap();
+        let w = seq.width as usize;
+        let h = seq.height as usize;
+        let y4m_header = format!("YUV4MPEG2 W{} H{} F0:0 Ip C420jpeg\nFRAME\n", w, h);
+        let ref_y = &ref_y4m[y4m_header.len()..y4m_header.len() + w * h];
+
+        let y_mse: f64 = y_plane.iter().zip(ref_y.iter())
+            .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+            .sum::<f64>() / (w * h) as f64;
+        let y_psnr = if y_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / y_mse).log10() } else { 100.0 };
+        eprintln!("Y PSNR={:.2} dB (MSE={:.2}) sb_size={}", y_psnr, y_mse, seq.sb_size);
+
+        for (bi, block) in blocks.iter().enumerate() {
+            let (bx, by, bw, bh) = (block.x, block.y, block.width, block.height);
+            let mut block_sse = 0.0f64;
+            let mut block_count = 0usize;
+            for row in by..(by + bh).min(h) {
+                for col in bx..(bx + bw).min(w) {
+                    let ours = y_plane[row * w + col] as f64;
+                    let theirs = ref_y[row * w + col] as f64;
+                    block_sse += (ours - theirs).powi(2);
+                    block_count += 1;
+                }
+            }
+            let block_mse = block_sse / block_count as f64;
+            let block_psnr = if block_mse > 0.0 {
+                10.0 * (255.0f64 * 255.0 / block_mse).log10()
+            } else { 100.0 };
+
+            if block_psnr < 40.0 {
+                let sample_row = by;
+                let end_col = (bx + 8).min(bx + bw).min(w);
+                let our_samples: Vec<u8> = (bx..end_col).map(|c| y_plane[sample_row * w + c]).collect();
+                let ref_samples: Vec<u8> = (bx..end_col).map(|c| ref_y[sample_row * w + c]).collect();
+                eprintln!("  BAD Block[{:2}] ({},{}) {}x{}: PSNR={:.1} ours={:?} ref={:?}",
+                    bi, bx, by, bw, bh, block_psnr, our_samples, ref_samples);
+            }
+        }
     }
 }
