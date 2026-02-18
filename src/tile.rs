@@ -450,7 +450,7 @@ fn encode_plane_full(
                     if let Some(ref mut cdf) = cdf_ctx {
                         ec.encode_symbol_mut(
                             abs_level.min(LF_BASE_SYMBOLS - 1),
-                            &mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx],
+                            &mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0],
                         );
                     } else {
                         ec.encode_symbol(
@@ -473,7 +473,7 @@ fn encode_plane_full(
                     if let Some(ref mut cdf) = cdf_ctx {
                         ec.encode_symbol_mut(
                             abs_level.min(NUM_BASE_LEVELS + 1),
-                            &mut cdf.coeff_base_y[txs_ctx_idx][lctx],
+                            &mut cdf.coeff_base_y[txs_ctx_idx][lctx][0],
                         );
                     } else {
                         ec.encode_symbol(
@@ -497,7 +497,7 @@ fn encode_plane_full(
                 if let Some(ref mut cdf) = cdf_ctx {
                     ec.encode_symbol_mut(
                         abs_level.min(LF_BASE_SYMBOLS - 1),
-                        &mut cdf.coeff_base_lf_uv[lctx],
+                        &mut cdf.coeff_base_lf_uv[lctx][0],
                     );
                 } else {
                     ec.encode_symbol(
@@ -510,7 +510,7 @@ fn encode_plane_full(
                 if let Some(ref mut cdf) = cdf_ctx {
                     ec.encode_symbol_mut(
                         abs_level.min(NUM_BASE_LEVELS + 1),
-                        &mut cdf.coeff_base_uv[lctx],
+                        &mut cdf.coeff_base_uv[lctx][0],
                     );
                 } else {
                     ec.encode_symbol(
@@ -545,7 +545,7 @@ fn encode_plane_full(
                 if let Some(ref mut cdf) = cdf_ctx {
                     ec.encode_symbol_mut(
                         dc_abs_level.min(LF_BASE_SYMBOLS - 1),
-                        &mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx],
+                        &mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0],
                     );
                 } else {
                     ec.encode_symbol(
@@ -568,7 +568,7 @@ fn encode_plane_full(
                 if let Some(ref mut cdf) = cdf_ctx {
                     ec.encode_symbol_mut(
                         dc_abs_level.min(NUM_BASE_LEVELS + 1),
-                        &mut cdf.coeff_base_y[txs_ctx_idx][lctx],
+                        &mut cdf.coeff_base_y[txs_ctx_idx][lctx][0],
                     );
                 } else {
                     ec.encode_symbol(
@@ -592,7 +592,7 @@ fn encode_plane_full(
             if let Some(ref mut cdf) = cdf_ctx {
                 ec.encode_symbol_mut(
                     dc_abs_level.min(LF_BASE_SYMBOLS - 1),
-                    &mut cdf.coeff_base_lf_uv[lctx],
+                    &mut cdf.coeff_base_lf_uv[lctx][0],
                 );
             } else {
                 ec.encode_symbol(
@@ -605,7 +605,7 @@ fn encode_plane_full(
             if let Some(ref mut cdf) = cdf_ctx {
                 ec.encode_symbol_mut(
                     dc_abs_level.min(NUM_BASE_LEVELS + 1),
-                    &mut cdf.coeff_base_uv[lctx],
+                    &mut cdf.coeff_base_uv[lctx][0],
                 );
             } else {
                 ec.encode_symbol(

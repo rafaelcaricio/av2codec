@@ -83,6 +83,7 @@ impl Decoder {
                 ccso_frame_enable: fp.ccso_frame_enable,
                 ccso_enable: fp.ccso_enable,
                 sb_size: seq.sb_size as usize,
+                tcq_mode: fp.tcq_mode,
             };
 
             let (y_plane, u_plane, v_plane) = if !fp.tile_data.is_empty() {
@@ -608,6 +609,7 @@ mod tests {
             ccso_frame_enable: fp.ccso_frame_enable,
             ccso_enable: fp.ccso_enable,
             sb_size: seq.sb_size as usize,
+            tcq_mode: fp.tcq_mode,
         };
 
         let blocks = tile::decode_tile_data_partitioned_cfg(
@@ -650,6 +652,7 @@ mod tests {
             ccso_frame_enable: fp.ccso_frame_enable,
             ccso_enable: fp.ccso_enable,
             sb_size: seq.sb_size as usize,
+            tcq_mode: fp.tcq_mode,
         };
 
         let blocks = tile::decode_tile_data_partitioned_cfg(
@@ -739,6 +742,7 @@ mod tests {
             ccso_frame_enable: fp.ccso_frame_enable,
             ccso_enable: fp.ccso_enable,
             sb_size: seq.sb_size as usize,
+            tcq_mode: fp.tcq_mode,
         };
 
         let blocks = tile::decode_tile_data_partitioned_cfg(

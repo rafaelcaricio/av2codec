@@ -1610,9 +1610,40 @@ pub const IST_8X8_HEIGHT: usize = 32;
 pub const IST_ADST_NZ_CNT: usize = 20;
 
 pub const DCT_DCT: usize = 0;
+pub const ADST_DCT: usize = 1;
+pub const DCT_ADST: usize = 2;
 pub const ADST_ADST: usize = 3;
-pub const IDTX: usize = 15;
+pub const FLIPADST_DCT: usize = 4;
+pub const DCT_FLIPADST: usize = 5;
+pub const FLIPADST_FLIPADST: usize = 6;
+pub const ADST_FLIPADST: usize = 7;
+pub const FLIPADST_ADST: usize = 8;
+pub const IDTX: usize = 9;
+pub const V_DCT: usize = 10;
+pub const H_DCT: usize = 11;
+pub const V_ADST: usize = 12;
+pub const H_ADST: usize = 13;
+pub const V_FLIPADST: usize = 14;
+pub const H_FLIPADST: usize = 15;
 pub const PAETH_PRED: u8 = 12;
+
+#[rustfmt::skip]
+pub const EXT_INDEX_TO_TX_TYPE_LARGE_32: [[[usize; 4]; 2]; 2] = [
+    [
+        [DCT_DCT, ADST_DCT, FLIPADST_DCT, H_DCT],
+        [DCT_DCT, DCT_ADST, DCT_FLIPADST, V_DCT],
+    ],
+    [
+        [V_DCT, V_ADST, V_FLIPADST, IDTX],
+        [H_DCT, H_ADST, H_FLIPADST, IDTX],
+    ],
+];
+
+#[rustfmt::skip]
+pub const EXT_INDEX_TO_TX_TYPE_LARGE_64: [[usize; 4]; 2] = [
+    [DCT_DCT, ADST_DCT, FLIPADST_DCT, H_DCT],
+    [DCT_DCT, DCT_ADST, DCT_FLIPADST, V_DCT],
+];
 
 #[rustfmt::skip]
 pub const AV2_MD_IDX2TYPE: [[[u8; 7]; 13]; 4] = [

@@ -41,15 +41,15 @@ pub struct FrameCdfContext {
     pub dc_sign_uv: Vec<u16>,
     pub eob_multi_1024: [Vec<u16>; 3],
     pub eob_extra: Vec<u16>,
-    pub coeff_base_lf_y: [[Vec<u16>; 33]; 5],
+    pub coeff_base_lf_y: [[[Vec<u16>; 2]; 33]; 5],
     pub coeff_base_lf_eob_y: [[Vec<u16>; 4]; 5],
-    pub coeff_base_y: [[Vec<u16>; 20]; 5],
+    pub coeff_base_y: [[[Vec<u16>; 2]; 20]; 5],
     pub coeff_base_eob_y: [[Vec<u16>; 4]; 5],
     pub coeff_br_lf_y: [Vec<u16>; 14],
     pub coeff_br_y: [Vec<u16>; 7],
-    pub coeff_base_lf_uv: [Vec<u16>; 12],
+    pub coeff_base_lf_uv: [[Vec<u16>; 2]; 12],
     pub coeff_base_lf_eob_uv: [Vec<u16>; 4],
-    pub coeff_base_uv: [Vec<u16>; 12],
+    pub coeff_base_uv: [[Vec<u16>; 2]; 12],
     pub coeff_base_eob_uv: [Vec<u16>; 4],
     pub coeff_br_lf_uv: [Vec<u16>; 4],
     pub coeff_br_uv: [Vec<u16>; 4],
@@ -138,22 +138,34 @@ impl FrameCdfContext {
             eob_multi_1024: std::array::from_fn(|i| make_cdf(&EOB_MULTI_1024_ICDF[i], 0)),
             eob_extra: make_cdf(&EOB_EXTRA_ICDF, 0),
             coeff_base_lf_y: std::array::from_fn(|t| {
-                std::array::from_fn(|c| make_cdf(&COEFF_BASE_LF_Y_ICDF[t][c], 0))
+                std::array::from_fn(|c| [
+                    make_cdf(&COEFF_BASE_LF_Y_ICDF[t][c], 0),
+                    make_cdf(&COEFF_BASE_LF_Y_ICDF[t][c], 0),
+                ])
             }),
             coeff_base_lf_eob_y: std::array::from_fn(|t| {
                 std::array::from_fn(|c| make_cdf(&COEFF_BASE_LF_EOB_Y_ICDF[t][c], 0))
             }),
             coeff_base_y: std::array::from_fn(|t| {
-                std::array::from_fn(|c| make_cdf(&COEFF_BASE_Y_ICDF[t][c], 0))
+                std::array::from_fn(|c| [
+                    make_cdf(&COEFF_BASE_Y_ICDF[t][c], 0),
+                    make_cdf(&COEFF_BASE_Y_ICDF[t][c], 0),
+                ])
             }),
             coeff_base_eob_y: std::array::from_fn(|t| {
                 std::array::from_fn(|c| make_cdf(&COEFF_BASE_EOB_Y_ICDF[t][c], 0))
             }),
             coeff_br_lf_y: std::array::from_fn(|i| make_cdf(&COEFF_BR_LF_Y_ICDF[i], 0)),
             coeff_br_y: std::array::from_fn(|i| make_cdf(&COEFF_BR_Y_ICDF[i], 0)),
-            coeff_base_lf_uv: std::array::from_fn(|i| make_cdf(&COEFF_BASE_LF_UV_ICDF[i], 0)),
+            coeff_base_lf_uv: std::array::from_fn(|i| [
+                make_cdf(&COEFF_BASE_LF_UV_ICDF[i], 0),
+                make_cdf(&COEFF_BASE_LF_UV_ICDF[i], 0),
+            ]),
             coeff_base_lf_eob_uv: std::array::from_fn(|i| make_cdf(&COEFF_BASE_LF_EOB_UV_ICDF[i], 0)),
-            coeff_base_uv: std::array::from_fn(|i| make_cdf(&COEFF_BASE_UV_ICDF[i], 0)),
+            coeff_base_uv: std::array::from_fn(|i| [
+                make_cdf(&COEFF_BASE_UV_ICDF[i], 0),
+                make_cdf(&COEFF_BASE_UV_ICDF[i], 0),
+            ]),
             coeff_base_eob_uv: std::array::from_fn(|i| make_cdf(&COEFF_BASE_EOB_UV_ICDF[i], 0)),
             coeff_br_lf_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_LF_UV_ICDF[i], 0)),
             coeff_br_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_UV_ICDF[i], 0)),
@@ -286,10 +298,10 @@ impl FrameCdfContext {
             )),
             eob_extra: make_cdf(&EOB_EXTRA_QCTX_ICDF[q], EOB_EXTRA_QCTX_PARA[q]),
             coeff_base_lf_y: std::array::from_fn(|t| {
-                std::array::from_fn(|c| make_cdf(
-                    &COEFF_BASE_LF_Y_QCTX_ICDF[q][t][c],
-                    COEFF_BASE_LF_Y_QCTX_PARA[q][t][c],
-                ))
+                std::array::from_fn(|c| std::array::from_fn(|qi| make_cdf(
+                    &COEFF_BASE_LF_Y_QCTX_ICDF[q][t][c][qi],
+                    COEFF_BASE_LF_Y_QCTX_PARA[q][t][c][qi],
+                )))
             }),
             coeff_base_lf_eob_y: std::array::from_fn(|t| {
                 std::array::from_fn(|c| make_cdf(
@@ -298,10 +310,10 @@ impl FrameCdfContext {
                 ))
             }),
             coeff_base_y: std::array::from_fn(|t| {
-                std::array::from_fn(|c| make_cdf(
-                    &COEFF_BASE_Y_QCTX_ICDF[q][t][c],
-                    COEFF_BASE_Y_QCTX_PARA[q][t][c],
-                ))
+                std::array::from_fn(|c| std::array::from_fn(|qi| make_cdf(
+                    &COEFF_BASE_Y_QCTX_ICDF[q][t][c][qi],
+                    COEFF_BASE_Y_QCTX_PARA[q][t][c][qi],
+                )))
             }),
             coeff_base_eob_y: std::array::from_fn(|t| {
                 std::array::from_fn(|c| make_cdf(
@@ -317,18 +329,18 @@ impl FrameCdfContext {
                 &COEFF_BR_Y_QCTX_ICDF[q][i],
                 COEFF_BR_Y_QCTX_PARA[q][i],
             )),
-            coeff_base_lf_uv: std::array::from_fn(|i| make_cdf(
-                &COEFF_BASE_LF_UV_QCTX_ICDF[q][i],
-                COEFF_BASE_LF_UV_QCTX_PARA[q][i],
-            )),
+            coeff_base_lf_uv: std::array::from_fn(|i| std::array::from_fn(|qi| make_cdf(
+                &COEFF_BASE_LF_UV_QCTX_ICDF[q][i][qi],
+                COEFF_BASE_LF_UV_QCTX_PARA[q][i][qi],
+            ))),
             coeff_base_lf_eob_uv: std::array::from_fn(|i| make_cdf(
                 &COEFF_BASE_LF_EOB_UV_QCTX_ICDF[q][i],
                 COEFF_BASE_LF_EOB_UV_QCTX_PARA[q][i],
             )),
-            coeff_base_uv: std::array::from_fn(|i| make_cdf(
-                &COEFF_BASE_UV_QCTX_ICDF[q][i],
-                COEFF_BASE_UV_QCTX_PARA[q][i],
-            )),
+            coeff_base_uv: std::array::from_fn(|i| std::array::from_fn(|qi| make_cdf(
+                &COEFF_BASE_UV_QCTX_ICDF[q][i][qi],
+                COEFF_BASE_UV_QCTX_PARA[q][i][qi],
+            ))),
             coeff_base_eob_uv: std::array::from_fn(|i| make_cdf(
                 &COEFF_BASE_EOB_UV_QCTX_ICDF[q][i],
                 COEFF_BASE_EOB_UV_QCTX_PARA[q][i],

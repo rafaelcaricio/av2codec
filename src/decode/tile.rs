@@ -125,7 +125,7 @@ fn build_y_intra_mode_list(
     list
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum TreeType {
     Shared,
     Luma,
@@ -194,6 +194,31 @@ pub struct TileDecodeConfig {
     pub ccso_frame_enable: bool,
     pub ccso_enable: [bool; 3],
     pub sb_size: usize,
+    pub tcq_mode: bool,
+}
+
+const TCQ_NEXT_STATE: [[u8; 2]; 8] = [
+    [0, 4], [4, 0], [1, 5], [5, 1],
+    [6, 2], [2, 6], [7, 3], [3, 7],
+];
+
+fn tcq_quant(state: i32) -> usize {
+    ((state & 2) != 0) as usize
+}
+
+fn tcq_next_state(state: i32, level: usize) -> i32 {
+    let tcq_mode = state >> 8;
+    let s = (state & 0xFF) as usize;
+    if tcq_mode != 1 {
+        return tcq_mode << 8;
+    }
+    let parity = level & 1;
+    let s = if s >= 8 { 0 } else { s };
+    (tcq_mode << 8) | TCQ_NEXT_STATE[s][parity] as i32
+}
+
+fn tcq_init_state(tcq_mode: bool) -> i32 {
+    if tcq_mode { 1 << 8 } else { 0 }
 }
 
 impl Default for TileDecodeConfig {
@@ -216,6 +241,7 @@ impl Default for TileDecodeConfig {
             ccso_frame_enable: false,
             ccso_enable: [false; 3],
             sb_size: 128,
+            tcq_mode: false,
         }
     }
 }
@@ -678,7 +704,7 @@ fn decode_plane_full(
                 if lf {
                     let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, pos, bwl);
                     let sym = if let Some(ref mut cdf) = cdf_ctx {
-                        ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx])
+                        ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0])
                     } else {
                         ec.decode_symbol(&COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx])
                     };
@@ -696,7 +722,7 @@ fn decode_plane_full(
                 } else {
                     let lctx = get_lower_levels_ctx_2d(&levels_buf, pos, bwl, plane);
                     let sym = if let Some(ref mut cdf) = cdf_ctx {
-                        ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx])
+                        ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx][0])
                     } else {
                         ec.decode_symbol(&COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx])
                     };
@@ -715,7 +741,7 @@ fn decode_plane_full(
             } else if lf {
                 let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, pos, bwl, plane);
                 let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx])
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][0])
                 } else {
                     ec.decode_symbol(&COEFF_BASE_LF_UV_ICDF[lctx])
                 };
@@ -723,7 +749,7 @@ fn decode_plane_full(
             } else {
                 let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, pos, bwl, plane);
                 let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx])
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][0])
                 } else {
                     ec.decode_symbol(&COEFF_BASE_UV_ICDF[lctx])
                 };
@@ -752,7 +778,7 @@ fn decode_plane_full(
             if dc_lf {
                 let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, dc_pos, bwl);
                 let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx])
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0])
                 } else {
                     ec.decode_symbol(&COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx])
                 };
@@ -770,7 +796,7 @@ fn decode_plane_full(
             } else {
                 let lctx = get_lower_levels_ctx_2d(&levels_buf, dc_pos, bwl, plane);
                 let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx])
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx][0])
                 } else {
                     ec.decode_symbol(&COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx])
                 };
@@ -789,7 +815,7 @@ fn decode_plane_full(
         } else if dc_lf {
             let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, dc_pos, bwl, plane);
             let sym = if let Some(ref mut cdf) = cdf_ctx {
-                ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx])
+                ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][0])
             } else {
                 ec.decode_symbol(&COEFF_BASE_LF_UV_ICDF[lctx])
             };
@@ -797,7 +823,7 @@ fn decode_plane_full(
         } else {
             let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, dc_pos, bwl, plane);
             let sym = if let Some(ref mut cdf) = cdf_ctx {
-                ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx])
+                ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][0])
             } else {
                 ec.decode_symbol(&COEFF_BASE_UV_ICDF[lctx])
             };
@@ -1054,7 +1080,8 @@ fn compute_eob_from_token(
         } else {
             0
         };
-        base + (msb << (bits - 1)) | rest
+        let extra = (msb << (bits - 1)) | rest;
+        base + extra
     } else {
         base
     }
@@ -1228,6 +1255,9 @@ fn decode_coeff_tu(
     let plane_name = match plane { 0 => "y", 1 => "u", _ => "v" };
     ec.trace_state(&format!("before_txb_skip_{} txs_ctx={} skip_ctx={}", plane_name, txs_idx, entropy_ctx));
 
+    if plane == 0 {
+        eprintln!("[CDF_DBG] txb_skip_y[{}][{}] = {:?}", txs_idx, entropy_ctx, &cdf.txb_skip_y[txs_idx][entropy_ctx]);
+    }
     let skip = match plane {
         0 => ec.decode_symbol_mut(&mut cdf.txb_skip_y[txs_idx][entropy_ctx]),
         1 => ec.decode_symbol_mut(&mut cdf.txb_skip_u[entropy_ctx]),
@@ -1271,6 +1301,9 @@ fn decode_coeff_tu(
     if plane == 0 && cfg.enable_ist && eob > 1 && fsc_mode == 0 {
         read_sec_tx_type(ec, tx_size, tx_type, y_mode, eob as usize, cdf);
     }
+
+    let tcq_active = cfg.tcq_mode && plane == 0;
+    let mut tcq_state = tcq_init_state(tcq_active);
 
     let mut levels_buf = vec![0u8; padded_stride * padded_height];
     let mut abs_levels = vec![0usize; eob as usize];
@@ -1332,6 +1365,11 @@ fn decode_coeff_tu(
 
     levels_buf[get_padded_idx(eob_pos, bwl)] =
         stored_level(abs_levels[eob_scan_idx], eob_lf, plane);
+    tcq_state = tcq_next_state(tcq_state, abs_levels[eob_scan_idx]);
+
+    if plane == 0 {
+        ec.trace_state(&format!("after_eob_pos_coeff eob={} lvl={} lf={} pos={}", eob, abs_levels[eob_scan_idx], eob_lf, eob_pos));
+    }
 
     if eob > 1 {
         for c in (1..eob_scan_idx).rev() {
@@ -1339,11 +1377,12 @@ fn decode_coeff_tu(
             let row = pos >> bwl;
             let col = pos - (row << bwl);
             let lf = is_lf_2d(row, col, plane);
+            let q_i = tcq_quant(tcq_state);
 
             if plane == 0 {
                 if lf {
                     let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, pos, bwl);
-                    let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_idx][lctx]);
+                    let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_idx][lctx][q_i]);
                     if sym > LF_NUM_BASE_LEVELS {
                         let br_ctx = get_br_lf_ctx_2d(&levels_buf, pos, bwl);
                         abs_levels[c] = decode_low_range(
@@ -1357,7 +1396,7 @@ fn decode_coeff_tu(
                     }
                 } else {
                     let lctx = get_lower_levels_ctx_2d(&levels_buf, pos, bwl, plane);
-                    let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_idx][lctx]);
+                    let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_idx][lctx][q_i]);
                     if sym > NUM_BASE_LEVELS {
                         let br_ctx = get_br_ctx_2d(&levels_buf, pos, bwl);
                         abs_levels[c] = decode_low_range(
@@ -1372,11 +1411,11 @@ fn decode_coeff_tu(
                 }
             } else if lf {
                 let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, pos, bwl, plane);
-                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx]);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][q_i]);
                 abs_levels[c] = sym;
             } else {
                 let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, pos, bwl, plane);
-                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx]);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][q_i]);
                 if sym > NUM_BASE_LEVELS {
                     let br_ctx = get_br_ctx_2d_chroma(&levels_buf, pos, bwl);
                     abs_levels[c] = decode_low_range(
@@ -1391,17 +1430,23 @@ fn decode_coeff_tu(
             }
 
             levels_buf[get_padded_idx(pos, bwl)] = stored_level(abs_levels[c], lf, plane);
+            tcq_state = tcq_next_state(tcq_state, abs_levels[c]);
+
+            if plane == 0 && eob <= 10 {
+                ec.trace_state(&format!("after_scan_c={} pos={} lf={} lvl={} q_i={}", c, pos, lf, abs_levels[c], q_i));
+            }
         }
 
         let dc_pos = scan[0] as usize;
         let dc_row = dc_pos >> bwl;
         let dc_col = dc_pos - (dc_row << bwl);
         let dc_lf = is_lf_2d(dc_row, dc_col, plane);
+        let dc_q_i = tcq_quant(tcq_state);
 
         if plane == 0 {
             if dc_lf {
                 let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, dc_pos, bwl);
-                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_idx][lctx]);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_idx][lctx][dc_q_i]);
                 if sym > LF_NUM_BASE_LEVELS {
                     let br_ctx = get_br_lf_ctx_dc_2d(&levels_buf, dc_pos, bwl);
                     abs_levels[0] = decode_low_range(
@@ -1415,7 +1460,7 @@ fn decode_coeff_tu(
                 }
             } else {
                 let lctx = get_lower_levels_ctx_2d(&levels_buf, dc_pos, bwl, plane);
-                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_idx][lctx]);
+                let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_idx][lctx][dc_q_i]);
                 if sym > NUM_BASE_LEVELS {
                     let br_ctx = get_br_ctx_2d(&levels_buf, dc_pos, bwl);
                     abs_levels[0] = decode_low_range(
@@ -1430,11 +1475,11 @@ fn decode_coeff_tu(
             }
         } else if dc_lf {
             let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, dc_pos, bwl, plane);
-            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx]);
+            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][dc_q_i]);
             abs_levels[0] = sym;
         } else {
             let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, dc_pos, bwl, plane);
-            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx]);
+            let sym = ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][dc_q_i]);
             if sym > NUM_BASE_LEVELS {
                 let br_ctx = get_br_ctx_2d_chroma(&levels_buf, dc_pos, bwl);
                 abs_levels[0] = decode_low_range(
@@ -1449,6 +1494,14 @@ fn decode_coeff_tu(
         }
 
         levels_buf[get_padded_idx(dc_pos, bwl)] = stored_level(abs_levels[0], dc_lf, plane);
+
+        if plane == 0 && eob <= 10 {
+            ec.trace_state(&format!("after_dc_coeff lvl={} lf={} q_i={}", abs_levels[0], dc_lf, dc_q_i));
+        }
+    }
+
+    if plane == 0 {
+        ec.trace_state(&format!("after_all_levels eob={} levels={:?}", eob, &abs_levels[..eob as usize]));
     }
 
     let mut levels = vec![0i32; num_coeffs];
@@ -1534,6 +1587,7 @@ fn decode_block_tus(
 
     let max_tx_w = block_w.min(64);
     let max_tx_h = block_h.min(64);
+    ec.trace_state(&format!("after_tx_part p={} txp={:?} blk=({},{}) {}x{}", plane, tx_partition, block_x, block_y, block_w, block_h));
     let sub_tus = get_tx_partition_sub_tus(tx_partition, max_tx_w, max_tx_h);
 
     let (ctx_plane, mi_scale) = if plane == 0 { (0, 4) } else { (plane, 8) };
@@ -1577,6 +1631,7 @@ fn decode_block_tus(
         );
         tu.row_offset = *row_off;
         tu.col_offset = *col_off;
+        ec.trace_state(&format!("after_tu p={} tx={:?} eob={} skip_ctx={} blk=({},{})", plane, sub_tx_size, tu.eob, txb_skip_ctx, block_x, block_y));
 
         let cul = compute_cul_level(&tu.levels, tu.eob);
         for i in 0..tx_w_units {
@@ -2049,6 +2104,8 @@ fn decode_leaf_block(
     state: &mut TileState,
 ) {
     if tree_type != TreeType::Chroma {
+        ec.trace_state(&format!("before_block_syntax block=({},{}) {}x{} ibc={} cdef={}/{} ccso={}", x, y, width, height, cfg.allow_intrabc, cfg.cdef_frame_enable, cfg.nb_cdef_strengths, cfg.ccso_frame_enable));
+
         if cfg.allow_intrabc && !(width == 64 && height == 64) && width <= 64 && height <= 64 {
             let ctx = 0;
             let _use_intrabc = ec.decode_symbol_mut(&mut cdf.intrabc[ctx]);
@@ -2552,6 +2609,7 @@ fn decode_partition(
     }
 
     if cfg.enable_sdp && w == 64 && h == 64 && tree_type == TreeType::Shared {
+        eprintln!("[PART] SDP split at ({},{}) {}x{}", x, y, w, h);
         decode_partition(ec, x, y, w, h, frame_w, frame_h, TreeType::Luma, cfg, cdf, mi, blocks, state);
         decode_partition(ec, x, y, w, h, frame_w, frame_h, TreeType::Chroma, cfg, cdf, mi, blocks, state);
         return;
@@ -2560,14 +2618,18 @@ fn decode_partition(
     if !is_partition_point(w, h) {
         let cw = w.min(frame_w - x);
         let ch = h.min(frame_h - y);
+        eprintln!("[PART] LEAF at ({},{}) {}x{} tree={:?}", x, y, cw, ch, tree_type);
         decode_leaf_block(ec, x, y, cw, ch, tree_type, cfg, cdf, mi, blocks, state);
         return;
     }
 
     let partition = if let Some(implied) = implied_boundary_partition(x, y, w, h, frame_w, frame_h) {
+        eprintln!("[PART] IMPLIED {:?} at ({},{}) {}x{} tree={:?}", implied, x, y, w, h, tree_type);
         implied
     } else {
-        read_partition_type(ec, w, h, cdf)
+        let p = read_partition_type(ec, w, h, cdf);
+        eprintln!("[PART] READ {:?} at ({},{}) {}x{} tree={:?}", p, x, y, w, h, tree_type);
+        p
     };
 
     match partition {

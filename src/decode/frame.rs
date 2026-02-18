@@ -60,6 +60,7 @@ pub struct FrameParams<'a> {
     pub ccso_enable: [bool; 3],
     pub delta_q_present: bool,
     pub delta_q_res: u32,
+    pub tcq_mode: bool,
 }
 
 pub fn parse_frame_header<'a>(
@@ -421,6 +422,7 @@ fn parse_frame_header_sph0<'a>(
         ccso_enable,
         delta_q_present,
         delta_q_res,
+        tcq_mode,
     })
 }
 
@@ -559,6 +561,7 @@ fn parse_frame_header_sph1<'a>(
         ccso_enable,
         delta_q_present,
         delta_q_res,
+        tcq_mode,
     })
 }
 
