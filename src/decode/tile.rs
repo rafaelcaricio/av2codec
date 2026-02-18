@@ -14,6 +14,116 @@ const CFL_SIGNS: usize = 3;
 const ADAPTIVE_TABLE: [usize; 5] = [4, 8, 16, 32, 64];
 const CDEF_UNIT_SIZE: usize = 64;
 const CCSO_UNIT_SIZE: usize = 256;
+const LUMA_MODE_COUNT: usize = 61;
+const TOTAL_ANGLE_DELTA_COUNT: usize = 7;
+const MAX_ANGLE_DELTA: i8 = 3;
+
+const REORDERED_Y_MODE: [u8; 13] = [
+    0, 9, 10, 11, 12, 3, 8, 1, 5, 4, 6, 2, 7,
+];
+
+const DEFAULT_MODE_LIST_Y: [u8; 56] = [
+    17, 45, 3, 10, 24, 31, 38, 52,
+    15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
+    16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53,
+    14, 20, 42, 48, 0, 6, 7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
+];
+
+fn is_directional_mode(mode: u8) -> bool {
+    mode >= 1 && mode <= 8
+}
+
+fn set_y_mode_and_delta_angle(joint_y_mode: u8) -> (u8, i8) {
+    let joint = joint_y_mode as usize;
+    if joint < NON_DIRECTIONAL_MODES_COUNT {
+        (REORDERED_Y_MODE[joint], 0)
+    } else {
+        let base = (joint - NON_DIRECTIONAL_MODES_COUNT) / TOTAL_ANGLE_DELTA_COUNT
+            + NON_DIRECTIONAL_MODES_COUNT;
+        let delta = ((joint - NON_DIRECTIONAL_MODES_COUNT) % TOTAL_ANGLE_DELTA_COUNT) as i8
+            - MAX_ANGLE_DELTA;
+        (REORDERED_Y_MODE[base], delta)
+    }
+}
+
+fn build_y_intra_mode_list(
+    block_w: usize,
+    block_h: usize,
+    left_joint: u8,
+    above_joint: u8,
+) -> [u8; LUMA_MODE_COUNT] {
+    let mut list = [0u8; LUMA_MODE_COUNT];
+    let mut selected = [false; LUMA_MODE_COUNT];
+    let mut idx = 0;
+
+    for i in 0..NON_DIRECTIONAL_MODES_COUNT {
+        list[idx] = i as u8;
+        selected[i] = true;
+        idx += 1;
+    }
+
+    let is_small_block = block_w * block_h < 64;
+
+    if !is_small_block {
+        let is_left_dir = (left_joint as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+        let is_above_dir = (above_joint as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+
+        let mut neighbor_joints = [left_joint, above_joint];
+        let mut dir_cnt = (is_left_dir as usize) + (is_above_dir as usize);
+
+        if dir_cnt == 2 && neighbor_joints[0] == neighbor_joints[1] {
+            dir_cnt = 1;
+        }
+        if dir_cnt == 1 && !is_left_dir {
+            neighbor_joints[0] = neighbor_joints[1];
+        }
+
+        for i in 0..dir_cnt {
+            let joint = neighbor_joints[i] as usize;
+            if !selected[joint] {
+                list[idx] = joint as u8;
+                selected[joint] = true;
+                idx += 1;
+            }
+        }
+
+        let is_large_block = block_w * block_h > 64;
+        if is_large_block {
+            for offset in 0..4usize {
+                for j in 0..dir_cnt {
+                    let nj = neighbor_joints[j] as usize;
+                    let left_derived = (nj - offset + 50) % 56 + NON_DIRECTIONAL_MODES_COUNT;
+                    let right_derived = (nj + offset - 4) % 56 + NON_DIRECTIONAL_MODES_COUNT;
+
+                    if !selected[left_derived] {
+                        list[idx] = left_derived as u8;
+                        selected[left_derived] = true;
+                        idx += 1;
+                    }
+                    if !selected[right_derived] {
+                        list[idx] = right_derived as u8;
+                        selected[right_derived] = true;
+                        idx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    for i in 0..(LUMA_MODE_COUNT - NON_DIRECTIONAL_MODES_COUNT) {
+        if idx >= LUMA_MODE_COUNT {
+            break;
+        }
+        let joint = DEFAULT_MODE_LIST_Y[i] as usize + NON_DIRECTIONAL_MODES_COUNT;
+        if !selected[joint] {
+            list[idx] = joint as u8;
+            selected[joint] = true;
+            idx += 1;
+        }
+    }
+
+    list
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum TreeType {
@@ -22,9 +132,48 @@ enum TreeType {
     Chroma,
 }
 
+const SKIP_CONTEXTS_Y: [[u8; 5]; 5] = [
+    [1, 2, 2, 3, 3],
+    [2, 2, 3, 3, 4],
+    [2, 3, 3, 4, 4],
+    [3, 3, 4, 4, 5],
+    [3, 4, 4, 5, 5],
+];
+
 struct TileState {
     cdef_read: HashSet<(usize, usize)>,
     ccso_read: [HashSet<(usize, usize)>; 3],
+    above_ctx: [Vec<u8>; 3],
+    left_ctx: [Vec<u8>; 3],
+    sb_row_y: usize,
+}
+
+fn get_txb_skip_ctx_y(
+    above: &[u8],
+    left: &[u8],
+    block_w: usize,
+    block_h: usize,
+    tx_w: usize,
+    tx_h: usize,
+) -> usize {
+    if block_w == tx_w && block_h == tx_h {
+        return 0;
+    }
+    let mut top = 0u8;
+    for &a in above {
+        top |= a;
+    }
+    top &= COEFF_CONTEXT_MASK;
+    let top_idx = (top as usize).min(4);
+
+    let mut left_val = 0u8;
+    for &l in left {
+        left_val |= l;
+    }
+    left_val &= COEFF_CONTEXT_MASK;
+    let left_idx = (left_val as usize).min(4);
+
+    SKIP_CONTEXTS_Y[top_idx][left_idx] as usize
 }
 
 pub struct TileDecodeConfig {
@@ -83,6 +232,11 @@ pub struct DecodedSbCoeffs {
     pub v_eob: u16,
     pub y_mode: u8,
     pub uv_mode: u8,
+}
+
+fn ceil_log2(n: u32) -> u32 {
+    if n < 2 { return 0; }
+    32 - (n - 1).leading_zeros()
 }
 
 fn get_adaptive_param(ctx: usize) -> u32 {
@@ -940,55 +1094,57 @@ fn read_tx_type(
     y_mode: u8,
     fsc_mode: usize,
     reduced_tx_set_used: u8,
+    eob: u16,
     cdf: &mut FrameCdfContext,
 ) -> usize {
     if fsc_mode != 0 {
         return IDTX;
     }
 
+    if eob == 1 {
+        return DCT_DCT;
+    }
+
     if reduced_tx_set_used == 2 {
         return DCT_DCT;
     }
 
-    let width = tx_size.width();
-    let square_tx_size = tx_size.txs_ctx();
-
-    let tx_size_sqr_up = tx_size.txs_ctx();
+    let tx_size_sqr_up = tx_size.sqr_up();
+    let tx_size_sqr = tx_size.sqr();
 
     if tx_size_sqr_up > 3 {
-        if tx_size_sqr_up >= 3 && width >= 32 {
+        if tx_size_sqr >= 3 {
             return DCT_DCT;
         }
-        let _is_long_side_dct = if tx_size_sqr_up == 3 {
-            ec.decode_symbol_mut(&mut cdf.tx_ext_32_intra)
-        } else {
-            1
-        };
-        let short_side_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_short_side[square_tx_size.min(3)]);
-        ec.trace_state(&format!("after_tx_type_large short_side={}", short_side_idx));
-        return DCT_DCT;
+        let short_side_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_short_side[tx_size_sqr.min(3)]);
+        let is_rect_horz = tx_size.width() > tx_size.height();
+        return EXT_INDEX_TO_TX_TYPE_LARGE_64[if is_rect_horz { 0 } else { 1 }][short_side_idx];
     }
 
     if tx_size_sqr_up == 3 {
-        if reduced_tx_set_used == 0 {
-            return DCT_DCT;
+        if tx_size_sqr == 3 {
+            if reduced_tx_set_used == 0 {
+                return DCT_DCT;
+            }
+            let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_reduced);
+            return if tx_type_idx == 0 { DCT_DCT } else { IDTX };
         }
-        let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_reduced);
-        ec.trace_state(&format!("after_tx_type_32x32_reduced={}", tx_type_idx));
-        return if tx_type_idx == 0 { DCT_DCT } else { IDTX };
+        let is_long_side_dct = ec.decode_symbol_mut(&mut cdf.tx_ext_32_intra);
+        let short_side_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_short_side[tx_size_sqr.min(3)]);
+        let is_rect_horz = tx_size.width() > tx_size.height();
+        return EXT_INDEX_TO_TX_TYPE_LARGE_32[1 - is_long_side_dct][if is_rect_horz { 0 } else { 1 }][short_side_idx];
     }
 
     if reduced_tx_set_used == 1 {
         let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx_reduced);
-        ec.trace_state(&format!("after_tx_type_reduced={}", tx_type_idx));
         return if tx_type_idx == 0 { DCT_DCT } else { ADST_ADST };
     }
 
-    let size_info = AV2_SIZE_CLASS[square_tx_size.min(4)];
-    let mode = y_mode as usize;
-    let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx[square_tx_size.min(3)]);
-    ec.trace_state(&format!("after_tx_type={} size={} mode={}", tx_type_idx, square_tx_size, mode));
+    let tx_type_idx = ec.decode_symbol_mut(&mut cdf.intra_ext_tx[tx_size_sqr.min(3)]);
+    ec.trace_state(&format!("after_tx_type={} sqr={} mode={}", tx_type_idx, tx_size_sqr, y_mode));
 
+    let size_info = tx_size.size_class();
+    let mode = y_mode as usize;
     if mode < 13 && tx_type_idx < 7 {
         AV2_MD_IDX2TYPE[size_info][mode][tx_type_idx] as usize
     } else {
@@ -1014,7 +1170,7 @@ fn read_sec_tx_type(
 
     let width = tx_size.width();
     let height = tx_size.height();
-    let square_tx_size = tx_size.txs_ctx();
+    let square_tx_size = tx_size.sqr();
 
     let (st_size_class, eob_limit) = if width == 4 || height == 4 {
         (0, IST_4X4_HEIGHT)
@@ -1099,7 +1255,7 @@ fn decode_coeff_tu(
     ec.trace_state(&format!("after_eob_{} eob={} txs={}", plane_name, eob, txs_idx));
 
     let tx_type = if plane == 0 {
-        read_tx_type(ec, tx_size, y_mode, fsc_mode, cfg.reduced_tx_set_used, cdf)
+        read_tx_type(ec, tx_size, y_mode, fsc_mode, cfg.reduced_tx_set_used, eob, cdf)
     } else {
         DCT_DCT
     };
@@ -1356,15 +1512,16 @@ fn decode_coeff_tu(
 fn decode_block_tus(
     ec: &mut DaalaDecoder,
     plane: usize,
+    block_x: usize,
+    block_y: usize,
     block_w: usize,
     block_h: usize,
-    dc_sign_ctx: usize,
-    entropy_ctx: usize,
     u_has_coeffs: bool,
     y_mode: u8,
     fsc_mode: usize,
     cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
+    state: &mut TileState,
 ) -> Vec<TuData> {
     let tx_partition = if cfg.tx_mode_select
         && !(block_w == 4 && block_h == 4)
@@ -1379,14 +1536,39 @@ fn decode_block_tus(
     let max_tx_h = block_h.min(64);
     let sub_tus = get_tx_partition_sub_tus(tx_partition, max_tx_w, max_tx_h);
 
+    let (ctx_plane, mi_scale) = if plane == 0 { (0, 4) } else { (plane, 8) };
+    let base_mi_x = block_x / mi_scale;
+    let base_mi_y = (block_y - state.sb_row_y) / mi_scale;
+
     let mut tus = Vec::with_capacity(sub_tus.len());
     for (sub_tx_size, row_off, col_off) in &sub_tus {
+        let tx_w = sub_tx_size.width();
+        let tx_h = sub_tx_size.height();
+        let tx_w_units = tx_w / 4;
+        let tx_h_units = tx_h / 4;
+
+        let tu_mi_x = base_mi_x + col_off / 4;
+        let tu_mi_y = base_mi_y + row_off / 4;
+
+        let above = &state.above_ctx[ctx_plane][tu_mi_x..tu_mi_x + tx_w_units];
+        let left = &state.left_ctx[ctx_plane][tu_mi_y..tu_mi_y + tx_h_units];
+
+        let (txb_skip_ctx, dc_sign_ctx) = if plane == 0 {
+            let skip_ctx = get_txb_skip_ctx_y(above, left, block_w, block_h, tx_w, tx_h);
+            let dc_ctx = compute_dc_sign_ctx(above, left);
+            (skip_ctx, dc_ctx)
+        } else {
+            let skip_ctx = compute_entropy_ctx(above, left);
+            let dc_ctx = compute_dc_sign_ctx(above, left);
+            (skip_ctx, dc_ctx)
+        };
+
         let mut tu = decode_coeff_tu(
             ec,
             plane,
             *sub_tx_size,
             dc_sign_ctx,
-            entropy_ctx,
+            txb_skip_ctx,
             u_has_coeffs,
             y_mode,
             fsc_mode,
@@ -1395,6 +1577,15 @@ fn decode_block_tus(
         );
         tu.row_offset = *row_off;
         tu.col_offset = *col_off;
+
+        let cul = compute_cul_level(&tu.levels, tu.eob);
+        for i in 0..tx_w_units {
+            state.above_ctx[ctx_plane][tu_mi_x + i] = cul;
+        }
+        for i in 0..tx_h_units {
+            state.left_ctx[ctx_plane][tu_mi_y + i] = cul;
+        }
+
         tus.push(tu);
     }
     tus
@@ -1464,7 +1655,7 @@ fn read_uv_mode(
         }
     }
 
-    let uv_ctx = if (y_mode as usize) >= NON_DIRECTIONAL_MODES_COUNT { 1 } else { 0 };
+    let uv_ctx = if is_directional_mode(y_mode) { 1 } else { 0 };
     ec.trace_state(&format!("before_uv_mode ctx={}", uv_ctx));
     let mut uv_mode_idx = ec.decode_symbol_mut(&mut cdf.uv_mode[uv_ctx]);
     if uv_mode_idx == 7 {
@@ -1473,10 +1664,15 @@ fn read_uv_mode(
     uv_mode_idx as u8
 }
 
+const PALETTE_MAX_SIZE: usize = 8;
+
 struct ModeInfoGrid {
     mi_cols: usize,
-    is_directional: Vec<bool>,
+    mi_rows: usize,
+    joint_y_mode: Vec<u8>,
     is_cfl: Vec<bool>,
+    palette_size_y: Vec<u8>,
+    palette_colors_y: Vec<[u16; PALETTE_MAX_SIZE]>,
 }
 
 impl ModeInfoGrid {
@@ -1486,43 +1682,56 @@ impl ModeInfoGrid {
         let n = mi_cols * mi_rows;
         Self {
             mi_cols,
-            is_directional: vec![false; n],
+            mi_rows,
+            joint_y_mode: vec![0; n],
             is_cfl: vec![false; n],
+            palette_size_y: vec![0; n],
+            palette_colors_y: vec![[0u16; PALETTE_MAX_SIZE]; n],
         }
     }
 
-    fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, directional: bool, cfl: bool) {
+    fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, joint_mode: u8, cfl: bool) {
         let mi_x = x / 4;
         let mi_y = y / 4;
         let mi_w = w / 4;
         let mi_h = h / 4;
-        let mi_rows = self.is_directional.len() / self.mi_cols;
-        for r in mi_y..(mi_y + mi_h).min(mi_rows) {
+        for r in mi_y..(mi_y + mi_h).min(self.mi_rows) {
             for c in mi_x..(mi_x + mi_w).min(self.mi_cols) {
                 let idx = r * self.mi_cols + c;
-                self.is_directional[idx] = directional;
+                self.joint_y_mode[idx] = joint_mode;
                 self.is_cfl[idx] = cfl;
             }
         }
     }
 
-    fn y_mode_ctx(&self, x: usize, y: usize) -> usize {
+    fn get_neighbor_joints(&self, x: usize, y: usize, w: usize, h: usize) -> (u8, u8) {
         let mi_x = x / 4;
         let mi_y = y / 4;
-        let mut cnt = 0;
-        if mi_y > 0 {
-            let above = (mi_y - 1) * self.mi_cols + mi_x;
-            if self.is_directional[above] {
-                cnt += 1;
-            }
-        }
-        if mi_x > 0 {
-            let left = mi_y * self.mi_cols + (mi_x - 1);
-            if self.is_directional[left] {
-                cnt += 1;
-            }
-        }
-        cnt
+        let mi_w = w / 4;
+        let mi_h = h / 4;
+
+        let above_joint = if mi_y > 0 {
+            let above_col = (mi_x + mi_w - 1).min(self.mi_cols - 1);
+            self.joint_y_mode[(mi_y - 1) * self.mi_cols + above_col]
+        } else {
+            0
+        };
+
+        let left_joint = if mi_x > 0 {
+            let left_row = (mi_y + mi_h - 1).min(self.mi_rows - 1);
+            self.joint_y_mode[left_row * self.mi_cols + (mi_x - 1)]
+        } else {
+            0
+        };
+
+        (left_joint, above_joint)
+    }
+
+    fn y_mode_ctx(&self, x: usize, y: usize, w: usize, h: usize) -> usize {
+        let (left_joint, above_joint) = self.get_neighbor_joints(x, y, w, h);
+        let is_above_dir = (above_joint as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+        let is_left_dir = (left_joint as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+        (is_above_dir as usize) + (is_left_dir as usize)
     }
 
     fn cfl_ctx(&self, x: usize, y: usize) -> usize {
@@ -1543,6 +1752,80 @@ impl ModeInfoGrid {
         }
         cnt
     }
+
+    fn fill_palette_y(&mut self, x: usize, y: usize, w: usize, h: usize, n_colors: usize, colors: &[u16]) {
+        let mi_x = x / 4;
+        let mi_y = y / 4;
+        let mi_w = w / 4;
+        let mi_h = h / 4;
+        let mi_rows = self.palette_size_y.len() / self.mi_cols;
+        for r in mi_y..(mi_y + mi_h).min(mi_rows) {
+            for c in mi_x..(mi_x + mi_w).min(self.mi_cols) {
+                let idx = r * self.mi_cols + c;
+                self.palette_size_y[idx] = n_colors as u8;
+                let mut pal = [0u16; PALETTE_MAX_SIZE];
+                for i in 0..n_colors.min(PALETTE_MAX_SIZE) {
+                    pal[i] = colors[i];
+                }
+                self.palette_colors_y[idx] = pal;
+            }
+        }
+    }
+
+    fn get_palette_cache_y(&self, x: usize, y: usize) -> Vec<u16> {
+        let mi_x = x / 4;
+        let mi_y = y / 4;
+
+        let above_available = mi_y > 0 && (y % 64) != 0;
+        let left_available = mi_x > 0;
+
+        let (above_n, above_colors) = if above_available {
+            let idx = (mi_y - 1) * self.mi_cols + mi_x;
+            let n = self.palette_size_y[idx] as usize;
+            (n, self.palette_colors_y[idx])
+        } else {
+            (0, [0u16; PALETTE_MAX_SIZE])
+        };
+
+        let (left_n, left_colors) = if left_available {
+            let idx = mi_y * self.mi_cols + (mi_x - 1);
+            let n = self.palette_size_y[idx] as usize;
+            (n, self.palette_colors_y[idx])
+        } else {
+            (0, [0u16; PALETTE_MAX_SIZE])
+        };
+
+        if above_n == 0 && left_n == 0 {
+            return Vec::new();
+        }
+
+        let mut cache = Vec::with_capacity(2 * PALETTE_MAX_SIZE);
+        let mut ai = 0;
+        let mut li = 0;
+        let mut an = above_n;
+        let mut ln = left_n;
+
+        while an > 0 && ln > 0 {
+            cache.push(above_colors[ai]);
+            ai += 1;
+            an -= 1;
+            cache.push(left_colors[li]);
+            li += 1;
+            ln -= 1;
+        }
+        while an > 0 {
+            cache.push(above_colors[ai]);
+            ai += 1;
+            an -= 1;
+        }
+        while ln > 0 {
+            cache.push(left_colors[li]);
+            li += 1;
+            ln -= 1;
+        }
+
+        cache
+    }
 }
 
 fn get_palette_color_index_context(
@@ -1551,42 +1834,65 @@ fn get_palette_color_index_context(
     r: usize,
     c: usize,
     color_order: &mut [u8],
-    n_colors: usize,
+    _n_colors: usize,
 ) -> usize {
-    let mut scores = [0u32; 8];
-
-    if c > 0 {
-        scores[color_map[r * stride + c - 1] as usize] += 2;
+    for i in 0..PALETTE_MAX_SIZE {
+        color_order[i] = i as u8;
     }
-    if r > 0 {
-        scores[color_map[(r - 1) * stride + c] as usize] += 2;
-    }
-    if c > 0 && r > 0 {
-        scores[color_map[(r - 1) * stride + c - 1] as usize] += 1;
-    }
+    let mut status = [0u8; PALETTE_MAX_SIZE];
+    let mut cnt = 0usize;
 
-    let l = if c > 0 { color_map[r * stride + c - 1] } else { 255 };
-    let t = if r > 0 { color_map[(r - 1) * stride + c] } else { 255 };
-    let tl = if c > 0 && r > 0 { color_map[(r - 1) * stride + c - 1] } else { 255 };
-
-    let ctx = if c == 0 && r == 0 {
-        0
-    } else if c == 0 || r == 0 {
-        0
-    } else if l == tl && tl == t {
-        4
-    } else if l == t {
-        3
-    } else if l == tl || tl == t {
-        2
-    } else {
-        1
+    let swap = |order: &mut [u8], stat: &mut [u8], pos: usize, val: usize, cnt: &mut usize| {
+        order[pos] = val as u8;
+        stat[val] = 1;
+        *cnt += 1;
     };
 
-    let mut order: Vec<(u32, u8)> = (0..n_colors as u8).map(|i| (scores[i as usize], i)).collect();
-    order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    for (i, (_, idx)) in order.iter().enumerate() {
-        color_order[i] = *idx;
+    let ctx;
+    if r > 0 && c > 0 {
+        let left = color_map[r * stride + c - 1] as usize;
+        let tl = color_map[(r - 1) * stride + c - 1] as usize;
+        let top = color_map[(r - 1) * stride + c] as usize;
+
+        if left == tl && left == top {
+            ctx = 4;
+            swap(color_order, &mut status, 0, left, &mut cnt);
+        } else if left == top {
+            ctx = 3;
+            swap(color_order, &mut status, 0, left, &mut cnt);
+            swap(color_order, &mut status, 1, tl, &mut cnt);
+        } else if left == tl {
+            ctx = 2;
+            swap(color_order, &mut status, 0, left, &mut cnt);
+            swap(color_order, &mut status, 1, top, &mut cnt);
+        } else if tl == top {
+            ctx = 2;
+            swap(color_order, &mut status, 0, top, &mut cnt);
+            swap(color_order, &mut status, 1, left, &mut cnt);
+        } else {
+            ctx = 1;
+            swap(color_order, &mut status, 0, left, &mut cnt);
+            swap(color_order, &mut status, 1, top, &mut cnt);
+            swap(color_order, &mut status, 2, tl, &mut cnt);
+        }
+    } else if c == 0 && r > 0 {
+        ctx = 0;
+        let top = color_map[(r - 1) * stride + c] as usize;
+        swap(color_order, &mut status, 0, top, &mut cnt);
+    } else if c > 0 && r == 0 {
+        ctx = 0;
+        let left = color_map[r * stride + c - 1] as usize;
+        swap(color_order, &mut status, 0, left, &mut cnt);
+    } else {
+        ctx = 0;
+    }
+
+    let mut write_idx = cnt;
+    for read_idx in 0..PALETTE_MAX_SIZE {
+        if status[read_idx] == 0 {
+            color_order[write_idx] = read_idx as u8;
+            write_idx += 1;
+        }
     }
 
     ctx
@@ -1607,6 +1913,8 @@ fn read_palette_colors_y(
             break;
         }
         let use_cache = ec.decode_bit();
+        eprintln!("[TRACE] cache_bit[{}]={} cache_val={}", i, use_cache, palette_cache[i]);
+        ec.trace_state(&format!("after_cache_bit[{}]", i));
         if use_cache != 0 {
             colors.push(palette_cache[i]);
             idx += 1;
@@ -1621,24 +1929,15 @@ fn read_palette_colors_y(
     if idx < n {
         let min_bits = bit_depth - 3;
         let mut bits = min_bits + ec.decode_literal(2);
+        let mut range = ((1i32 << bit_depth) - colors.last().copied().unwrap_or(0) as i32 - 1).max(0);
 
         for _ in idx..n {
-            let prev = *colors.last().unwrap();
-            let range = ((1u32 << bit_depth) - prev as u32 - 1) as i32;
-            if range <= 0 {
-                colors.push(((1u32 << bit_depth) - 1) as u16);
-            } else {
-                let delta = ec.decode_literal(bits) + 1;
-                let new_val = (prev as u32 + delta).min((1u32 << bit_depth) - 1);
-                colors.push(new_val as u16);
-                let new_range = range - (new_val as i32 - prev as i32);
-                if new_range > 0 {
-                    let log2_range = 32 - (new_range as u32).leading_zeros();
-                    bits = bits.min(log2_range);
-                } else {
-                    bits = 0;
-                }
-            }
+            let delta = if bits > 0 { ec.decode_literal(bits) + 1 } else { 1 };
+            let prev = *colors.last().unwrap() as u32;
+            let new_val = (prev + delta).min((1u32 << bit_depth) - 1) as u16;
+            colors.push(new_val);
+            range -= new_val as i32 - prev as i32;
+            bits = bits.min(ceil_log2(range.max(0) as u32));
         }
     }
 
@@ -1781,11 +2080,19 @@ fn decode_leaf_block(
 
     let mut y_mode = 0u8;
     let mut fsc_mode = 0usize;
-    let mut is_directional = false;
+    let is_directional;
+    let mut joint_y_mode = 0u8;
 
     if tree_type != TreeType::Chroma {
-        let y_mode_ctx = mi.y_mode_ctx(x, y);
-        y_mode = read_y_mode(ec, y_mode_ctx, cdf);
+        let y_mode_ctx = mi.y_mode_ctx(x, y, width, height);
+        let mode_idx = read_y_mode(ec, y_mode_ctx, cdf);
+
+        let (left_joint, above_joint) = mi.get_neighbor_joints(x, y, width, height);
+        let y_intra_mode_list = build_y_intra_mode_list(width, height, left_joint, above_joint);
+        joint_y_mode = y_intra_mode_list[mode_idx as usize];
+        let (actual_mode, _delta_angle) = set_y_mode_and_delta_angle(joint_y_mode);
+        y_mode = actual_mode;
+        ec.trace_state(&format!("after_y_mode_mapping mode_idx={} joint={} actual={} block=({},{})", mode_idx, joint_y_mode, y_mode, x, y));
 
         fsc_mode = if cfg.enable_idtx_intra && allow_fsc_intra(width, height) {
             let bsize_group = fsc_bsize_group(width, height);
@@ -1797,7 +2104,7 @@ fn decode_leaf_block(
             0
         };
 
-        is_directional = y_mode >= 1 && y_mode <= 8;
+        is_directional = is_directional_mode(y_mode);
         let _mrl_index = if cfg.enable_mrls && is_directional {
             let ctx = 0;
             let mrl = ec.decode_symbol_mut(&mut cdf.mrl_index[ctx]);
@@ -1837,9 +2144,13 @@ fn decode_leaf_block(
             let n_colors = palette_size_raw + 2;
             ec.trace_state(&format!("after_palette_size={} n_colors={} block=({},{})", palette_size_raw, n_colors, x, y));
 
-            let palette_cache: Vec<u16> = Vec::new();
-            let _palette_colors = read_palette_colors_y(ec, n_colors, &palette_cache);
+            let palette_cache = mi.get_palette_cache_y(x, y);
+            eprintln!("[TRACE] palette_cache block=({},{}) n_cache={} cache={:?}", x, y, palette_cache.len(), palette_cache);
+            let palette_colors = read_palette_colors_y(ec, n_colors, &palette_cache);
+            eprintln!("[TRACE] palette_colors block=({},{}) colors={:?}", x, y, palette_colors);
             ec.trace_state(&format!("after_palette_colors block=({},{})", x, y));
+
+            mi.fill_palette_y(x, y, width, height, n_colors, &palette_colors);
 
             decode_palette_map(ec, width, height, n_colors, cdf);
             ec.trace_state(&format!("after_palette_map block=({},{})", x, y));
@@ -1847,11 +2158,11 @@ fn decode_leaf_block(
     }
 
     let is_cfl = uv_mode == 13;
-    mi.fill(x, y, width, height, is_directional, is_cfl);
+    mi.fill(x, y, width, height, joint_y_mode, is_cfl);
 
     let _ = palette_y_active;
     let y_tu = if tree_type != TreeType::Chroma {
-        decode_block_tus(ec, 0, width, height, 0, 0, false, y_mode, fsc_mode, cfg, cdf)
+        decode_block_tus(ec, 0, x, y, width, height, false, y_mode, fsc_mode, cfg, cdf, state)
     } else {
         vec![]
     };
@@ -1859,9 +2170,9 @@ fn decode_leaf_block(
     let uv_w = width / 2;
     let uv_h = height / 2;
     let (u_tu, v_tu) = if tree_type != TreeType::Luma && uv_w >= 4 && uv_h >= 4 {
-        let u_tu = decode_block_tus(ec, 1, uv_w, uv_h, 0, 0, false, y_mode, 0, cfg, cdf);
+        let u_tu = decode_block_tus(ec, 1, x, y, uv_w, uv_h, false, y_mode, 0, cfg, cdf, state);
         let v_u_has = u_tu.iter().any(|t| t.eob > 0);
-        let v_tu = decode_block_tus(ec, 2, uv_w, uv_h, 0, 0, v_u_has, y_mode, 0, cfg, cdf);
+        let v_tu = decode_block_tus(ec, 2, x, y, uv_w, uv_h, v_u_has, y_mode, 0, cfg, cdf, state);
         ec.trace_state(&format!("after_v_coeffs block=({},{})", x, y));
         (u_tu, v_tu)
     } else {
@@ -2052,7 +2363,7 @@ fn is_ext_partition_valid(w: usize, h: usize, rect_type: usize) -> bool {
     } else {
         (w / 4, h)
     };
-    sub_w >= 4 && sub_h >= 4 && is_partition_point(sub_w, sub_h)
+    sub_w >= 4 && sub_h >= 4
 }
 
 fn is_3way_valid(w: usize, h: usize, rect_type: usize) -> bool {
@@ -2534,15 +2845,29 @@ pub fn decode_tile_data_partitioned_cfg(
     let mut cdf = FrameCdfContext::new_with_qindex(base_qindex);
     let mut mi = ModeInfoGrid::new(width, height);
     let mut blocks = Vec::new();
+
+    let mi_w_y = (width + 3) / 4;
+    let mi_w_uv = (width / 2 + 3) / 4;
+    let sb_mi_h_y = sb_size / 4;
+    let sb_mi_h_uv = sb_size / 2 / 4;
+
     let mut state = TileState {
         cdef_read: HashSet::new(),
         ccso_read: [HashSet::new(), HashSet::new(), HashSet::new()],
+        above_ctx: [vec![0u8; mi_w_y], vec![0u8; mi_w_uv], vec![0u8; mi_w_uv]],
+        left_ctx: [vec![0u8; sb_mi_h_y], vec![0u8; sb_mi_h_uv], vec![0u8; sb_mi_h_uv]],
+        sb_row_y: 0,
     };
 
     let sb_cols = (width + sb_size - 1) / sb_size;
     let sb_rows = (height + sb_size - 1) / sb_size;
 
     for sb_row in 0..sb_rows {
+        state.sb_row_y = sb_row * sb_size;
+        state.left_ctx[0].fill(0);
+        state.left_ctx[1].fill(0);
+        state.left_ctx[2].fill(0);
+
         for sb_col in 0..sb_cols {
             let x = sb_col * sb_size;
             let y = sb_row * sb_size;
