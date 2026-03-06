@@ -2,6 +2,7 @@ const NON_DIRECTIONAL_MODES_COUNT: usize = 5;
 const TOTAL_ANGLE_DELTA_COUNT: usize = 7;
 const MAX_ANGLE_DELTA: i32 = 3;
 pub const LUMA_MODE_COUNT: usize = 61;
+const ANGLE_STEP: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -22,7 +23,7 @@ pub enum PredictionMode {
 }
 
 impl PredictionMode {
-    fn from_u8(v: u8) -> Self {
+    pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::DcPred,
             1 => Self::VPred,
@@ -39,6 +40,68 @@ impl PredictionMode {
             12 => Self::PaethPred,
             _ => Self::DcPred,
         }
+    }
+
+    fn base_angle(self) -> i32 {
+        MODE_TO_ANGLE_MAP[self as usize] as i32
+    }
+
+    fn is_directional(self) -> bool {
+        (self as u8) >= 1 && (self as u8) <= 8
+    }
+}
+
+const MODE_TO_ANGLE_MAP: [u16; 13] = [0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0];
+
+#[rustfmt::skip]
+const DR_INTRA_DERIVATIVE: [i32; 90] = [
+    0, 4096, 2048,
+    1365, 1024, 819,
+    682, 585, 512,
+    455, 409, 409, 409, 372,
+    341, 292, 273,
+    256, 227, 215,
+    204, 186, 178,
+    170, 157, 151,
+    146, 136, 132,
+    128, 117, 110,
+    107, 99, 97, 97,
+    93, 87, 83,
+    81, 77, 74,
+    73, 69, 66,
+    64, 62, 59,
+    56, 55, 53,
+    50, 49, 47,
+    44, 42, 42, 41,
+    38, 37, 35,
+    32, 31, 30,
+    28, 27, 26,
+    24, 23, 22,
+    20, 19, 18,
+    16, 15, 14,
+    12, 11, 10, 10, 10,
+    9, 8, 7,
+    6, 5, 4,
+    3, 2, 1,
+];
+
+fn get_dx(angle: i32) -> i32 {
+    if angle > 0 && angle < 90 {
+        DR_INTRA_DERIVATIVE[angle as usize]
+    } else if angle > 90 && angle < 180 {
+        DR_INTRA_DERIVATIVE[(180 - angle) as usize]
+    } else {
+        1
+    }
+}
+
+fn get_dy(angle: i32) -> i32 {
+    if angle > 90 && angle < 180 {
+        DR_INTRA_DERIVATIVE[(angle - 90) as usize]
+    } else if angle > 180 && angle < 270 {
+        DR_INTRA_DERIVATIVE[(270 - angle) as usize]
+    } else {
+        1
     }
 }
 
@@ -154,7 +217,9 @@ pub fn decode_prediction_mode(joint: u8) -> (PredictionMode, i32) {
 const BASE_DC: u8 = 128;
 const DEFAULT_ABOVE: u8 = 127;
 const DEFAULT_LEFT: u8 = 129;
-const DEFAULT_TOP_LEFT: u8 = 129;
+const DEFAULT_TOP_LEFT: u8 = 128;
+
+const MRL_INDEX_TO_DELTA: [i32; 4] = [0, 1, -1, 0];
 
 pub fn predict_intra(
     recon: &[u8],
@@ -164,31 +229,365 @@ pub fn predict_intra(
     w: usize,
     h: usize,
     mode: PredictionMode,
-    _angle_delta: i32,
+    angle_delta: i32,
+    mrl_index: u8,
+    sb_y: usize,
 ) -> Vec<u8> {
     let has_above = y > 0;
     let has_left = x > 0;
 
+    if mode.is_directional() {
+        let mut p_angle = mode.base_angle() + angle_delta * ANGLE_STEP;
+        p_angle += MRL_INDEX_TO_DELTA[mrl_index as usize];
+        return predict_directional(recon, stride, x, y, w, h, has_above, has_left, p_angle, mrl_index, sb_y);
+    }
+
     match mode {
         PredictionMode::DcPred => predict_dc(recon, stride, x, y, w, h, has_above, has_left),
-        PredictionMode::VPred => predict_v(recon, stride, x, y, w, h, has_above, has_left),
-        PredictionMode::HPred => predict_h(recon, stride, x, y, w, h, has_above, has_left),
-        PredictionMode::D45Pred | PredictionMode::D67Pred => {
-            predict_zone1(recon, stride, x, y, w, h, has_above, has_left)
-        }
-        PredictionMode::D203Pred => {
-            predict_zone3(recon, stride, x, y, w, h, has_above, has_left)
-        }
-        PredictionMode::D113Pred | PredictionMode::D135Pred | PredictionMode::D157Pred => {
-            predict_zone2(recon, stride, x, y, w, h, has_above, has_left)
-        }
         PredictionMode::PaethPred => {
             predict_paeth(recon, stride, x, y, w, h, has_above, has_left)
         }
         PredictionMode::SmoothPred | PredictionMode::SmoothVPred | PredictionMode::SmoothHPred => {
-            predict_smooth(recon, stride, x, y, w, h, has_above, has_left)
+            predict_smooth(recon, stride, x, y, w, h, has_above, has_left, mode)
+        }
+        _ => vec![BASE_DC; w * h],
+    }
+}
+
+fn predict_directional(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    has_above: bool,
+    has_left: bool,
+    p_angle: i32,
+    mrl_index: u8,
+    sb_y: usize,
+) -> Vec<u8> {
+    if p_angle == 90 && mrl_index == 0 {
+        return predict_v(recon, stride, x, y, w, h, has_above, has_left);
+    }
+    if p_angle == 180 && mrl_index == 0 {
+        return predict_h(recon, stride, x, y, w, h, has_above, has_left);
+    }
+
+    let above_mrl = if y == sb_y { 0 } else { mrl_index };
+    let (above_ext, left_ext, tl) =
+        extended_ref_samples_mrl(recon, stride, x, y, w, h, has_above, has_left, above_mrl, mrl_index);
+
+    let mrl = mrl_index as usize;
+    if p_angle > 0 && p_angle < 90 {
+        predict_zone1_angle(&above_ext, w, h, get_dx(p_angle), mrl)
+    } else if p_angle == 90 {
+        predict_v_mrl(&above_ext, w, h)
+    } else if p_angle > 90 && p_angle < 180 {
+        predict_zone2_angle(&above_ext, &left_ext, tl, w, h, get_dx(p_angle), get_dy(p_angle), mrl)
+    } else if p_angle == 180 {
+        predict_h_mrl(&left_ext, w, h)
+    } else if p_angle > 180 && p_angle < 270 {
+        predict_zone3_angle(&left_ext, w, h, get_dy(p_angle), mrl)
+    } else {
+        vec![BASE_DC; w * h]
+    }
+}
+
+fn extended_ref_samples(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    has_above: bool,
+    has_left: bool,
+) -> (Vec<u8>, Vec<u8>, u8) {
+    let above_need = w + h;
+    let left_need = h + w;
+    let frame_h = recon.len() / stride;
+
+    match (has_above, has_left) {
+        (true, true) => {
+            let tl = recon[(y - 1) * stride + x - 1];
+            let mut above = Vec::with_capacity(above_need);
+            for i in 0..above_need {
+                if x + i < stride && (y > 0) {
+                    above.push(recon[(y - 1) * stride + x + i]);
+                } else if !above.is_empty() {
+                    above.push(*above.last().unwrap());
+                } else {
+                    above.push(DEFAULT_ABOVE);
+                }
+            }
+            let mut left = Vec::with_capacity(left_need);
+            for j in 0..left_need {
+                if y + j < frame_h && x > 0 {
+                    left.push(recon[(y + j) * stride + x - 1]);
+                } else if !left.is_empty() {
+                    left.push(*left.last().unwrap());
+                } else {
+                    left.push(DEFAULT_LEFT);
+                }
+            }
+            (above, left, tl)
+        }
+        (true, false) => {
+            let mut above = Vec::with_capacity(above_need);
+            for i in 0..above_need {
+                if x + i < stride {
+                    above.push(recon[(y - 1) * stride + x + i]);
+                } else if !above.is_empty() {
+                    above.push(*above.last().unwrap());
+                } else {
+                    above.push(DEFAULT_ABOVE);
+                }
+            }
+            let fill = above[0];
+            let left = vec![fill; left_need];
+            (above, left, fill)
+        }
+        (false, true) => {
+            let mut left = Vec::with_capacity(left_need);
+            for j in 0..left_need {
+                if y + j < frame_h {
+                    left.push(recon[(y + j) * stride + x - 1]);
+                } else if !left.is_empty() {
+                    left.push(*left.last().unwrap());
+                } else {
+                    left.push(DEFAULT_LEFT);
+                }
+            }
+            let fill = left[0];
+            let above = vec![fill; above_need];
+            (above, left, fill)
+        }
+        (false, false) => {
+            (vec![DEFAULT_ABOVE; above_need], vec![DEFAULT_LEFT; left_need], DEFAULT_TOP_LEFT)
         }
     }
+}
+
+fn extended_ref_samples_mrl(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    has_above: bool,
+    has_left: bool,
+    above_mrl: u8,
+    left_mrl: u8,
+) -> (Vec<u8>, Vec<u8>, u8) {
+    if above_mrl == 0 && left_mrl == 0 {
+        return extended_ref_samples(recon, stride, x, y, w, h, has_above, has_left);
+    }
+
+    let mrl_extra = (above_mrl.max(left_mrl) as usize) << 1;
+    let above_need = w + h + mrl_extra;
+    let left_need = h + w + mrl_extra;
+    let frame_h = recon.len() / stride;
+    let above_off = above_mrl as usize + 1;
+    let left_off = left_mrl as usize + 1;
+
+    let has_above_mrl = has_above && y >= above_off;
+    let has_left_mrl = has_left && x >= left_off;
+
+    match (has_above_mrl, has_left_mrl) {
+        (true, true) => {
+            let tl = recon[(y - above_off) * stride + x - left_off];
+            let mut above = Vec::with_capacity(above_need);
+            for i in 0..above_need {
+                let col = x + i;
+                if col < stride {
+                    above.push(recon[(y - above_off) * stride + col]);
+                } else if !above.is_empty() {
+                    above.push(*above.last().unwrap());
+                } else {
+                    above.push(DEFAULT_ABOVE);
+                }
+            }
+            let mut left = Vec::with_capacity(left_need);
+            for j in 0..left_need {
+                let row = y + j;
+                if row < frame_h {
+                    left.push(recon[row * stride + x - left_off]);
+                } else if !left.is_empty() {
+                    left.push(*left.last().unwrap());
+                } else {
+                    left.push(DEFAULT_LEFT);
+                }
+            }
+            (above, left, tl)
+        }
+        (true, false) => {
+            let mut above = Vec::with_capacity(above_need);
+            for i in 0..above_need {
+                let col = x + i;
+                if col < stride {
+                    above.push(recon[(y - above_off) * stride + col]);
+                } else if !above.is_empty() {
+                    above.push(*above.last().unwrap());
+                } else {
+                    above.push(DEFAULT_ABOVE);
+                }
+            }
+            let fill = above[0];
+            let left = vec![fill; left_need];
+            (above, left, fill)
+        }
+        (false, true) => {
+            let mut left = Vec::with_capacity(left_need);
+            for j in 0..left_need {
+                let row = y + j;
+                if row < frame_h {
+                    left.push(recon[row * stride + x - left_off]);
+                } else if !left.is_empty() {
+                    left.push(*left.last().unwrap());
+                } else {
+                    left.push(DEFAULT_LEFT);
+                }
+            }
+            let fill = left[0];
+            let above = vec![fill; above_need];
+            (above, left, fill)
+        }
+        (false, false) => {
+            (vec![DEFAULT_ABOVE; above_need], vec![DEFAULT_LEFT; left_need], DEFAULT_TOP_LEFT)
+        }
+    }
+}
+
+fn predict_v_mrl(above: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    for r in 0..h {
+        for c in 0..w {
+            pred[r * w + c] = above[c];
+        }
+    }
+    pred
+}
+
+fn predict_h_mrl(left: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    for r in 0..h {
+        for c in 0..w {
+            pred[r * w + c] = left[r];
+        }
+    }
+    pred
+}
+
+fn predict_zone1_angle(above: &[u8], w: usize, h: usize, dx: i32, mrl: usize) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    let max_base_x = (w + h) as i32 - 1 + (mrl as i32) * 2;
+    let mut pos_x = dx * (1 + mrl as i32);
+
+    for r in 0..h {
+        let base = pos_x >> 6;
+        let shift = ((pos_x & 0x3F) >> 1) as u32;
+
+        if base >= max_base_x {
+            let fill = above[max_base_x as usize];
+            for i in r..h {
+                for c in 0..w {
+                    pred[i * w + c] = fill;
+                }
+            }
+            return pred;
+        }
+
+        for c in 0..w {
+            let b = base + c as i32;
+            if b < max_base_x {
+                let val = above[b as usize] as u32 * (32 - shift)
+                    + above[(b + 1) as usize] as u32 * shift;
+                pred[r * w + c] = ((val + 16) >> 5) as u8;
+            } else {
+                pred[r * w + c] = above[max_base_x as usize];
+            }
+        }
+        pos_x += dx;
+    }
+    pred
+}
+
+fn predict_zone2_angle(
+    above: &[u8],
+    left: &[u8],
+    tl: u8,
+    w: usize,
+    h: usize,
+    dx: i32,
+    dy: i32,
+    mrl: usize,
+) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    let min_base_x = -(1 + mrl as i32);
+    let min_base_y = -(1 + mrl as i32);
+
+    for r in 0..h {
+        for c in 0..w {
+            let x = ((c as i32) << 6) - ((r as i32) + 1 + mrl as i32) * dx;
+            let base_x = x >> 6;
+
+            if base_x >= min_base_x {
+                let shift = ((x & 0x3F) >> 1) as u32;
+                let (s0, s1) = if base_x < 0 {
+                    (tl as u32, above[0] as u32)
+                } else {
+                    (above[base_x as usize] as u32, above[(base_x + 1) as usize] as u32)
+                };
+                let val = s0 * (32 - shift) + s1 * shift;
+                pred[r * w + c] = ((val + 16) >> 5) as u8;
+            } else {
+                let y = ((r as i32) << 6) - ((c as i32) + 1 + mrl as i32) * dy;
+                let base_y = y >> 6;
+                let shift = ((y & 0x3F) >> 1) as u32;
+                let (s0, s1) = if base_y < min_base_y {
+                    (tl as u32, left[0] as u32)
+                } else if base_y < 0 {
+                    (tl as u32, left[0] as u32)
+                } else {
+                    let by = base_y as usize;
+                    (left[by.min(left.len() - 1)] as u32,
+                     left[(by + 1).min(left.len() - 1)] as u32)
+                };
+                let val = s0 * (32 - shift) + s1 * shift;
+                pred[r * w + c] = ((val + 16) >> 5) as u8;
+            }
+        }
+    }
+    pred
+}
+
+fn predict_zone3_angle(left: &[u8], w: usize, h: usize, dy: i32, mrl: usize) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    let max_base_y = (w + h) as i32 - 1 + (mrl as i32) * 2;
+    let mut pos_y = dy * (1 + mrl as i32);
+
+    for c in 0..w {
+        let base = pos_y >> 6;
+        let shift = ((pos_y & 0x3F) >> 1) as u32;
+
+        for r in 0..h {
+            let b = base + r as i32;
+            if b < max_base_y {
+                let val = left[b as usize] as u32 * (32 - shift)
+                    + left[(b + 1) as usize] as u32 * shift;
+                pred[r * w + c] = ((val + 16) >> 5) as u8;
+            } else {
+                for ri in r..h {
+                    pred[ri * w + c] = left[max_base_y as usize];
+                }
+                break;
+            }
+        }
+        pos_y += dy;
+    }
+    pred
 }
 
 fn predict_dc(
@@ -275,100 +674,6 @@ fn predict_h(
     pred
 }
 
-fn predict_zone1(
-    recon: &[u8],
-    stride: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    has_above: bool,
-    has_left: bool,
-) -> Vec<u8> {
-    if !has_above {
-        return if has_left {
-            vec![recon[y * stride + x - 1]; w * h]
-        } else {
-            vec![DEFAULT_ABOVE; w * h]
-        };
-    }
-    let total = w + h;
-    let mut above = Vec::with_capacity(total);
-    for i in 0..total {
-        if x + i < stride {
-            above.push(recon[(y - 1) * stride + x + i]);
-        } else if let Some(&last) = above.last() {
-            above.push(last);
-        } else {
-            above.push(DEFAULT_ABOVE);
-        }
-    }
-    let mut pred = vec![0u8; w * h];
-    for row in 0..h {
-        for col in 0..w {
-            let idx = (row + col + 1).min(total - 1);
-            pred[row * w + col] = above[idx];
-        }
-    }
-    pred
-}
-
-fn predict_zone3(
-    recon: &[u8],
-    stride: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    has_above: bool,
-    has_left: bool,
-) -> Vec<u8> {
-    if !has_left {
-        return if has_above {
-            vec![recon[(y - 1) * stride + x]; w * h]
-        } else {
-            vec![DEFAULT_LEFT; w * h]
-        };
-    }
-    let total = h + w;
-    let frame_h = recon.len() / stride;
-    let mut left = Vec::with_capacity(total);
-    for j in 0..total {
-        if y + j < frame_h {
-            left.push(recon[(y + j) * stride + x - 1]);
-        } else if let Some(&last) = left.last() {
-            left.push(last);
-        } else {
-            left.push(DEFAULT_LEFT);
-        }
-    }
-    let mut pred = vec![0u8; w * h];
-    for row in 0..h {
-        for col in 0..w {
-            let idx = (row + col + 1).min(total - 1);
-            pred[row * w + col] = left[idx];
-        }
-    }
-    pred
-}
-
-fn predict_zone2(
-    recon: &[u8],
-    stride: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    has_above: bool,
-    has_left: bool,
-) -> Vec<u8> {
-    if !has_above && !has_left {
-        let (above, left, tl) = default_ref_samples(w, h);
-        return predict_paeth_from_refs(&above, &left, tl, w, h);
-    }
-    predict_dc(recon, stride, x, y, w, h, has_above, has_left)
-}
-
 fn predict_paeth(
     recon: &[u8],
     stride: usize,
@@ -387,6 +692,32 @@ fn predict_paeth(
     predict_paeth_from_refs(&above, &left, tl, w, h)
 }
 
+#[rustfmt::skip]
+const SM_WEIGHT_ARRAYS: [u8; 128] = [
+    // offset 0: unused (2 bytes)
+    0, 0,
+    // offset 2: bs=2
+    255, 128,
+    // offset 4: bs=4
+    255, 149, 85, 64,
+    // offset 8: bs=8
+    255, 197, 146, 105, 73, 50, 37, 32,
+    // offset 16: bs=16
+    255, 225, 196, 170, 145, 123, 102, 84, 68, 54, 43, 33, 26, 20, 17, 16,
+    // offset 32: bs=32
+    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74,
+    66, 59, 52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
+    // offset 64: bs=64
+    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150,
+    144, 138, 133, 127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69,
+    65, 61, 57, 54, 50, 47, 44, 41, 38, 35, 32, 29, 27, 25, 22, 20,
+    18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
+];
+
+fn smooth_weight_row(size: usize) -> &'static [u8] {
+    &SM_WEIGHT_ARRAYS[size..size * 2]
+}
+
 fn predict_smooth(
     recon: &[u8],
     stride: usize,
@@ -396,24 +727,53 @@ fn predict_smooth(
     h: usize,
     has_above: bool,
     has_left: bool,
+    mode: PredictionMode,
 ) -> Vec<u8> {
     let (above, left, _tl) = if !has_above && !has_left {
         default_ref_samples(w, h)
     } else {
         ref_samples(recon, stride, x, y, w, h, has_above, has_left)
     };
+
     let below_pred = left[h - 1] as u32;
     let right_pred = above[w - 1] as u32;
+    let sm_weights_h = smooth_weight_row(h);
+    let sm_weights_w = smooth_weight_row(w);
     let mut pred = vec![0u8; w * h];
-    for row in 0..h {
-        for col in 0..w {
-            let top = above[col] as u32;
-            let lft = left[row] as u32;
-            let w_top = ((h - 1 - row) * 256 / h.max(1)) as u32;
-            let w_lft = ((w - 1 - col) * 256 / w.max(1)) as u32;
-            let vert = w_top * top + (256 - w_top) * below_pred;
-            let horz = w_lft * lft + (256 - w_lft) * right_pred;
-            pred[row * w + col] = ((vert + horz + 256) >> 9).min(255) as u8;
+
+    match mode {
+        PredictionMode::SmoothVPred => {
+            for row in 0..h {
+                let wt = sm_weights_h[row] as u32;
+                for col in 0..w {
+                    let top = above[col] as u32;
+                    let val = wt * top + (256 - wt) * below_pred;
+                    pred[row * w + col] = ((val + 128) >> 8) as u8;
+                }
+            }
+        }
+        PredictionMode::SmoothHPred => {
+            for row in 0..h {
+                for col in 0..w {
+                    let wl = sm_weights_w[col] as u32;
+                    let lft = left[row] as u32;
+                    let val = wl * lft + (256 - wl) * right_pred;
+                    pred[row * w + col] = ((val + 128) >> 8) as u8;
+                }
+            }
+        }
+        _ => {
+            for row in 0..h {
+                let wt = sm_weights_h[row] as u32;
+                for col in 0..w {
+                    let top = above[col] as u32;
+                    let lft = left[row] as u32;
+                    let wl = sm_weights_w[col] as u32;
+                    let vert = wt * top + (256 - wt) * below_pred;
+                    let horz = wl * lft + (256 - wl) * right_pred;
+                    pred[row * w + col] = ((vert + horz + 256) >> 9) as u8;
+                }
+            }
         }
     }
     pred
@@ -433,29 +793,41 @@ fn ref_samples(
     has_above: bool,
     has_left: bool,
 ) -> (Vec<u8>, Vec<u8>, u8) {
-    let mut above = vec![DEFAULT_ABOVE; w];
-    let mut left = vec![DEFAULT_LEFT; h];
-
-    if has_above {
-        for i in 0..w {
-            above[i] = recon[(y - 1) * stride + x + i];
+    match (has_above, has_left) {
+        (true, true) => {
+            let mut above = vec![0u8; w];
+            let mut left = vec![0u8; h];
+            for i in 0..w {
+                above[i] = recon[(y - 1) * stride + x + i];
+            }
+            for j in 0..h {
+                left[j] = recon[(y + j) * stride + x - 1];
+            }
+            let tl = recon[(y - 1) * stride + x - 1];
+            (above, left, tl)
+        }
+        (true, false) => {
+            let mut above = vec![0u8; w];
+            for i in 0..w {
+                above[i] = recon[(y - 1) * stride + x + i];
+            }
+            let fill = above[0];
+            let left = vec![fill; h];
+            (above, left, fill)
+        }
+        (false, true) => {
+            let mut left = vec![0u8; h];
+            for j in 0..h {
+                left[j] = recon[(y + j) * stride + x - 1];
+            }
+            let fill = left[0];
+            let above = vec![fill; w];
+            (above, left, fill)
+        }
+        (false, false) => {
+            (vec![DEFAULT_ABOVE; w], vec![DEFAULT_LEFT; h], DEFAULT_TOP_LEFT)
         }
     }
-    if has_left {
-        for j in 0..h {
-            left[j] = recon[(y + j) * stride + x - 1];
-        }
-    }
-
-    let tl = if has_above && has_left {
-        recon[(y - 1) * stride + x - 1]
-    } else if has_left {
-        left[0]
-    } else {
-        DEFAULT_TOP_LEFT
-    };
-
-    (above, left, tl)
 }
 
 fn predict_paeth_from_refs(above: &[u8], left: &[u8], tl: u8, w: usize, h: usize) -> Vec<u8> {
@@ -519,43 +891,43 @@ mod tests {
     #[test]
     fn dc_no_neighbors_gives_128() {
         let recon = vec![0u8; 64 * 64];
-        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::DcPred, 0);
+        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::DcPred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 128));
     }
 
     #[test]
     fn d45_no_neighbors_gives_127() {
         let recon = vec![0u8; 64 * 64];
-        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::D45Pred, 0);
+        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::D45Pred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 127));
     }
 
     #[test]
     fn v_pred_no_neighbors_gives_127() {
         let recon = vec![0u8; 64 * 64];
-        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::VPred, 0);
+        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::VPred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 127));
     }
 
     #[test]
     fn h_pred_no_neighbors_gives_129() {
         let recon = vec![0u8; 64 * 64];
-        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::HPred, 0);
+        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::HPred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 129));
     }
 
     #[test]
-    fn paeth_no_neighbors_gives_127() {
+    fn paeth_no_neighbors_gives_128() {
         let recon = vec![0u8; 64 * 64];
-        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::PaethPred, 0);
-        assert!(pred.iter().all(|&v| v == 127));
+        let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::PaethPred, 0, 0, 0);
+        assert!(pred.iter().all(|&v| v == 128));
     }
 
     #[test]
     fn dc_with_above() {
         let mut recon = vec![0u8; 64 * 64];
         recon[..64].fill(200);
-        let pred = predict_intra(&recon, 64, 0, 1, 64, 63, PredictionMode::DcPred, 0);
+        let pred = predict_intra(&recon, 64, 0, 1, 64, 63, PredictionMode::DcPred, 0, 0, 0);
         assert_eq!(pred[0], 200);
     }
 
@@ -565,7 +937,7 @@ mod tests {
         for (i, pixel) in recon[..64].iter_mut().enumerate() {
             *pixel = 100 + i as u8;
         }
-        let pred = predict_intra(&recon, 128, 0, 1, 64, 64, PredictionMode::VPred, 0);
+        let pred = predict_intra(&recon, 128, 0, 1, 64, 64, PredictionMode::VPred, 0, 0, 0);
         for row in 0..64 {
             for col in 0..64 {
                 assert_eq!(pred[row * 64 + col], 100 + col as u8);
@@ -610,5 +982,27 @@ mod tests {
             seen[v] = true;
         }
         assert!(seen.iter().all(|&s| s), "not all modes covered");
+    }
+
+    #[test]
+    fn zone1_d45_uniform_above() {
+        let mut recon = vec![200u8; 128 * 128];
+        recon[..128].fill(100);
+        let pred = predict_intra(&recon, 128, 0, 1, 8, 8, PredictionMode::D45Pred, 0, 0, 0);
+        for &v in &pred {
+            assert_eq!(v, 100, "D45 with uniform above should produce 100 everywhere");
+        }
+    }
+
+    #[test]
+    fn zone3_d203_uniform_left() {
+        let mut recon = vec![200u8; 128 * 128];
+        for r in 0..128 {
+            recon[r * 128] = 100;
+        }
+        let pred = predict_intra(&recon, 128, 1, 0, 8, 8, PredictionMode::D203Pred, 0, 0, 0);
+        for &v in &pred {
+            assert_eq!(v, 100, "D203 with uniform left should produce 100 everywhere");
+        }
     }
 }

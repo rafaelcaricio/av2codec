@@ -31,12 +31,15 @@ pub struct FrameCdfContext {
     pub uv_mode: [Vec<u16>; 2],
     pub cfl: [Vec<u16>; 3],
     pub cfl_index: Vec<u16>,
+    pub cfl_mhccp: Vec<u16>,
+    pub mhccp_filter_dir: [Vec<u16>; 4],
     pub cfl_sign: Vec<u16>,
     pub cfl_alpha: [Vec<u16>; 6],
     pub txb_skip_y: [[Vec<u16>; 10]; 5],
+    pub txb_skip_y_fsc: [[Vec<u16>; 10]; 5],
     pub txb_skip_u: [Vec<u16>; 3],
-    pub txb_skip_v: [Vec<u16>; 3],
-    pub txb_skip_v_u_nz: [Vec<u16>; 3],
+    pub txb_skip_v: [Vec<u16>; 6],
+    pub txb_skip_v_u_nz: [Vec<u16>; 6],
     pub dc_sign_y: [Vec<u16>; 3],
     pub dc_sign_uv: Vec<u16>,
     pub eob_multi_1024: [Vec<u16>; 3],
@@ -53,6 +56,7 @@ pub struct FrameCdfContext {
     pub coeff_base_eob_uv: [Vec<u16>; 4],
     pub coeff_br_lf_uv: [Vec<u16>; 4],
     pub coeff_br_uv: [Vec<u16>; 4],
+    pub coeff_base_ph: [Vec<u16>; 5],
     pub do_split_part: [[Vec<u16>; 64]; 2],
     pub do_square_split: [[Vec<u16>; 8]; 2],
     pub rect_type: [[Vec<u16>; 64]; 2],
@@ -71,12 +75,30 @@ pub struct FrameCdfContext {
     pub txfm_4way_partition_type: [[[Vec<u16>; 14]; 2]; 2],
     pub txfm_2or3_way_partition_type: [[[Vec<u16>; 2]; 2]; 2],
     pub intrabc: [Vec<u16>; 3],
+    pub skip_txfm: [Vec<u16>; 6],
+    pub intrabc_mode: Vec<u16>,
+    pub intrabc_bv_precision: Vec<u16>,
+    pub morph_pred: [Vec<u16>; 3],
+    pub ndvc_joint_shell_set: Vec<u16>,
+    pub ndvc_joint_shell_class_0: [Vec<u16>; 7],
+    pub ndvc_joint_shell_class_1: [Vec<u16>; 7],
+    pub ndvc_joint_shell_last_two: Vec<u16>,
+    pub ndvc_shell_offset_low_class: [Vec<u16>; 2],
+    pub ndvc_shell_offset_class2: Vec<u16>,
+    pub ndvc_shell_offset_other_class: [Vec<u16>; 16],
+    pub ndvc_col_mv_greater_flags: [Vec<u16>; 2],
+    pub ndvc_col_mv_index: [Vec<u16>; 4],
     pub cdef_strength_index0: [Vec<u16>; 4],
+    pub cdef_cdf: [Vec<u16>; 6],
     pub ccso: [[Vec<u16>; 4]; 3],
     pub intra_ext_tx: [Vec<u16>; 4],
     pub intra_ext_tx_reduced: Vec<u16>,
     pub intra_ext_tx_short_side: [Vec<u16>; 4],
     pub tx_ext_32_intra: Vec<u16>,
+    pub inter_tx_type_set: [[[Vec<u16>; 4]; 3]; 2],
+    pub inter_tx_type_idx: [[Vec<u16>; 3]; 2],
+    pub inter_tx_type_offset_1: [Vec<u16>; 3],
+    pub inter_tx_type_offset_2: [Vec<u16>; 3],
     pub stx: [Vec<u16>; 5],
     pub most_probable_stx_set: Vec<u16>,
     pub most_probable_stx_set_adst_adst: Vec<u16>,
@@ -85,6 +107,10 @@ pub struct FrameCdfContext {
     pub palette_y_size: Vec<u16>,
     pub identity_row_y: [Vec<u16>; 4],
     pub palette_y_color_index: [[Vec<u16>; 5]; 7],
+    pub coeff_base_bob: [[Vec<u16>; 3]; 3],
+    pub coeff_base_idtx: [[Vec<u16>; 7]; 3],
+    pub coeff_br_idtx: [[Vec<u16>; 7]; 3],
+    pub idtx_sign: [[Vec<u16>; 9]; 3],
 }
 
 impl Default for FrameCdfContext {
@@ -118,6 +144,8 @@ impl FrameCdfContext {
                 make_cdf(&CFL_ICDF[2], 0),
             ],
             cfl_index: make_cdf(&CFL_INDEX_ICDF, 30),
+            cfl_mhccp: make_cdf(&CFL_MHCCP_ICDF, 30),
+            mhccp_filter_dir: std::array::from_fn(|i| make_cdf(&MHCCP_FILTER_DIR_ICDF[i], MHCCP_FILTER_DIR_PARA[i])),
             cfl_sign: make_cdf(&CFL_SIGN_ICDF, 62),
             cfl_alpha: [
                 make_cdf(&CFL_ALPHA_ICDF[0], 62),
@@ -130,9 +158,12 @@ impl FrameCdfContext {
             txb_skip_y: std::array::from_fn(|t| {
                 std::array::from_fn(|c| make_cdf(&TXB_SKIP_Y_ICDF[t][c], 0))
             }),
+            txb_skip_y_fsc: std::array::from_fn(|t| {
+                std::array::from_fn(|c| make_cdf(&TXB_SKIP_Y_ICDF[t][c], 0))
+            }),
             txb_skip_u: std::array::from_fn(|i| make_cdf(&TXB_SKIP_U_CTX_ICDF[i], 0)),
-            txb_skip_v: std::array::from_fn(|i| make_cdf(&TXB_SKIP_V_CTX_ICDF[i], 0)),
-            txb_skip_v_u_nz: std::array::from_fn(|i| make_cdf(&TXB_SKIP_V_U_NONZERO_CTX_ICDF[i], 0)),
+            txb_skip_v: std::array::from_fn(|i| make_cdf(&TXB_SKIP_V_CTX_ICDF[i], TXB_SKIP_V_CTX_PARA[i])),
+            txb_skip_v_u_nz: std::array::from_fn(|i| make_cdf(&TXB_SKIP_V_U_NONZERO_CTX_ICDF[i], TXB_SKIP_V_U_NONZERO_CTX_PARA[i])),
             dc_sign_y: std::array::from_fn(|i| make_cdf(&DC_SIGN_Y_ICDF[i], 0)),
             dc_sign_uv: make_cdf(&DC_SIGN_UV_ICDF, 0),
             eob_multi_1024: std::array::from_fn(|i| make_cdf(&EOB_MULTI_1024_ICDF[i], 0)),
@@ -169,6 +200,7 @@ impl FrameCdfContext {
             coeff_base_eob_uv: std::array::from_fn(|i| make_cdf(&COEFF_BASE_EOB_UV_ICDF[i], 0)),
             coeff_br_lf_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_LF_UV_ICDF[i], 0)),
             coeff_br_uv: std::array::from_fn(|i| make_cdf(&COEFF_BR_UV_ICDF[i], 0)),
+            coeff_base_ph: std::array::from_fn(|i| make_cdf(&COEFF_BASE_PH_ICDF[i], COEFF_BASE_PH_PARA[i])),
             do_split_part: std::array::from_fn(|p| {
                 std::array::from_fn(|c| make_cdf(&DO_SPLIT_PART_ICDF[p][c], DO_SPLIT_PART_PARA[p][c]))
             }),
@@ -211,7 +243,28 @@ impl FrameCdfContext {
                 })
             }),
             intrabc: std::array::from_fn(|i| make_cdf(&INTRABC_ICDF[i], INTRABC_PARA[i])),
+            skip_txfm: std::array::from_fn(|i| make_cdf(&SKIP_TXFM_ICDF[i], SKIP_TXFM_PARA[i])),
+            intrabc_mode: make_cdf(&INTRABC_MODE_ICDF, INTRABC_MODE_PARA),
+            intrabc_bv_precision: make_cdf(&INTRABC_BV_PRECISION_ICDF, INTRABC_BV_PRECISION_PARA),
+            morph_pred: std::array::from_fn(|i| make_cdf(&MORPH_PRED_ICDF[i], MORPH_PRED_PARA[i])),
+            ndvc_joint_shell_set: make_cdf(&NMV_JOINT_SHELL_SET_ICDF, NMV_JOINT_SHELL_SET_PARA),
+            ndvc_joint_shell_class_0: std::array::from_fn(|i| make_cdf(NMV_JOINT_SHELL_CLASS_0_ICDF[i], NMV_JOINT_SHELL_CLASS_0_PARA[i])),
+            ndvc_joint_shell_class_1: std::array::from_fn(|i| make_cdf(NMV_JOINT_SHELL_CLASS_1_ICDF[i], NMV_JOINT_SHELL_CLASS_1_PARA[i])),
+            ndvc_joint_shell_last_two: make_cdf(&NMV_JOINT_SHELL_LAST_TWO_ICDF, NMV_JOINT_SHELL_LAST_TWO_PARA),
+            ndvc_shell_offset_low_class: std::array::from_fn(|i| make_cdf(&NMV_SHELL_OFFSET_LOW_CLASS_ICDF[i], NMV_SHELL_OFFSET_LOW_CLASS_PARA[i])),
+            ndvc_shell_offset_class2: make_cdf(&NMV_SHELL_OFFSET_CLASS2_ICDF, NMV_SHELL_OFFSET_CLASS2_PARA),
+            ndvc_shell_offset_other_class: std::array::from_fn(|i| make_cdf(&NMV_SHELL_OFFSET_OTHER_CLASS_ICDF[i], NMV_SHELL_OFFSET_OTHER_CLASS_PARA[i])),
+            ndvc_col_mv_greater_flags: std::array::from_fn(|i| make_cdf(&NMV_COL_MV_GREATER_FLAGS_ICDF[i], NMV_COL_MV_GREATER_FLAGS_PARA[i])),
+            ndvc_col_mv_index: std::array::from_fn(|i| make_cdf(&NMV_COL_MV_INDEX_ICDF[i], NMV_COL_MV_INDEX_PARA[i])),
             cdef_strength_index0: std::array::from_fn(|i| make_cdf(&CDEF_STRENGTH_INDEX0_ICDF[i], CDEF_STRENGTH_INDEX0_PARA[i])),
+            cdef_cdf: [
+                make_cdf(&CDEF_CDF_0_ICDF, CDEF_CDF_PARA[0]),
+                make_cdf(&CDEF_CDF_1_ICDF, CDEF_CDF_PARA[1]),
+                make_cdf(&CDEF_CDF_2_ICDF, CDEF_CDF_PARA[2]),
+                make_cdf(&CDEF_CDF_3_ICDF, CDEF_CDF_PARA[3]),
+                make_cdf(&CDEF_CDF_4_ICDF, CDEF_CDF_PARA[4]),
+                make_cdf(&CDEF_CDF_5_ICDF, CDEF_CDF_PARA[5]),
+            ],
             ccso: std::array::from_fn(|p| {
                 std::array::from_fn(|c| make_cdf(&CCSO_ICDF[p][c], CCSO_PARA[p][c]))
             }),
@@ -219,6 +272,24 @@ impl FrameCdfContext {
             intra_ext_tx_reduced: make_cdf(&INTRA_EXT_TX_REDUCED_ICDF, INTRA_EXT_TX_REDUCED_PARA),
             intra_ext_tx_short_side: std::array::from_fn(|i| make_cdf(&INTRA_EXT_TX_SHORT_SIDE_ICDF[i], INTRA_EXT_TX_SHORT_SIDE_PARA[i])),
             tx_ext_32_intra: make_cdf(&TX_EXT_32_INTRA_ICDF, TX_EXT_32_INTRA_PARA),
+            inter_tx_type_set: std::array::from_fn(|set| {
+                std::array::from_fn(|ctx| {
+                    std::array::from_fn(|size| {
+                        make_cdf(&INTER_TX_TYPE_SET_ICDF[set][ctx][size], INTER_TX_TYPE_SET_PARA[set][ctx][size])
+                    })
+                })
+            }),
+            inter_tx_type_idx: std::array::from_fn(|set| {
+                std::array::from_fn(|ctx| {
+                    make_cdf(&INTER_TX_TYPE_IDX_ICDF[set][ctx], INTER_TX_TYPE_IDX_PARA[set][ctx])
+                })
+            }),
+            inter_tx_type_offset_1: std::array::from_fn(|ctx| {
+                make_cdf(&INTER_TX_TYPE_OFFSET_1_ICDF[ctx], INTER_TX_TYPE_OFFSET_1_PARA[ctx])
+            }),
+            inter_tx_type_offset_2: std::array::from_fn(|ctx| {
+                make_cdf(&INTER_TX_TYPE_OFFSET_2_ICDF[ctx], INTER_TX_TYPE_OFFSET_2_PARA[ctx])
+            }),
             stx: std::array::from_fn(|i| make_cdf(&STX_ICDF[i], STX_PARA[i])),
             most_probable_stx_set: make_cdf(&MOST_PROBABLE_STX_SET_ICDF, MOST_PROBABLE_STX_SET_PARA),
             most_probable_stx_set_adst_adst: make_cdf(&MOST_PROBABLE_STX_SET_ADST_ADST_ICDF, MOST_PROBABLE_STX_SET_ADST_ADST_PARA),
@@ -231,6 +302,27 @@ impl FrameCdfContext {
                     let n_colors = PALETTE_COLORS_PER_SIZE[ps];
                     make_cdf(&PALETTE_Y_COLOR_INDEX_ICDF[ps][ctx][..n_colors], PALETTE_Y_COLOR_INDEX_PARA[ps][ctx])
                 })
+            }),
+            coeff_base_bob: std::array::from_fn(|s| {
+                std::array::from_fn(|c| {
+                    let v = COEFF_BASE_BOB_QCTX_ICDF[0][s][c];
+                    make_cdf(&[32768 - v[0], 32768 - v[1], 0], COEFF_BASE_BOB_QCTX_PARA[0][s][c])
+                })
+            }),
+            coeff_base_idtx: std::array::from_fn(|s| {
+                std::array::from_fn(|c| {
+                    let v = COEFF_BASE_IDTX_QCTX_ICDF[0][s][c];
+                    make_cdf(&[32768 - v[0], 32768 - v[1], 32768 - v[2], 0], COEFF_BASE_IDTX_QCTX_PARA[0][s][c])
+                })
+            }),
+            coeff_br_idtx: std::array::from_fn(|s| {
+                std::array::from_fn(|c| {
+                    let v = COEFF_BR_IDTX_QCTX_ICDF[0][s][c];
+                    make_cdf(&[32768 - v[0], 32768 - v[1], 32768 - v[2], 0], COEFF_BR_IDTX_QCTX_PARA[0][s][c])
+                })
+            }),
+            idtx_sign: std::array::from_fn(|s| {
+                std::array::from_fn(|c| make_cdf(&[32768 - IDTX_SIGN_QCTX_ICDF[0][s][c], 0], IDTX_SIGN_QCTX_PARA[0][s][c]))
             }),
         }
     }
@@ -260,6 +352,8 @@ impl FrameCdfContext {
                 make_cdf(&CFL_ICDF[2], 0),
             ],
             cfl_index: make_cdf(&CFL_INDEX_ICDF, 30),
+            cfl_mhccp: make_cdf(&CFL_MHCCP_ICDF, 30),
+            mhccp_filter_dir: std::array::from_fn(|i| make_cdf(&MHCCP_FILTER_DIR_ICDF[i], MHCCP_FILTER_DIR_PARA[i])),
             cfl_sign: make_cdf(&CFL_SIGN_ICDF, 62),
             cfl_alpha: [
                 make_cdf(&CFL_ALPHA_ICDF[0], 62),
@@ -273,6 +367,12 @@ impl FrameCdfContext {
                 std::array::from_fn(|c| make_cdf(
                     &TXB_SKIP_Y_QCTX_ICDF[q][t][c],
                     TXB_SKIP_Y_QCTX_PARA[q][t][c],
+                ))
+            }),
+            txb_skip_y_fsc: std::array::from_fn(|t| {
+                std::array::from_fn(|c| make_cdf(
+                    &TXB_SKIP_U_QCTX_ICDF[q][t][c],
+                    TXB_SKIP_U_QCTX_PARA[q][t][c],
                 ))
             }),
             txb_skip_u: std::array::from_fn(|i| make_cdf(
@@ -353,6 +453,7 @@ impl FrameCdfContext {
                 &COEFF_BR_UV_QCTX_ICDF[q][i],
                 COEFF_BR_UV_QCTX_PARA[q][i],
             )),
+            coeff_base_ph: std::array::from_fn(|i| make_cdf(&COEFF_BASE_PH_ICDF[i], COEFF_BASE_PH_PARA[i])),
             do_split_part: std::array::from_fn(|p| {
                 std::array::from_fn(|c| make_cdf(&DO_SPLIT_PART_ICDF[p][c], DO_SPLIT_PART_PARA[p][c]))
             }),
@@ -413,7 +514,28 @@ impl FrameCdfContext {
                 })
             }),
             intrabc: std::array::from_fn(|i| make_cdf(&INTRABC_ICDF[i], INTRABC_PARA[i])),
+            skip_txfm: std::array::from_fn(|i| make_cdf(&SKIP_TXFM_ICDF[i], SKIP_TXFM_PARA[i])),
+            intrabc_mode: make_cdf(&INTRABC_MODE_ICDF, INTRABC_MODE_PARA),
+            intrabc_bv_precision: make_cdf(&INTRABC_BV_PRECISION_ICDF, INTRABC_BV_PRECISION_PARA),
+            morph_pred: std::array::from_fn(|i| make_cdf(&MORPH_PRED_ICDF[i], MORPH_PRED_PARA[i])),
+            ndvc_joint_shell_set: make_cdf(&NMV_JOINT_SHELL_SET_ICDF, NMV_JOINT_SHELL_SET_PARA),
+            ndvc_joint_shell_class_0: std::array::from_fn(|i| make_cdf(NMV_JOINT_SHELL_CLASS_0_ICDF[i], NMV_JOINT_SHELL_CLASS_0_PARA[i])),
+            ndvc_joint_shell_class_1: std::array::from_fn(|i| make_cdf(NMV_JOINT_SHELL_CLASS_1_ICDF[i], NMV_JOINT_SHELL_CLASS_1_PARA[i])),
+            ndvc_joint_shell_last_two: make_cdf(&NMV_JOINT_SHELL_LAST_TWO_ICDF, NMV_JOINT_SHELL_LAST_TWO_PARA),
+            ndvc_shell_offset_low_class: std::array::from_fn(|i| make_cdf(&NMV_SHELL_OFFSET_LOW_CLASS_ICDF[i], NMV_SHELL_OFFSET_LOW_CLASS_PARA[i])),
+            ndvc_shell_offset_class2: make_cdf(&NMV_SHELL_OFFSET_CLASS2_ICDF, NMV_SHELL_OFFSET_CLASS2_PARA),
+            ndvc_shell_offset_other_class: std::array::from_fn(|i| make_cdf(&NMV_SHELL_OFFSET_OTHER_CLASS_ICDF[i], NMV_SHELL_OFFSET_OTHER_CLASS_PARA[i])),
+            ndvc_col_mv_greater_flags: std::array::from_fn(|i| make_cdf(&NMV_COL_MV_GREATER_FLAGS_ICDF[i], NMV_COL_MV_GREATER_FLAGS_PARA[i])),
+            ndvc_col_mv_index: std::array::from_fn(|i| make_cdf(&NMV_COL_MV_INDEX_ICDF[i], NMV_COL_MV_INDEX_PARA[i])),
             cdef_strength_index0: std::array::from_fn(|i| make_cdf(&CDEF_STRENGTH_INDEX0_ICDF[i], CDEF_STRENGTH_INDEX0_PARA[i])),
+            cdef_cdf: [
+                make_cdf(&CDEF_CDF_0_ICDF, CDEF_CDF_PARA[0]),
+                make_cdf(&CDEF_CDF_1_ICDF, CDEF_CDF_PARA[1]),
+                make_cdf(&CDEF_CDF_2_ICDF, CDEF_CDF_PARA[2]),
+                make_cdf(&CDEF_CDF_3_ICDF, CDEF_CDF_PARA[3]),
+                make_cdf(&CDEF_CDF_4_ICDF, CDEF_CDF_PARA[4]),
+                make_cdf(&CDEF_CDF_5_ICDF, CDEF_CDF_PARA[5]),
+            ],
             ccso: std::array::from_fn(|p| {
                 std::array::from_fn(|c| make_cdf(&CCSO_ICDF[p][c], CCSO_PARA[p][c]))
             }),
@@ -421,6 +543,24 @@ impl FrameCdfContext {
             intra_ext_tx_reduced: make_cdf(&INTRA_EXT_TX_REDUCED_ICDF, INTRA_EXT_TX_REDUCED_PARA),
             intra_ext_tx_short_side: std::array::from_fn(|i| make_cdf(&INTRA_EXT_TX_SHORT_SIDE_ICDF[i], INTRA_EXT_TX_SHORT_SIDE_PARA[i])),
             tx_ext_32_intra: make_cdf(&TX_EXT_32_INTRA_ICDF, TX_EXT_32_INTRA_PARA),
+            inter_tx_type_set: std::array::from_fn(|set| {
+                std::array::from_fn(|ctx| {
+                    std::array::from_fn(|size| {
+                        make_cdf(&INTER_TX_TYPE_SET_ICDF[set][ctx][size], INTER_TX_TYPE_SET_PARA[set][ctx][size])
+                    })
+                })
+            }),
+            inter_tx_type_idx: std::array::from_fn(|set| {
+                std::array::from_fn(|ctx| {
+                    make_cdf(&INTER_TX_TYPE_IDX_ICDF[set][ctx], INTER_TX_TYPE_IDX_PARA[set][ctx])
+                })
+            }),
+            inter_tx_type_offset_1: std::array::from_fn(|ctx| {
+                make_cdf(&INTER_TX_TYPE_OFFSET_1_ICDF[ctx], INTER_TX_TYPE_OFFSET_1_PARA[ctx])
+            }),
+            inter_tx_type_offset_2: std::array::from_fn(|ctx| {
+                make_cdf(&INTER_TX_TYPE_OFFSET_2_ICDF[ctx], INTER_TX_TYPE_OFFSET_2_PARA[ctx])
+            }),
             stx: std::array::from_fn(|i| make_cdf(&STX_ICDF[i], STX_PARA[i])),
             most_probable_stx_set: make_cdf(&MOST_PROBABLE_STX_SET_ICDF, MOST_PROBABLE_STX_SET_PARA),
             most_probable_stx_set_adst_adst: make_cdf(&MOST_PROBABLE_STX_SET_ADST_ADST_ICDF, MOST_PROBABLE_STX_SET_ADST_ADST_PARA),
@@ -433,6 +573,27 @@ impl FrameCdfContext {
                     let n_colors = PALETTE_COLORS_PER_SIZE[ps];
                     make_cdf(&PALETTE_Y_COLOR_INDEX_ICDF[ps][ctx][..n_colors], PALETTE_Y_COLOR_INDEX_PARA[ps][ctx])
                 })
+            }),
+            coeff_base_bob: std::array::from_fn(|s| {
+                std::array::from_fn(|c| {
+                    let v = COEFF_BASE_BOB_QCTX_ICDF[q][s][c];
+                    make_cdf(&[32768 - v[0], 32768 - v[1], 0], COEFF_BASE_BOB_QCTX_PARA[q][s][c])
+                })
+            }),
+            coeff_base_idtx: std::array::from_fn(|s| {
+                std::array::from_fn(|c| {
+                    let v = COEFF_BASE_IDTX_QCTX_ICDF[q][s][c];
+                    make_cdf(&[32768 - v[0], 32768 - v[1], 32768 - v[2], 0], COEFF_BASE_IDTX_QCTX_PARA[q][s][c])
+                })
+            }),
+            coeff_br_idtx: std::array::from_fn(|s| {
+                std::array::from_fn(|c| {
+                    let v = COEFF_BR_IDTX_QCTX_ICDF[q][s][c];
+                    make_cdf(&[32768 - v[0], 32768 - v[1], 32768 - v[2], 0], COEFF_BR_IDTX_QCTX_PARA[q][s][c])
+                })
+            }),
+            idtx_sign: std::array::from_fn(|s| {
+                std::array::from_fn(|c| make_cdf(&[32768 - IDTX_SIGN_QCTX_ICDF[q][s][c], 0], IDTX_SIGN_QCTX_PARA[q][s][c]))
             }),
         }
     }

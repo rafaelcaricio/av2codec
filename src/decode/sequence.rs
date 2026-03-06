@@ -10,6 +10,7 @@ pub struct SequenceParams {
     pub sb_size: u32,
     pub enable_sdp: bool,
     pub enable_cfl_intra: bool,
+    pub enable_mhccp: bool,
     pub enable_mrls: bool,
     pub enable_intra_dip: bool,
     pub order_hint_bits: u32,
@@ -37,6 +38,9 @@ pub struct SequenceParams {
     pub film_grain_params_present: bool,
     pub enable_cdef_on_skip_txfm: u32,
     pub lr_frame_tools_count: [u32; 3],
+    pub enable_ext_partitions: bool,
+    pub enable_uneven_4way_partitions: bool,
+    pub enable_intra_bawp: bool,
 }
 
 fn ceil_log2(n: u32) -> u32 {
@@ -65,27 +69,34 @@ fn read_quniform(r: &mut BitReader, n: u32) -> u32 {
 pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeError> {
     let mut r = BitReader::new(payload);
 
+    eprintln!("[SEQ_RAW] payload first 8 bytes: {:02x?}", &payload[..payload.len().min(8)]);
     let _seq_header_id = r.read_uvlc();
+    eprintln!("[SEQ_BITS] after seq_header_id={}: bit_pos={}", _seq_header_id, r.total_bits_read());
     let profile = r.read_literal(5);
     if profile != 0 {
         return Err(DecodeError::UnsupportedProfile);
     }
 
     let sph = r.read_bit();
+    eprintln!("[SEQ_BITS] after sph={}: bit_pos={}", sph, r.total_bits_read());
     if !sph {
         let _seq_lcr_id = r.read_literal(3);
         let _still_picture = r.read_bit();
+        eprintln!("[SEQ_BITS] after lcr_id={} still_pic={}: bit_pos={}", _seq_lcr_id, _still_picture, r.total_bits_read());
     }
 
     let level = r.read_literal(5);
+    eprintln!("[SEQ_BITS] after level={}: bit_pos={}", level, r.total_bits_read());
     if level >= SEQ_LEVEL_4_0 && !sph {
         let _seq_tier = r.read_bit();
+        eprintln!("[SEQ_BITS] after tier={}: bit_pos={}", _seq_tier, r.total_bits_read());
     }
 
     let num_bits_width = r.read_literal(4) + 1;
     let num_bits_height = r.read_literal(4) + 1;
     let width = r.read_literal(num_bits_width as u8) + 1;
     let height = r.read_literal(num_bits_height as u8) + 1;
+    eprintln!("[SEQ_BITS] after dims {}x{} (nbw={} nbh={}): bit_pos={}", width, height, num_bits_width, num_bits_height, r.total_bits_read());
 
     let conf_win = r.read_bit();
     if conf_win {
@@ -94,10 +105,12 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         let _top = r.read_uvlc();
         let _bottom = r.read_uvlc();
     }
+    eprintln!("[SEQ_BITS] after conf_win={}: bit_pos={}", conf_win, r.total_bits_read());
 
     let chroma_format = r.read_uvlc();
     let monochrome = chroma_format == 1;
     let _bitdepth_idx = r.read_uvlc();
+    eprintln!("[SEQ_BITS] after chroma={} bitdepth_idx={}: bit_pos={}", chroma_format, _bitdepth_idx, r.total_bits_read());
 
     if !sph {
         let display_model = r.read_bit();
@@ -114,8 +127,10 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
                 let _low_delay = r.read_bit();
             }
         }
+        eprintln!("[SEQ_BITS] after display/decoder model (disp={} dec={}): bit_pos={}", display_model, decoder_model, r.total_bits_read());
         let max_tlayer = r.read_literal(2);
         let max_mlayer = r.read_literal(3);
+        eprintln!("[SEQ_BITS] after tlayer={} mlayer={}: bit_pos={}", max_tlayer, max_mlayer, r.total_bits_read());
         if max_mlayer > 0 {
             let n = ceil_log2(max_mlayer + 1);
             let _mlayer_cnt = r.read_literal(n as u8);
@@ -135,8 +150,10 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
                 parse_tlayer_dependency(&mut r, max_tlayer);
             }
         }
+        eprintln!("[SEQ_BITS] after temporal/multi-layer: bit_pos={}", r.total_bits_read());
     }
 
+    eprintln!("[SEQ_BITS] before sb_size: bit_pos={}", r.total_bits_read());
     let sb_size = if r.read_bit() {
         256
     } else if r.read_bit() {
@@ -144,16 +161,19 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
     } else {
         64
     };
+    eprintln!("[SEQ_BITS] after sb_size={}: bit_pos={}", sb_size, r.total_bits_read());
 
     let enable_sdp = if !monochrome { r.read_bit() } else { false };
     if enable_sdp && !sph {
         let _extended_sdp = r.read_bit();
     }
 
-    let ext_part = r.read_bit();
-    if ext_part {
-        let _uneven_4way = r.read_bit();
-    }
+    let enable_ext_partitions = r.read_bit();
+    let enable_uneven_4way_partitions = if enable_ext_partitions {
+        r.read_bit()
+    } else {
+        false
+    };
 
     let _has_custom_aspect = r.read_bit();
     if _has_custom_aspect {
@@ -173,11 +193,11 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
     if !monochrome {
         let _cfl_ds_filter = r.read_literal(2);
     }
-    let _mhccp = r.read_bit();
+    let enable_mhccp = r.read_bit();
     let _ibp = r.read_bit();
     eprintln!("[SEQ_INTRA] enable_intra_dip={} enable_mrls={}", enable_intra_dip, enable_mrls);
 
-    let (order_hint_bits, number_of_bits_for_lt_frame_id, allow_frame_max_bvp_drl_bits) =
+    let (order_hint_bits, number_of_bits_for_lt_frame_id, allow_frame_max_bvp_drl_bits, enable_intra_bawp) =
         parse_inter_group(&mut r, sph);
 
     let (force_screen_content_tools, force_integer_mv) = parse_scc_group(&mut r, sph);
@@ -203,6 +223,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         sb_size,
         enable_sdp,
         enable_cfl_intra,
+        enable_mhccp,
         enable_mrls,
         enable_intra_dip,
         order_hint_bits,
@@ -230,6 +251,9 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         film_grain_params_present,
         enable_cdef_on_skip_txfm,
         lr_frame_tools_count,
+        enable_ext_partitions,
+        enable_uneven_4way_partitions,
+        enable_intra_bawp,
     })
 }
 
@@ -268,7 +292,7 @@ fn parse_sequence_tile_info(r: &mut BitReader) {
     let _uniform = r.read_bit();
 }
 
-fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool) {
+fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool, bool) {
     let mut order_hint_bits = 0u32;
     let mut number_of_bits_for_lt_frame_id = 0u32;
     let mut enable_tip = 0u32;
@@ -342,7 +366,7 @@ fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool) {
         let _mv_traj = r.read_bit();
     }
 
-    let _bawp = r.read_bit();
+    let enable_intra_bawp = r.read_bit();
 
     if !sph {
         let _cwp = r.read_bit();
@@ -372,7 +396,7 @@ fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool) {
         let _short_refresh = r.read_bit();
     }
 
-    (order_hint_bits, number_of_bits_for_lt_frame_id, allow_frame_max_bvp_drl_bits)
+    (order_hint_bits, number_of_bits_for_lt_frame_id, allow_frame_max_bvp_drl_bits, enable_intra_bawp)
 }
 
 fn parse_scc_group(r: &mut BitReader, sph: bool) -> (u32, u32) {

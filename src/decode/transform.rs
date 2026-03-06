@@ -1,11 +1,39 @@
 use crate::block::TxSize;
 use crate::dct;
-use crate::scan::{get_scan, DEFAULT_SCAN_32X32};
+use crate::scan::{get_scan_for_tx, get_tx_class, TxClass, DEFAULT_SCAN_32X32};
+
+const TCQ_NEXT_STATE: [[u8; 2]; 8] = [
+    [0, 4], [4, 0], [1, 5], [5, 1],
+    [6, 2], [2, 6], [7, 3], [3, 7],
+];
+
+fn tcq_quant(state: u8) -> i32 {
+    ((state & 2) != 0) as i32
+}
+
+fn tcq_next(state: u8, level: i32) -> u8 {
+    let parity = (level.unsigned_abs() & 1) as usize;
+    let s = if state >= 8 { 0 } else { state as usize };
+    TCQ_NEXT_STATE[s][parity]
+}
 
 pub fn dequantize_coeff(level: i32, log_scale: u32, dequant: i32) -> i32 {
     let abs_level = level.unsigned_abs() as i64;
     let dq = dequant as i64;
     let dqcoeff = ((abs_level * dq + 4) >> 3) >> log_scale;
+    if level < 0 {
+        -(dqcoeff as i32)
+    } else {
+        dqcoeff as i32
+    }
+}
+
+fn dequantize_coeff_tcq(level: i32, log_scale: u32, dequant: i32, qx: i32) -> i32 {
+    let abs_level = level.unsigned_abs() as i64;
+    let q_idx = (abs_level * 2 - qx as i64).max(0);
+    let dq = dequant as i64;
+    let dq_coeff_hp = (q_idx * dq) & 0xffffff;
+    let dqcoeff = ((dq_coeff_hp + 4) >> 3) >> (log_scale + 1);
     if level < 0 {
         -(dqcoeff as i32)
     } else {
@@ -59,61 +87,226 @@ pub fn dequantize_and_inverse_var(
     dequant: i32,
     tx_size: TxSize,
 ) -> Vec<i32> {
+    dequantize_and_inverse_var_typed(levels, eob, dequant, tx_size, 0)
+}
+
+pub fn dequantize_and_inverse_var_typed(
+    levels: &[i32],
+    eob: u16,
+    dequant: i32,
+    tx_size: TxSize,
+    tx_type: usize,
+) -> Vec<i32> {
+    dequantize_and_inverse_tcq(levels, eob, dequant, tx_size, tx_type, false)
+}
+
+pub fn dequantize_and_inverse_tcq(
+    levels: &[i32],
+    eob: u16,
+    dequant: i32,
+    tx_size: TxSize,
+    tx_type: usize,
+    tcq_enabled: bool,
+) -> Vec<i32> {
     let pixel_count = tx_size.width() * tx_size.height();
 
     if eob == 0 {
         return vec![0i32; pixel_count];
     }
 
+    let tx_class = get_tx_class(tx_type);
+    let use_tcq = tcq_enabled && tx_class == TxClass::TwoD;
+
     let num_coeffs = tx_size.num_coeffs();
     let log_scale = tx_size.log_scale();
-    let scan = get_scan(tx_size);
+    let scan = get_scan_for_tx(tx_size, tx_type);
 
     let mut dqcoeffs = vec![0i32; num_coeffs];
-    for scan_idx in 0..(eob as usize) {
-        let coeff_idx = scan[scan_idx] as usize;
-        dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], log_scale, dequant);
+    if use_tcq {
+        let mut state: u8 = 0;
+        for c in (0..(eob as usize)).rev() {
+            let coeff_idx = scan[c] as usize;
+            let qx = tcq_quant(state);
+            dqcoeffs[coeff_idx] = dequantize_coeff_tcq(levels[c], log_scale, dequant, qx);
+            state = tcq_next(state, levels[c]);
+        }
+    } else {
+        for scan_idx in 0..(eob as usize) {
+            let coeff_idx = scan[scan_idx] as usize;
+            dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], log_scale, dequant);
+        }
     }
 
-    match tx_size {
-        TxSize::Tx4x4 => {
-            let mut arr = [0i32; 16];
-            arr.copy_from_slice(&dqcoeffs);
-            dct::inverse_dct2_4x4(&arr).to_vec()
+    if tx_type == 0 {
+        match tx_size {
+            TxSize::Tx4x4 => {
+                let mut arr = [0i32; 16];
+                arr.copy_from_slice(&dqcoeffs);
+                return dct::inverse_dct2_4x4(&arr).to_vec();
+            }
+            TxSize::Tx8x8 => {
+                let mut arr = [0i32; 64];
+                arr.copy_from_slice(&dqcoeffs);
+                return dct::inverse_dct2_8x8(&arr).to_vec();
+            }
+            TxSize::Tx16x16 => {
+                let mut arr = [0i32; 256];
+                arr.copy_from_slice(&dqcoeffs);
+                return dct::inverse_dct2_16x16(&arr).to_vec();
+            }
+            TxSize::Tx32x32 => {
+                let mut arr = [0i32; 1024];
+                arr.copy_from_slice(&dqcoeffs);
+                return dct::inverse_dct2_32x32(&arr).to_vec();
+            }
+            TxSize::Tx64x64 => {
+                let mut arr = [0i32; 1024];
+                arr.copy_from_slice(&dqcoeffs);
+                return dct::inverse_dct2_64x64_av2(&arr).to_vec();
+            }
+            _ => {}
         }
-        TxSize::Tx8x8 => {
-            let mut arr = [0i32; 64];
-            arr.copy_from_slice(&dqcoeffs);
-            dct::inverse_dct2_8x8(&arr).to_vec()
+    }
+
+    let (shift1, shift2) = tx_size.inv_shifts();
+    dct::inverse_transform_2d_rect(
+        &dqcoeffs,
+        tx_size.width(),
+        tx_size.height(),
+        tx_size.coded_width(),
+        tx_size.coded_height(),
+        tx_type,
+        shift1,
+        shift2,
+        tx_size.needs_sqrt2(),
+    )
+}
+
+const CCTX_MTX: [[i32; 2]; 6] = [
+    [181, 181],
+    [222, 128],
+    [128, 222],
+    [181, -181],
+    [222, -128],
+    [128, -222],
+];
+
+const CCTX_PREC_BITS: u32 = 8;
+
+fn round_shift_signed_64(value: i64, n: u32) -> i64 {
+    if value < 0 {
+        -((-value + (1i64 << (n - 1))) >> n)
+    } else {
+        (value + (1i64 << (n - 1))) >> n
+    }
+}
+
+pub fn dequantize_only(
+    levels: &[i32],
+    eob: u16,
+    dequant: i32,
+    tx_size: TxSize,
+    tx_type: usize,
+    tcq_enabled: bool,
+) -> Vec<i32> {
+    let num_coeffs = tx_size.num_coeffs();
+    if eob == 0 {
+        return vec![0i32; num_coeffs];
+    }
+
+    let tx_class = get_tx_class(tx_type);
+    let use_tcq = tcq_enabled && tx_class == TxClass::TwoD;
+    let log_scale = tx_size.log_scale();
+    let scan = get_scan_for_tx(tx_size, tx_type);
+
+    let mut dqcoeffs = vec![0i32; num_coeffs];
+    if use_tcq {
+        let mut state: u8 = 0;
+        for c in (0..(eob as usize)).rev() {
+            let coeff_idx = scan[c] as usize;
+            let qx = tcq_quant(state);
+            dqcoeffs[coeff_idx] = dequantize_coeff_tcq(levels[c], log_scale, dequant, qx);
+            state = tcq_next(state, levels[c]);
         }
-        TxSize::Tx16x16 => {
-            let mut arr = [0i32; 256];
-            arr.copy_from_slice(&dqcoeffs);
-            dct::inverse_dct2_16x16(&arr).to_vec()
+    } else {
+        for scan_idx in 0..(eob as usize) {
+            let coeff_idx = scan[scan_idx] as usize;
+            dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], log_scale, dequant);
         }
-        TxSize::Tx32x32 => {
-            let mut arr = [0i32; 1024];
-            arr.copy_from_slice(&dqcoeffs);
-            dct::inverse_dct2_32x32(&arr).to_vec()
+    }
+    dqcoeffs
+}
+
+pub fn inverse_transform_only(
+    dqcoeffs: &[i32],
+    tx_size: TxSize,
+    tx_type: usize,
+) -> Vec<i32> {
+    let pixel_count = tx_size.width() * tx_size.height();
+    if dqcoeffs.iter().all(|&c| c == 0) {
+        return vec![0i32; pixel_count];
+    }
+
+    if tx_type == 0 {
+        match tx_size {
+            TxSize::Tx4x4 => {
+                let mut arr = [0i32; 16];
+                arr.copy_from_slice(dqcoeffs);
+                return dct::inverse_dct2_4x4(&arr).to_vec();
+            }
+            TxSize::Tx8x8 => {
+                let mut arr = [0i32; 64];
+                arr.copy_from_slice(dqcoeffs);
+                return dct::inverse_dct2_8x8(&arr).to_vec();
+            }
+            TxSize::Tx16x16 => {
+                let mut arr = [0i32; 256];
+                arr.copy_from_slice(dqcoeffs);
+                return dct::inverse_dct2_16x16(&arr).to_vec();
+            }
+            TxSize::Tx32x32 => {
+                let mut arr = [0i32; 1024];
+                arr.copy_from_slice(dqcoeffs);
+                return dct::inverse_dct2_32x32(&arr).to_vec();
+            }
+            TxSize::Tx64x64 => {
+                let mut arr = [0i32; 1024];
+                arr.copy_from_slice(dqcoeffs);
+                return dct::inverse_dct2_64x64_av2(&arr).to_vec();
+            }
+            _ => {}
         }
-        TxSize::Tx64x64 => {
-            let mut arr = [0i32; 1024];
-            arr.copy_from_slice(&dqcoeffs);
-            dct::inverse_dct2_64x64_av2(&arr).to_vec()
-        }
-        _ => {
-            let (shift1, shift2) = tx_size.inv_shifts();
-            dct::inverse_dct2_rect(
-                &dqcoeffs,
-                tx_size.width(),
-                tx_size.height(),
-                tx_size.coded_width(),
-                tx_size.coded_height(),
-                shift1,
-                shift2,
-                tx_size.needs_sqrt2(),
-            )
-        }
+    }
+
+    let (shift1, shift2) = tx_size.inv_shifts();
+    dct::inverse_transform_2d_rect(
+        dqcoeffs,
+        tx_size.width(),
+        tx_size.height(),
+        tx_size.coded_width(),
+        tx_size.coded_height(),
+        tx_type,
+        shift1,
+        shift2,
+        tx_size.needs_sqrt2(),
+    )
+}
+
+pub fn inverse_cctx(u_dqcoeffs: &mut [i32], v_dqcoeffs: &mut [i32], cctx_type: u8) {
+    if cctx_type == 0 {
+        return;
+    }
+    let idx = (cctx_type - 1) as usize;
+    let c = CCTX_MTX[idx][0] as i64;
+    let s = CCTX_MTX[idx][1] as i64;
+    let n = u_dqcoeffs.len().min(v_dqcoeffs.len());
+    for i in 0..n {
+        let tmp_u = u_dqcoeffs[i] as i64;
+        let tmp_v = v_dqcoeffs[i] as i64;
+        let new_u = round_shift_signed_64(c * tmp_u - s * tmp_v, CCTX_PREC_BITS);
+        let new_v = round_shift_signed_64(s * tmp_u + c * tmp_v, CCTX_PREC_BITS);
+        u_dqcoeffs[i] = (new_u as i32).clamp(-32768, 32767);
+        v_dqcoeffs[i] = (new_v as i32).clamp(-32768, 32767);
     }
 }
 

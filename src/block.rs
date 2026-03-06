@@ -95,6 +95,10 @@ pub enum TxSize {
     Tx64x16,
     Tx32x64,
     Tx64x32,
+    Tx4x32,
+    Tx32x4,
+    Tx8x64,
+    Tx64x8,
 }
 
 const AV2_TXFORM_COEFF_LIMIT: usize = 32;
@@ -111,11 +115,11 @@ impl TxSize {
             TxSize::Tx16x16 => 16,
             TxSize::Tx32x32 => 32,
             TxSize::Tx64x64 => 64,
-            TxSize::Tx4x8 | TxSize::Tx4x16 => 4,
-            TxSize::Tx8x4 | TxSize::Tx8x16 | TxSize::Tx8x32 => 8,
+            TxSize::Tx4x8 | TxSize::Tx4x16 | TxSize::Tx4x32 => 4,
+            TxSize::Tx8x4 | TxSize::Tx8x16 | TxSize::Tx8x32 | TxSize::Tx8x64 => 8,
             TxSize::Tx16x4 | TxSize::Tx16x8 | TxSize::Tx16x32 | TxSize::Tx16x64 => 16,
-            TxSize::Tx32x8 | TxSize::Tx32x16 | TxSize::Tx32x64 => 32,
-            TxSize::Tx64x16 | TxSize::Tx64x32 => 64,
+            TxSize::Tx32x4 | TxSize::Tx32x8 | TxSize::Tx32x16 | TxSize::Tx32x64 => 32,
+            TxSize::Tx64x8 | TxSize::Tx64x16 | TxSize::Tx64x32 => 64,
         }
     }
 
@@ -126,11 +130,11 @@ impl TxSize {
             TxSize::Tx16x16 => 16,
             TxSize::Tx32x32 => 32,
             TxSize::Tx64x64 => 64,
-            TxSize::Tx8x4 | TxSize::Tx16x4 => 4,
-            TxSize::Tx4x8 | TxSize::Tx16x8 | TxSize::Tx32x8 => 8,
+            TxSize::Tx8x4 | TxSize::Tx16x4 | TxSize::Tx32x4 => 4,
+            TxSize::Tx4x8 | TxSize::Tx16x8 | TxSize::Tx32x8 | TxSize::Tx64x8 => 8,
             TxSize::Tx4x16 | TxSize::Tx8x16 | TxSize::Tx32x16 | TxSize::Tx64x16 => 16,
-            TxSize::Tx8x32 | TxSize::Tx16x32 | TxSize::Tx64x32 => 32,
-            TxSize::Tx16x64 | TxSize::Tx32x64 => 64,
+            TxSize::Tx4x32 | TxSize::Tx8x32 | TxSize::Tx16x32 | TxSize::Tx64x32 => 32,
+            TxSize::Tx16x64 | TxSize::Tx32x64 | TxSize::Tx8x64 => 64,
         }
     }
 
@@ -162,15 +166,7 @@ impl TxSize {
     }
 
     pub fn txs_ctx(&self) -> usize {
-        let max_dim = self.width().max(self.height());
-        match max_dim {
-            4 => 0,
-            8 => 1,
-            16 => 2,
-            32 => 3,
-            64 => 4,
-            _ => unreachable!(),
-        }
+        (self.sqr() + self.sqr_up() + 1) >> 1
     }
 
     pub fn sqr_up(&self) -> usize {
@@ -221,6 +217,8 @@ impl TxSize {
             TxSize::Tx4x16 | TxSize::Tx16x4 => (6, 12),
             TxSize::Tx8x32 | TxSize::Tx32x8 => (6, 13),
             TxSize::Tx16x64 | TxSize::Tx64x16 => (6, 13),
+            TxSize::Tx4x32 | TxSize::Tx32x4 => (7, 11),
+            TxSize::Tx8x64 | TxSize::Tx64x8 => (6, 12),
         }
     }
 
@@ -252,6 +250,10 @@ pub fn max_txsize_rect_for_block(width: usize, height: usize) -> TxSize {
         (32, 8) => TxSize::Tx32x8,
         (16, 64) => TxSize::Tx16x64,
         (64, 16) => TxSize::Tx64x16,
+        (4, 32) => TxSize::Tx4x32,
+        (32, 4) => TxSize::Tx32x4,
+        (8, 64) => TxSize::Tx8x64,
+        (64, 8) => TxSize::Tx64x8,
         _ => {
             let w = width.min(64);
             let h = height.min(64);

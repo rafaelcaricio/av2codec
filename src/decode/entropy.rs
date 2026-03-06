@@ -145,6 +145,38 @@ impl<'a> DaalaDecoder<'a> {
         self.decode_literal(1)
     }
 
+    pub fn decode_unary(&mut self, max_bits: u32) -> u32 {
+        if self.cnt < max_bits as i32 - 1 {
+            self.refill();
+        }
+
+        let dif = self.dif;
+        let r = self.rng;
+        debug_assert!(r & 1 == 0);
+        debug_assert!(r >= 0x8000);
+        debug_assert!(max_bits > 0 && max_bits <= 32);
+
+        let mut vw = (r as u64) << (OD_EC_WINDOW_SIZE as u64 - 16);
+        let mut current_dif = dif;
+        let mut ret: u32 = 0;
+        let mut bits_consumed: u32 = 0;
+
+        for _ in 0..max_bits {
+            vw >>= 1;
+            if current_dif >= vw {
+                current_dif -= vw;
+                ret += 1;
+                bits_consumed += 1;
+            } else {
+                bits_consumed += 1;
+                break;
+            }
+        }
+
+        self.bypass_normalize(current_dif, bits_consumed as i32);
+        ret
+    }
+
     pub fn decode_uniform(&mut self, n: u32) -> u32 {
         if n <= 1 {
             return 0;

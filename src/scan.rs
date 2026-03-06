@@ -1,9 +1,37 @@
 use crate::block::TxSize;
 use std::sync::OnceLock;
 
-pub fn get_scan(tx_size: TxSize) -> &'static [u16] {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxClass {
+    TwoD,
+    Vert,
+    Horiz,
+}
+
+pub fn get_tx_class(tx_type: usize) -> TxClass {
+    match tx_type {
+        10 | 12 | 14 => TxClass::Vert,
+        11 | 13 | 15 => TxClass::Horiz,
+        _ => TxClass::TwoD,
+    }
+}
+
+pub fn get_scan_for_tx(tx_size: TxSize, tx_type: usize) -> &'static [u16] {
+    let tx_class = get_tx_class(tx_type);
     let cw = tx_size.coded_width();
     let ch = tx_size.coded_height();
+    match tx_class {
+        TxClass::Vert => get_mrow_scan(cw, ch),
+        TxClass::Horiz => get_mcol_scan(cw, ch),
+        TxClass::TwoD => get_default_scan_table(cw, ch),
+    }
+}
+
+pub fn get_scan(tx_size: TxSize) -> &'static [u16] {
+    get_scan_for_tx(tx_size, 0)
+}
+
+fn get_default_scan_table(cw: usize, ch: usize) -> &'static [u16] {
     match (cw, ch) {
         (4, 4) => &DEFAULT_SCAN_4X4,
         (8, 8) => &DEFAULT_SCAN_8X8,
@@ -29,6 +57,8 @@ fn get_rect_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
             (32, 8),
             (16, 32),
             (32, 16),
+            (4, 32),
+            (32, 4),
         ] {
             m.insert((w, h), generate_default_scan(w, h));
         }
@@ -323,6 +353,61 @@ mod tests {
         let scan = generate_default_scan(8, 8);
         assert_eq!(scan.as_slice(), &DEFAULT_SCAN_8X8[..]);
     }
+}
+
+fn get_mrow_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
+    static MROW_SCANS: OnceLock<std::collections::HashMap<(usize, usize), Vec<u16>>> =
+        OnceLock::new();
+    let map = MROW_SCANS.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        for &(w, h) in &ALL_SCAN_SIZES {
+            m.insert((w, h), generate_mrow_scan(w, h));
+        }
+        m
+    });
+    map.get(&(coded_w, coded_h))
+        .expect("unsupported mrow scan size")
+}
+
+fn get_mcol_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
+    static MCOL_SCANS: OnceLock<std::collections::HashMap<(usize, usize), Vec<u16>>> =
+        OnceLock::new();
+    let map = MCOL_SCANS.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        for &(w, h) in &ALL_SCAN_SIZES {
+            m.insert((w, h), generate_mcol_scan(w, h));
+        }
+        m
+    });
+    map.get(&(coded_w, coded_h))
+        .expect("unsupported mcol scan size")
+}
+
+const ALL_SCAN_SIZES: [(usize, usize); 16] = [
+    (4, 4), (8, 8), (16, 16), (32, 32),
+    (4, 8), (8, 4), (4, 16), (16, 4),
+    (8, 16), (16, 8), (8, 32), (32, 8),
+    (16, 32), (32, 16), (4, 32), (32, 4),
+];
+
+fn generate_mrow_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
+    let mut scan = Vec::with_capacity(coded_w * coded_h);
+    for row in 0..coded_h {
+        for col in 0..coded_w {
+            scan.push((row * coded_w + col) as u16);
+        }
+    }
+    scan
+}
+
+fn generate_mcol_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
+    let mut scan = Vec::with_capacity(coded_w * coded_h);
+    for col in 0..coded_w {
+        for row in 0..coded_h {
+            scan.push((row * coded_w + col) as u16);
+        }
+    }
+    scan
 }
 
 fn generate_default_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {

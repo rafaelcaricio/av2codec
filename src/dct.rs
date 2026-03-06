@@ -142,6 +142,175 @@ const FWD_DCT2_64: [[i8; 64]; 64] = [
     [2, -7, 11, -15, 20, -24, 28, -33, 37, -41, 45, -48, 52, -56, 59, -62, 66, -69, 71, -74, 76, -79, 81, -83, 84, -86, 87, -88, 89, -90, 90, -90, 90, -90, 90, -89, 88, -87, 86, -84, 83, -81, 79, -76, 74, -71, 69, -66, 62, -59, 56, -52, 48, -45, 41, -37, 33, -28, 24, -20, 15, -11, 7, -2],
 ];
 
+#[rustfmt::skip]
+const INV_ADST_4: [[i8; 4]; 4] = [
+    [ 18,  50,  75,  89],
+    [ 50,  89,  18, -75],
+    [ 75,  18, -89,  50],
+    [ 89, -75,  50, -18],
+];
+
+#[rustfmt::skip]
+const INV_ADST_8: [[i8; 8]; 8] = [
+    [ 11,  28,  44,  58,  70,  79,  86,  89],
+    [ 34,  74,  89,  76,  39, -12, -58, -86],
+    [ 54,  89,  48, -34, -87, -66,  12,  79],
+    [ 71,  68, -41, -86,   1,  87,  38, -70],
+    [ 84,  17, -89,  10,  86, -35, -75,  58],
+    [ 88, -44, -44,  88, -44, -44,  88, -44],
+    [ 79, -83,  50,   6, -59,  86, -74,  29],
+    [ 50, -69,  81, -84,  78, -62,  40, -14],
+];
+
+#[rustfmt::skip]
+const INV_ADST_16: [[i8; 16]; 16] = [
+    [  8,  17,  25,  33,  41,  48,  55,  62,  67,  73,  77,  81,  84,  87,  88,  89],
+    [ 25,  48,  67,  81,  88,  88,  81,  67,  48,  25,   0, -25, -48, -67, -81, -88],
+    [ 41,  73,  88,  84,  62,  25, -17, -55, -81, -89, -77, -48,  -8,  33,  67,  87],
+    [ 55,  87,  81,  41, -17, -67, -89, -73, -25,  33,  77,  88,  62,   8, -48, -84],
+    [ 67,  88,  48, -25, -81, -81, -25,  48,  88,  67,   0, -67, -88, -48,  25,  81],
+    [ 77,  77,   0, -77, -77,   0,  77,  77,   0, -77, -77,   0,  77,  77,   0, -77],
+    [ 84,  55, -48, -87,  -8,  81,  62, -41, -88, -17,  77,  67, -33, -89, -25,  73],
+    [ 88,  25, -81, -48,  67,  67, -48, -81,  25,  88,   0, -88, -25,  81,  48, -67],
+    [ 89,  -8, -88,  17,  87, -25, -84,  33,  81, -41, -77,  48,  73, -55, -67,  62],
+    [ 87, -41, -67,  73,  33, -88,   8,  84, -48, -62,  77,  25, -89,  17,  81, -55],
+    [ 81, -67, -25,  88, -48, -48,  88, -25, -67,  81,   0, -81,  67,  25, -88,  48],
+    [ 73, -84,  25,  55, -89,  48,  33, -87,  67,   8, -77,  81, -17, -62,  88, -41],
+    [ 62, -89,  67,  -8, -55,  88, -73,  17,  48, -87,  77, -25, -41,  84, -81,  33],
+    [ 48, -81,  88, -67,  25,  25, -67,  88, -81,  48,   0, -48,  81, -88,  67, -25],
+    [ 33, -62,  81, -89,  84, -67,  41,  -8, -25,  55, -77,  88, -87,  73, -48,  17],
+    [ 17, -33,  48, -62,  73, -81,  87, -89,  88, -84,  77, -67,  55, -41,  25,  -8],
+];
+
+#[rustfmt::skip]
+const INV_FLIPADST_4: [[i8; 4]; 4] = [
+    [ 89,  75,  50,  18],
+    [ 75, -18, -89, -50],
+    [ 50, -89,  18,  75],
+    [ 18, -50,  75, -89],
+];
+
+#[rustfmt::skip]
+const INV_FLIPADST_8: [[i8; 8]; 8] = [
+    [ 89,  86,  79,  70,  58,  44,  28,  11],
+    [-86, -58, -12,  39,  76,  89,  74,  34],
+    [ 79,  12, -66, -87, -34,  48,  89,  54],
+    [-70,  38,  87,   1, -86, -41,  68,  71],
+    [ 58, -75, -35,  86,  10, -89,  17,  84],
+    [-44,  88, -44, -44,  88, -44, -44,  88],
+    [ 29, -74,  86, -59,   6,  50, -83,  79],
+    [-14,  40, -62,  78, -84,  81, -69,  50],
+];
+
+#[rustfmt::skip]
+const INV_FLIPADST_16: [[i8; 16]; 16] = [
+    [ 89,  88,  87,  84,  81,  77,  73,  67,  62,  55,  48,  41,  33,  25,  17,   8],
+    [ 88,  81,  67,  48,  25,   0, -25, -48, -67, -81, -88, -88, -81, -67, -48, -25],
+    [ 87,  67,  33,  -8, -48, -77, -89, -81, -55, -17,  25,  62,  84,  88,  73,  41],
+    [ 84,  48,  -8, -62, -88, -77, -33,  25,  73,  89,  67,  17, -41, -81, -87, -55],
+    [ 81,  25, -48, -88, -67,   0,  67,  88,  48, -25, -81, -81, -25,  48,  88,  67],
+    [ 77,   0, -77, -77,   0,  77,  77,   0, -77, -77,   0,  77,  77,   0, -77, -77],
+    [ 73, -25, -89, -33,  67,  77, -17, -88, -41,  62,  81,  -8, -87, -48,  55,  84],
+    [ 67, -48, -81,  25,  88,   0, -88, -25,  81,  48, -67, -67,  48,  81, -25, -88],
+    [ 62, -67, -55,  73,  48, -77, -41,  81,  33, -84, -25,  87,  17, -88,  -8,  89],
+    [ 55, -81, -17,  89, -25, -77,  62,  48, -84,  -8,  88, -33, -73,  67,  41, -87],
+    [ 48, -88,  25,  67, -81,   0,  81, -67, -25,  88, -48, -48,  88, -25, -67,  81],
+    [ 41, -88,  62,  17, -81,  77,  -8, -67,  87, -33, -48,  89, -55, -25,  84, -73],
+    [ 33, -81,  84, -41, -25,  77, -87,  48,  17, -73,  88, -55,  -8,  67, -89,  62],
+    [ 25, -67,  88, -81,  48,   0, -48,  81, -88,  67, -25, -25,  67, -88,  81, -48],
+    [ 17, -48,  73, -87,  88, -77,  55, -25,  -8,  41, -67,  84, -89,  81, -62,  33],
+    [  8, -25,  41, -55,  67, -77,  84, -88,  89, -87,  81, -73,  62, -48,  33, -17],
+];
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum TxType1D {
+    DCT2,
+    DST7,
+    DCT8,
+    IDT,
+}
+
+pub fn get_hor_tx_type_1d(tx_type: usize) -> TxType1D {
+    match tx_type {
+        0 => TxType1D::DCT2,    // DCT_DCT
+        1 => TxType1D::DCT2,    // ADST_DCT
+        2 => TxType1D::DST7,    // DCT_ADST
+        3 => TxType1D::DST7,    // ADST_ADST
+        4 => TxType1D::DCT2,    // FLIPADST_DCT
+        5 => TxType1D::DCT8,    // DCT_FLIPADST
+        6 => TxType1D::DCT8,    // FLIPADST_FLIPADST
+        7 => TxType1D::DCT8,    // ADST_FLIPADST
+        8 => TxType1D::DST7,    // FLIPADST_ADST
+        9 => TxType1D::IDT,     // IDTX
+        10 => TxType1D::IDT,    // V_DCT
+        11 => TxType1D::DCT2,   // H_DCT
+        12 => TxType1D::IDT,    // V_ADST
+        13 => TxType1D::DST7,   // H_ADST
+        14 => TxType1D::IDT,    // V_FLIPADST
+        15 => TxType1D::DCT8,   // H_FLIPADST
+        _ => TxType1D::DCT2,
+    }
+}
+
+pub fn get_ver_tx_type_1d(tx_type: usize) -> TxType1D {
+    match tx_type {
+        0 => TxType1D::DCT2,    // DCT_DCT
+        1 => TxType1D::DST7,    // ADST_DCT
+        2 => TxType1D::DCT2,    // DCT_ADST
+        3 => TxType1D::DST7,    // ADST_ADST
+        4 => TxType1D::DCT8,    // FLIPADST_DCT
+        5 => TxType1D::DCT2,    // DCT_FLIPADST
+        6 => TxType1D::DCT8,    // FLIPADST_FLIPADST
+        7 => TxType1D::DST7,    // ADST_FLIPADST
+        8 => TxType1D::DCT8,    // FLIPADST_ADST
+        9 => TxType1D::IDT,     // IDTX
+        10 => TxType1D::DCT2,   // V_DCT
+        11 => TxType1D::IDT,    // H_DCT
+        12 => TxType1D::DST7,   // V_ADST
+        13 => TxType1D::IDT,    // H_ADST
+        14 => TxType1D::DCT8,   // V_FLIPADST
+        15 => TxType1D::IDT,    // H_FLIPADST
+        _ => TxType1D::DCT2,
+    }
+}
+
+fn identity_scale(size: usize) -> i64 {
+    match size {
+        4 => 128,
+        8 => 181,
+        16 => 256,
+        32 => 362,
+        _ => 128,
+    }
+}
+
+fn kernel_value(tx_1d: TxType1D, size: usize, freq: usize, spatial: usize) -> i64 {
+    match tx_1d {
+        TxType1D::DCT2 => match size {
+            4 => FWD_DCT2_4[freq][spatial] as i64,
+            8 => FWD_DCT2_8[freq][spatial] as i64,
+            16 => FWD_DCT2_16[freq][spatial] as i64,
+            32 => FWD_DCT2_32[freq][spatial] as i64,
+            _ => unreachable!(),
+        },
+        TxType1D::DST7 => match size {
+            4 => INV_ADST_4[freq][spatial] as i64,
+            8 => INV_ADST_8[freq][spatial] as i64,
+            16 => INV_ADST_16[freq][spatial] as i64,
+            _ => unreachable!(),
+        },
+        TxType1D::DCT8 => match size {
+            4 => INV_FLIPADST_4[freq][spatial] as i64,
+            8 => INV_FLIPADST_8[freq][spatial] as i64,
+            16 => INV_FLIPADST_16[freq][spatial] as i64,
+            _ => unreachable!(),
+        },
+        TxType1D::IDT => {
+            if freq == spatial { identity_scale(size) } else { 0 }
+        }
+    }
+}
+
 fn round_shift(value: i64, shift: u32) -> i32 {
     ((value + (1i64 << (shift - 1))) >> shift) as i32
 }
@@ -333,6 +502,103 @@ pub fn inverse_dct2_rect(
                     * temp[freq_row * coded_w + col] as i64;
             }
             intermediate[spatial_row * coded_w + col] = round_shift(sum, shift2);
+        }
+    }
+
+    let expand_w = out_w > coded_w;
+    let expand_h = out_h > coded_h;
+
+    if !expand_w && !expand_h {
+        return intermediate;
+    }
+
+    let mut output = vec![0i32; out_w * out_h];
+    for row in 0..coded_h {
+        for col in 0..coded_w {
+            let val = intermediate[row * coded_w + col];
+            if expand_w && expand_h {
+                output[(2 * row) * out_w + 2 * col] = val;
+                output[(2 * row) * out_w + 2 * col + 1] = val;
+                output[(2 * row + 1) * out_w + 2 * col] = val;
+                output[(2 * row + 1) * out_w + 2 * col + 1] = val;
+            } else if expand_w {
+                output[row * out_w + 2 * col] = val;
+                output[row * out_w + 2 * col + 1] = val;
+            } else {
+                output[(2 * row) * out_w + col] = val;
+                output[(2 * row + 1) * out_w + col] = val;
+            }
+        }
+    }
+
+    output
+}
+
+pub fn inverse_transform_2d_rect(
+    coeffs: &[i32],
+    out_w: usize,
+    out_h: usize,
+    coded_w: usize,
+    coded_h: usize,
+    tx_type: usize,
+    shift1: u32,
+    shift2: u32,
+    sqrt2: bool,
+) -> Vec<i32> {
+    let hor_type = get_hor_tx_type_1d(tx_type);
+    let ver_type = get_ver_tx_type_1d(tx_type);
+
+    let mut input = vec![0i32; coded_w * coded_h];
+    let n = coeffs.len().min(coded_w * coded_h);
+    input[..n].copy_from_slice(&coeffs[..n]);
+
+    if sqrt2 {
+        for v in &mut input {
+            *v = round_shift(*v as i64 * NEW_INV_SQRT2, NEW_SQRT2_BITS);
+        }
+    }
+
+    let mut temp = vec![0i32; coded_h * coded_w];
+    if hor_type == TxType1D::IDT {
+        let scale = identity_scale(coded_w);
+        for row in 0..coded_h {
+            for col in 0..coded_w {
+                temp[row * coded_w + col] =
+                    round_shift(input[row * coded_w + col] as i64 * scale, shift1);
+            }
+        }
+    } else {
+        for row in 0..coded_h {
+            for spatial_col in 0..coded_w {
+                let mut sum = 0i64;
+                for freq_col in 0..coded_w {
+                    sum += kernel_value(hor_type, coded_w, freq_col, spatial_col)
+                        * input[row * coded_w + freq_col] as i64;
+                }
+                temp[row * coded_w + spatial_col] = round_shift(sum, shift1);
+            }
+        }
+    }
+
+    let mut intermediate = vec![0i32; coded_h * coded_w];
+    if ver_type == TxType1D::IDT {
+        let scale = identity_scale(coded_h);
+        for row in 0..coded_h {
+            for col in 0..coded_w {
+                intermediate[row * coded_w + col] =
+                    round_shift(temp[row * coded_w + col] as i64 * scale, shift2);
+            }
+        }
+    } else {
+        for col in 0..coded_w {
+            for spatial_row in 0..coded_h {
+                let mut sum = 0i64;
+                for freq_row in 0..coded_h {
+                    sum += kernel_value(ver_type, coded_h, freq_row, spatial_row)
+                        * temp[freq_row * coded_w + col] as i64;
+                }
+                intermediate[spatial_row * coded_w + col] = round_shift(sum, shift2);
+            }
         }
     }
 

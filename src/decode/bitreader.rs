@@ -83,6 +83,22 @@ impl<'a> BitReader<'a> {
     pub fn total_bits_read(&self) -> usize {
         self.byte_pos * 8 + self.bit_pos as usize
     }
+
+    pub fn byte_position(&self) -> usize {
+        self.byte_pos
+    }
+
+    pub fn bit_position(&self) -> u8 {
+        self.bit_pos
+    }
+
+    pub fn peek_current_byte(&self) -> u8 {
+        if self.byte_pos < self.data.len() {
+            self.data[self.byte_pos]
+        } else {
+            0
+        }
+    }
 }
 
 pub fn decode_leb128(data: &[u8]) -> (u32, usize) {

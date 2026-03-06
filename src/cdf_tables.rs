@@ -12,6 +12,13 @@ pub const LF_MAX_BASE_BR_RANGE: usize = LF_COEFF_BASE_RANGE + LF_NUM_BASE_LEVELS
 pub const LF_BASE_SYMBOLS: usize = LF_NUM_BASE_LEVELS + 2;
 pub const MAX_VAL_BR_CTX: u8 = (MAX_BASE_BR_RANGE - 1) as u8;
 pub const EOB_PT_INDEX_COUNT: usize = 8;
+pub const TX_PAD_LEFT: usize = 4;
+pub const TX_PAD_TOP: usize = 4;
+pub const FSC_TX_SIZE_CONTEXTS: usize = 3;
+pub const IDTX_SIG_COEF_CONTEXTS: usize = 7;
+pub const IDTX_LEVEL_CONTEXTS: usize = 7;
+pub const SIG_COEF_CONTEXTS_BOB: usize = 3;
+pub const IDTX_SIGN_CONTEXTS: usize = 9;
 
 #[rustfmt::skip]
 pub const COEFF_BASE_LF_Y_ICDF: [[[u16; 6]; 33]; 5] = [
@@ -488,6 +495,17 @@ pub const COEFF_BR_UV_ICDF: [[u16; 4]; 4] = [
 ];
 
 #[rustfmt::skip]
+pub const COEFF_BASE_PH_ICDF: [[u16; 4]; 5] = [
+    [24576, 16384,  8192,     0],
+    [24576, 16384,  8192,     0],
+    [24576, 16384,  8192,     0],
+    [24576, 16384,  8192,     0],
+    [24576, 16384,  8192,     0],
+];
+
+pub const COEFF_BASE_PH_PARA: [u16; 5] = [0, 0, 0, 0, 0];
+
+#[rustfmt::skip]
 pub const EOB_GROUP_START: [u16; 12] = [0, 1, 2, 3, 5, 9, 17, 33, 65, 129, 257, 513];
 
 #[rustfmt::skip]
@@ -501,18 +519,26 @@ pub const TXB_SKIP_U_CTX_ICDF: [[u16; 2]; 3] = [
 ];
 
 #[rustfmt::skip]
-pub const TXB_SKIP_V_CTX_ICDF: [[u16; 2]; 3] = [
+pub const TXB_SKIP_V_CTX_ICDF: [[u16; 2]; 6] = [
     [31329,     0],
     [26577,     0],
     [18158,     0],
+    [32588,     0],
+    [16384,     0],
+    [16384,     0],
 ];
+pub const TXB_SKIP_V_CTX_PARA: [u16; 6] = [78, 0, 1, 50, 0, 0];
 
 #[rustfmt::skip]
-pub const TXB_SKIP_V_U_NONZERO_CTX_ICDF: [[u16; 2]; 3] = [
+pub const TXB_SKIP_V_U_NONZERO_CTX_ICDF: [[u16; 2]; 6] = [
     [25120,     0],
     [16620,     0],
     [ 8203,     0],
+    [16384,     0],
+    [16384,     0],
+    [16384,     0],
 ];
+pub const TXB_SKIP_V_U_NONZERO_CTX_PARA: [u16; 6] = [90, 90, 90, 0, 0, 0];
 
 #[rustfmt::skip]
 pub const DC_SIGN_UV_ICDF: [u16; 2] = [16384, 0];
@@ -811,6 +837,18 @@ pub const CFL_ICDF: [[u16; 2]; 3] = [
 pub const CFL_INDEX_ICDF: [u16; 2] = [20261, 0];
 
 #[rustfmt::skip]
+pub const CFL_MHCCP_ICDF: [u16; 2] = [17269, 0];
+
+#[rustfmt::skip]
+pub const MHCCP_FILTER_DIR_ICDF: [[u16; 3]; 4] = [
+    [21845, 10923, 0],
+    [23973, 17663, 0],
+    [22335, 16794, 0],
+    [15683, 11079, 0],
+];
+pub const MHCCP_FILTER_DIR_PARA: [u16; 4] = [0, 6, 32, 32];
+
+#[rustfmt::skip]
 pub const CFL_SIGN_ICDF: [u16; 8] = [30347, 28436, 21512, 20002, 11382, 4043, 681, 0];
 
 #[rustfmt::skip]
@@ -872,8 +910,8 @@ pub const RECT_TYPE_PARA: [[u16; 64]; 2] = [
          7, 32,  6, 31,  0,  0,  0,  0,
          0,  0,  0,  0,  0,  0,  0,  0,
          0,  0,  0,  0,  0,  0,  0,  0,
-         7, 32, 32, 32, 32,  6, 27,  6,
-         0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  7, 32, 32, 32,
+        32,  6, 27,  6,  0,  0,  0,  0,
     ],
 ];
 
@@ -1078,6 +1116,20 @@ pub const CDEF_STRENGTH_INDEX0_ICDF: [[u16; 2]; 4] = [
 pub const CDEF_STRENGTH_INDEX0_PARA: [u16; 4] = [32, 32, 32, 31];
 
 #[rustfmt::skip]
+pub const CDEF_CDF_0_ICDF: [u16; 2] = [17708, 0];
+#[rustfmt::skip]
+pub const CDEF_CDF_1_ICDF: [u16; 3] = [13413, 24899, 0];
+#[rustfmt::skip]
+pub const CDEF_CDF_2_ICDF: [u16; 4] = [10588, 19866, 26664, 0];
+#[rustfmt::skip]
+pub const CDEF_CDF_3_ICDF: [u16; 5] = [10131, 17874, 23876, 28766, 0];
+#[rustfmt::skip]
+pub const CDEF_CDF_4_ICDF: [u16; 6] = [8363, 15451, 20811, 25453, 29393, 0];
+#[rustfmt::skip]
+pub const CDEF_CDF_5_ICDF: [u16; 7] = [7372, 13867, 18969, 23278, 26977, 30156, 0];
+pub const CDEF_CDF_PARA: [u16; 6] = [32, 32, 37, 37, 32, 32];
+
+#[rustfmt::skip]
 pub const CCSO_ICDF: [[[u16; 2]; 4]; 3] = [
     // plane 0 (Y)
     [[14299, 0], [16384, 0], [27819, 0], [16384, 0]],
@@ -1102,6 +1154,105 @@ pub const INTRABC_ICDF: [[u16; 2]; 3] = [
 ];
 
 pub const INTRABC_PARA: [u16; 3] = [5, 30, 0];
+
+#[rustfmt::skip]
+pub const SKIP_TXFM_ICDF: [[u16; 2]; 6] = [
+    [ 6903, 0],
+    [18452, 0],
+    [28170, 0],
+    [ 7156, 0],
+    [20402, 0],
+    [29448, 0],
+];
+pub const SKIP_TXFM_PARA: [u16; 6] = [25, 0, 0, 6, 1, 90];
+
+pub const INTRABC_MODE_ICDF: [u16; 2] = [2775, 0];
+pub const INTRABC_MODE_PARA: u16 = 6;
+
+pub const INTRABC_BV_PRECISION_ICDF: [u16; 2] = [12990, 0];
+pub const INTRABC_BV_PRECISION_PARA: u16 = 31;
+
+#[rustfmt::skip]
+pub const MORPH_PRED_ICDF: [[u16; 2]; 3] = [
+    [ 1053, 0],
+    [13101, 0],
+    [22213, 0],
+];
+pub const MORPH_PRED_PARA: [u16; 3] = [55, 1, 91];
+
+pub const NMV_JOINT_SHELL_SET_ICDF: [u16; 2] = [1189, 0];
+pub const NMV_JOINT_SHELL_SET_PARA: u16 = 25;
+
+pub const NMV_JOINT_SHELL_CLASS_0_ICDF: [&[u16]; 7] = [
+    &[28308, 19769, 10263,  1928,     0],
+    &[25249, 13861,  7205,  2893,   785,     0],
+    &[27307, 21845, 16384, 10923,  5461,     0],
+    &[24088, 19045, 14560, 10082,  6046,  2748,     0],
+    &[28444, 17468,  9078,  4071,  1486,   409,     0],
+    &[25271, 15467,  8920,  5330,  3373,  1889,   765,  0],
+    &[22101, 12529,  6885,  3098,  1368,   615,   189,  0],
+];
+pub const NMV_JOINT_SHELL_CLASS_0_PARA: [u16; 7] = [38, 27, 0, 5, 1, 31, 0];
+
+pub const NMV_JOINT_SHELL_CLASS_1_ICDF: [&[u16]; 7] = [
+    &[11439,  2204,   179,   119,    60,     0],
+    &[ 8518,   962,    92,    46,    36,     0],
+    &[28087, 23406, 18725, 14043,  9362,  4681,     0],
+    &[12790,  2608,   204,    36,    32,    28,     0],
+    &[13061,  4354,  1528,  1120,    76,    51,    47,  0],
+    &[14299,  5341,  1206,   116,    44,    40,    36,  0],
+    &[14958,  7572,  3396,   815,   204,    48,    44,  0],
+];
+pub const NMV_JOINT_SHELL_CLASS_1_PARA: [u16; 7] = [50, 50, 0, 1, 25, 31, 55];
+
+pub const NMV_JOINT_SHELL_LAST_TWO_ICDF: [u16; 2] = [16384, 0];
+pub const NMV_JOINT_SHELL_LAST_TWO_PARA: u16 = 0;
+
+pub const NMV_SHELL_OFFSET_LOW_CLASS_ICDF: [[u16; 2]; 2] = [
+    [18181, 0],
+    [11802, 0],
+];
+pub const NMV_SHELL_OFFSET_LOW_CLASS_PARA: [u16; 2] = [36, 75];
+
+pub const NMV_SHELL_OFFSET_CLASS2_ICDF: [u16; 2] = [19579, 0];
+pub const NMV_SHELL_OFFSET_CLASS2_PARA: u16 = 0;
+
+#[rustfmt::skip]
+pub const NMV_SHELL_OFFSET_OTHER_CLASS_ICDF: [[u16; 2]; 16] = [
+    [14825, 0],
+    [13834, 0],
+    [13840, 0],
+    [14072, 0],
+    [13724, 0],
+    [12406, 0],
+    [12342, 0],
+    [10205, 0],
+    [10578, 0],
+    [ 9310, 0],
+    [ 6541, 0],
+    [ 2003, 0],
+    [16384, 0],
+    [16384, 0],
+    [16384, 0],
+    [16384, 0],
+];
+pub const NMV_SHELL_OFFSET_OTHER_CLASS_PARA: [u16; 16] = [
+    93, 93, 93, 93, 93, 93, 93, 93, 93, 90, 2, 50, 0, 0, 0, 0,
+];
+
+pub const NMV_COL_MV_GREATER_FLAGS_ICDF: [[u16; 2]; 2] = [
+    [27105, 0],
+    [27912, 0],
+];
+pub const NMV_COL_MV_GREATER_FLAGS_PARA: [u16; 2] = [25, 90];
+
+pub const NMV_COL_MV_INDEX_ICDF: [[u16; 2]; 4] = [
+    [19323, 0],
+    [19227, 0],
+    [18723, 0],
+    [19880, 0],
+];
+pub const NMV_COL_MV_INDEX_PARA: [u16; 4] = [1, 1, 1, 31];
 
 #[rustfmt::skip]
 pub const TXFM_2OR3_WAY_PARTITION_TYPE_ICDF: [[[[u16; 2]; 2]; 2]; 2] = [
@@ -1644,6 +1795,96 @@ pub const EXT_INDEX_TO_TX_TYPE_LARGE_64: [[usize; 4]; 2] = [
     [DCT_DCT, ADST_DCT, FLIPADST_DCT, H_DCT],
     [DCT_DCT, DCT_ADST, DCT_FLIPADST, V_DCT],
 ];
+
+pub const EXT_TX_SET_DCTONLY: usize = 0;
+pub const EXT_TX_SET_DCT_IDTX: usize = 1;
+pub const EXT_TX_SET_LONG_SIDE_64: usize = 2;
+pub const EXT_TX_SET_LONG_SIDE_32: usize = 3;
+pub const EXT_TX_SET_DTT4_IDTX: usize = 4;
+pub const EXT_TX_SET_DTT4_IDTX_1DDCT: usize = 5;
+pub const EXT_TX_SET_DTT9_IDTX_1DDCT: usize = 6;
+pub const EXT_TX_SET_ALL16: usize = 7;
+pub const EXT_NEW_TX_SET: usize = 8;
+pub const EXT_TX_SET_DCT_IDTX_IDDCT: usize = 9;
+
+pub const INTER_TX_TYPE_INDEX_COUNT: usize = 8;
+pub const INTER_TX_TYPE_OFFSET1_COUNT: usize = 8;
+pub const INTER_TX_TYPE_OFFSET2_COUNT: usize = 4;
+
+pub const AV2_NUM_EXT_TX_SET: [i32; 10] = [1, 2, 7, 12, 5, 7, 12, 16, -1, 4];
+pub const EXT_TX_SET_INDEX_INTER: [i8; 10] = [0, 3, 4, 5, -1, -1, 2, 1, 1, 4];
+
+#[rustfmt::skip]
+pub const AV2_EXT_TX_INV: [[usize; 16]; 10] = [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 1, 2, 4, 5, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 0, 1, 2, 4, 5, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0],
+    [9, 0, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 0, 10, 11, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [9, 10, 11, 0, 1, 2, 4, 5, 3, 6, 7, 8, 0, 0, 0, 0],
+    [9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 4, 5, 3, 6, 7, 8],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 10, 11, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+];
+
+#[rustfmt::skip]
+pub const INTER_TX_TYPE_SET_ICDF: [[[[u16; 2]; 4]; 3]; 2] = [
+    [
+        [[18646, 0], [23806, 0], [16384, 0], [16384, 0]],
+        [[16345, 0], [9322, 0], [16384, 0], [16384, 0]],
+        [[9416, 0], [15699, 0], [16384, 0], [16384, 0]],
+    ],
+    [
+        [[16384, 0], [16384, 0], [11933, 0], [16384, 0]],
+        [[16384, 0], [16384, 0], [2048, 0], [16384, 0]],
+        [[16384, 0], [16384, 0], [3911, 0], [16384, 0]],
+    ],
+];
+
+#[rustfmt::skip]
+pub const INTER_TX_TYPE_SET_PARA: [[[u16; 4]; 3]; 2] = [
+    [[25, 31, 0, 0], [26, 0, 0, 0], [25, 56, 0, 0]],
+    [[0, 0, 0, 0], [0, 0, 3, 0], [0, 0, 17, 0]],
+];
+
+#[rustfmt::skip]
+pub const INTER_TX_TYPE_IDX_ICDF: [[[u16; 8]; 3]; 2] = [
+    [
+        [23854, 22036, 20498, 17946, 15640, 13182, 10804, 0],
+        [31608, 31213, 30796, 29354, 28806, 27617, 26860, 0],
+        [9949, 8430, 7176, 5767, 4373, 3120, 1778, 0],
+    ],
+    [
+        [31628, 31043, 30444, 18115, 13696, 9150, 4659, 0],
+        [32710, 32507, 32181, 451, 212, 142, 60, 0],
+        [15364, 15099, 14365, 8716, 6375, 4262, 2092, 0],
+    ],
+];
+
+#[rustfmt::skip]
+pub const INTER_TX_TYPE_IDX_PARA: [[u16; 3]; 2] = [
+    [25, 31, 25],
+    [31, 2, 57],
+];
+
+#[rustfmt::skip]
+pub const INTER_TX_TYPE_OFFSET_1_ICDF: [[u16; 8]; 3] = [
+    [29647, 26298, 23577, 20488, 14957, 10180, 5071, 0],
+    [32430, 32391, 32197, 32025, 24836, 20908, 15244, 0],
+    [29454, 25143, 22129, 18562, 13405, 9312, 4735, 0],
+];
+
+pub const INTER_TX_TYPE_OFFSET_1_PARA: [u16; 3] = [93, 1, 93];
+
+#[rustfmt::skip]
+pub const INTER_TX_TYPE_OFFSET_2_ICDF: [[u16; 4]; 3] = [
+    [24099, 16235, 7913, 0],
+    [23327, 16355, 7492, 0],
+    [24001, 15157, 7892, 0],
+];
+
+pub const INTER_TX_TYPE_OFFSET_2_PARA: [u16; 3] = [93, 90, 10];
 
 #[rustfmt::skip]
 pub const AV2_MD_IDX2TYPE: [[[u8; 7]; 13]; 4] = [
