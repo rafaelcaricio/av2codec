@@ -3,6 +3,11 @@ const TOTAL_ANGLE_DELTA_COUNT: usize = 7;
 const MAX_ANGLE_DELTA: i32 = 3;
 pub const LUMA_MODE_COUNT: usize = 61;
 const ANGLE_STEP: i32 = 3;
+const IBP_WEIGHT_SHIFT: u32 = 7;
+const IBP_WEIGHT_MAX: u32 = 1 << IBP_WEIGHT_SHIFT;
+const IBP_WEIGHT_REF: u32 = IBP_WEIGHT_MAX;
+const IBP_WEIGHT_SIZE_LOG2: usize = 4;
+const IBP_WEIGHT_SIZE: usize = 1 << IBP_WEIGHT_SIZE_LOG2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -221,6 +226,35 @@ const DEFAULT_TOP_LEFT: u8 = 128;
 
 const MRL_INDEX_TO_DELTA: [i32; 4] = [0, 1, -1, 0];
 
+const IBP_WEIGHTS: [[u8; 16]; 5] = [
+    [96, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [86, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [77, 90, 102, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [71, 78, 86, 92, 100, 107, 114, 121, 0, 0, 0, 0, 0, 0, 0, 0],
+    [68, 72, 76, 79, 83, 87, 90, 94, 98, 102, 106, 109, 113, 117, 121, 124],
+];
+
+const IBP_SIZE_TO_WEIGHTS_INDEX: [usize; 9] = [0, 1, 2, 0, 3, 0, 0, 0, 4];
+
+const ANGLE_TO_MODE_INDEX: [u8; 90] = [
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 0, 0, 15, 0, 0, 14, 0, 0, 13,
+    0, 0, 12, 0, 0, 11, 0, 0, 10, 0, 0, 0, 9, 0, 0, 8, 0, 0, 7, 0, 0, 6, 0, 0, 5, 0, 0, 4, 0,
+    0, 3, 0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 0,
+];
+
+const IS_IBP_ENABLED: [bool; 16] = [
+    false, true, false, false, true, false, true, false, true, false, false, true, false, true,
+    false, true,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IntraPredictControl {
+    pub plane: usize,
+    pub enable_ibp: bool,
+    pub is_cfl: bool,
+}
+
 pub fn predict_intra(
     recon: &[u8],
     stride: usize,
@@ -233,17 +267,66 @@ pub fn predict_intra(
     mrl_index: u8,
     sb_y: usize,
 ) -> Vec<u8> {
+    predict_intra_with_control(
+        recon,
+        stride,
+        x,
+        y,
+        w,
+        h,
+        mode,
+        angle_delta,
+        mrl_index,
+        sb_y,
+        IntraPredictControl::default(),
+    )
+}
+
+pub fn predict_intra_with_control(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    mode: PredictionMode,
+    angle_delta: i32,
+    mrl_index: u8,
+    sb_y: usize,
+    control: IntraPredictControl,
+) -> Vec<u8> {
     let has_above = y > 0;
     let has_left = x > 0;
+    let apply_ibp = control.enable_ibp && !(w == 4 && h == 4);
 
     if mode.is_directional() {
         let mut p_angle = mode.base_angle() + angle_delta * ANGLE_STEP;
         p_angle += MRL_INDEX_TO_DELTA[mrl_index as usize];
-        return predict_directional(recon, stride, x, y, w, h, has_above, has_left, p_angle, mrl_index, sb_y);
+        return predict_directional(
+            recon,
+            stride,
+            x,
+            y,
+            w,
+            h,
+            has_above,
+            has_left,
+            p_angle,
+            mrl_index,
+            sb_y,
+            apply_ibp && control.plane == 0 && mrl_index == 0 && angle_delta % 2 == 0,
+        );
     }
 
     match mode {
-        PredictionMode::DcPred => predict_dc(recon, stride, x, y, w, h, has_above, has_left),
+        PredictionMode::DcPred => {
+            let mut pred = predict_dc(recon, stride, x, y, w, h, has_above, has_left);
+            if apply_ibp && (control.plane == 0 || !control.is_cfl) && (has_above || has_left) {
+                let (above, left, _) = ref_samples(recon, stride, x, y, w, h, has_above, has_left);
+                apply_ibp_dc(&mut pred, w, h, &above, &left, has_above, has_left);
+            }
+            pred
+        }
         PredictionMode::PaethPred => {
             predict_paeth(recon, stride, x, y, w, h, has_above, has_left)
         }
@@ -266,6 +349,7 @@ fn predict_directional(
     p_angle: i32,
     mrl_index: u8,
     sb_y: usize,
+    apply_ibp: bool,
 ) -> Vec<u8> {
     if p_angle == 90 && mrl_index == 0 {
         return predict_v(recon, stride, x, y, w, h, has_above, has_left);
@@ -279,7 +363,7 @@ fn predict_directional(
         extended_ref_samples_mrl(recon, stride, x, y, w, h, has_above, has_left, above_mrl, mrl_index);
 
     let mrl = mrl_index as usize;
-    if p_angle > 0 && p_angle < 90 {
+    let mut pred = if p_angle > 0 && p_angle < 90 {
         predict_zone1_angle(&above_ext, w, h, get_dx(p_angle), mrl)
     } else if p_angle == 90 {
         predict_v_mrl(&above_ext, w, h)
@@ -291,6 +375,155 @@ fn predict_directional(
         predict_zone3_angle(&left_ext, w, h, get_dy(p_angle), mrl)
     } else {
         vec![BASE_DC; w * h]
+    };
+
+    if apply_ibp {
+        if let Some(mode_index) = ibp_mode_index(p_angle) {
+            if p_angle < 90 {
+                let second = predict_zone3_angle(&left_ext, w, h, DR_INTRA_DERIVATIVE[(90 - p_angle) as usize], 0);
+                apply_ibp_directional_zone1(&mut pred, &second, w, h, mode_index, p_angle);
+            } else if p_angle > 180 {
+                let second =
+                    predict_zone1_angle(&above_ext, w, h, DR_INTRA_DERIVATIVE[(p_angle - 180) as usize], 0);
+                apply_ibp_directional_zone3(&mut pred, &second, w, h, mode_index, 270 - p_angle);
+            }
+        }
+    }
+
+    pred
+}
+
+fn ibp_mode_index(angle: i32) -> Option<usize> {
+    let lookup = if angle > 0 && angle < 90 {
+        angle as usize
+    } else if angle > 180 && angle < 270 {
+        (270 - angle) as usize
+    } else {
+        return None;
+    };
+    let mode_index = ANGLE_TO_MODE_INDEX[lookup] as usize;
+    IS_IBP_ENABLED[mode_index].then_some(mode_index)
+}
+
+fn ibp_directional_weight(angle: i32, row_idx: usize, col_idx: usize) -> u32 {
+    let y = DR_INTRA_DERIVATIVE[(90 - angle) as usize] * (col_idx as i32 + 1);
+    let dist = ((row_idx as i32 + 1) << 6) + y;
+    ((y * IBP_WEIGHT_MAX as i32 + (dist >> 1)) / dist) as u32
+}
+
+fn apply_ibp_directional_zone1(
+    pred: &mut [u8],
+    second: &[u8],
+    w: usize,
+    h: usize,
+    _mode_index: usize,
+    angle: i32,
+) {
+    let col_shift = w >> (IBP_WEIGHT_SIZE_LOG2 + 1);
+    let row_shift = h >> (IBP_WEIGHT_SIZE_LOG2 + 1);
+
+    for r in 0..h {
+        let row_idx = (r >> row_shift).min(IBP_WEIGHT_SIZE - 1);
+        for c in 0..w {
+            let col_idx = (c >> col_shift).min(IBP_WEIGHT_SIZE - 1);
+            let weight = ibp_directional_weight(angle, row_idx, col_idx);
+            let idx = r * w + c;
+            pred[idx] = ((pred[idx] as u32 * weight
+                + second[idx] as u32 * (IBP_WEIGHT_MAX - weight)
+                + (1 << (IBP_WEIGHT_SHIFT - 1)))
+                >> IBP_WEIGHT_SHIFT) as u8;
+        }
+    }
+}
+
+fn apply_ibp_directional_zone3(
+    pred: &mut [u8],
+    second: &[u8],
+    w: usize,
+    h: usize,
+    _mode_index: usize,
+    angle: i32,
+) {
+    let col_shift = w >> (IBP_WEIGHT_SIZE_LOG2 + 1);
+    let row_shift = h >> (IBP_WEIGHT_SIZE_LOG2 + 1);
+
+    for c in 0..w {
+        let col_idx = (c >> col_shift).min(IBP_WEIGHT_SIZE - 1);
+        for r in 0..h {
+            let row_idx = (r >> row_shift).min(IBP_WEIGHT_SIZE - 1);
+            let weight = ibp_directional_weight(angle, col_idx, row_idx);
+            let idx = r * w + c;
+            pred[idx] = ((pred[idx] as u32 * weight
+                + second[idx] as u32 * (IBP_WEIGHT_MAX - weight)
+                + (1 << (IBP_WEIGHT_SHIFT - 1)))
+                >> IBP_WEIGHT_SHIFT) as u8;
+        }
+    }
+}
+
+fn apply_ibp_dc(pred: &mut [u8], w: usize, h: usize, above: &[u8], left: &[u8], has_above: bool, has_left: bool) {
+    match (has_above, has_left) {
+        (true, true) => apply_ibp_dc_both(pred, w, h, above, left),
+        (true, false) => apply_ibp_dc_top(pred, w, h, above),
+        (false, true) => apply_ibp_dc_left(pred, w, h, left),
+        (false, false) => {}
+    }
+}
+
+fn apply_ibp_dc_left(pred: &mut [u8], w: usize, h: usize, left: &[u8]) {
+    let len = w >> 2;
+    let weights = &IBP_WEIGHTS[IBP_SIZE_TO_WEIGHTS_INDEX[w >> 3]];
+    for r in 0..h {
+        let row_base = r * w;
+        for c in 0..len {
+            pred[row_base + c] = ((left[r] as u32 * (IBP_WEIGHT_REF - weights[c] as u32)
+                + pred[row_base + c] as u32 * weights[c] as u32
+                + (1 << (IBP_WEIGHT_SHIFT - 1)))
+                >> IBP_WEIGHT_SHIFT) as u8;
+        }
+    }
+}
+
+fn apply_ibp_dc_top(pred: &mut [u8], w: usize, h: usize, above: &[u8]) {
+    let len = h >> 2;
+    let weights = &IBP_WEIGHTS[IBP_SIZE_TO_WEIGHTS_INDEX[h >> 3]];
+    for r in 0..len {
+        let row_base = r * w;
+        for c in 0..w {
+            pred[row_base + c] = ((above[c] as u32 * (IBP_WEIGHT_REF - weights[r] as u32)
+                + pred[row_base + c] as u32 * weights[r] as u32
+                + (1 << (IBP_WEIGHT_SHIFT - 1)))
+                >> IBP_WEIGHT_SHIFT) as u8;
+        }
+    }
+}
+
+fn apply_ibp_dc_both(pred: &mut [u8], w: usize, h: usize, above: &[u8], left: &[u8]) {
+    let len_h = h >> 2;
+    let len_w = w >> 2;
+    let row_start = if w >= h { len_h } else { 0 };
+    let col_start = if w >= h { 0 } else { len_w };
+
+    let top_weights = &IBP_WEIGHTS[IBP_SIZE_TO_WEIGHTS_INDEX[h >> 3]];
+    for r in 0..len_h {
+        let row_base = r * w;
+        for c in col_start..w {
+            pred[row_base + c] = ((above[c] as u32 * (IBP_WEIGHT_REF - top_weights[r] as u32)
+                + pred[row_base + c] as u32 * top_weights[r] as u32
+                + (1 << (IBP_WEIGHT_SHIFT - 1)))
+                >> IBP_WEIGHT_SHIFT) as u8;
+        }
+    }
+
+    let left_weights = &IBP_WEIGHTS[IBP_SIZE_TO_WEIGHTS_INDEX[w >> 3]];
+    for r in row_start..h {
+        let row_base = r * w;
+        for c in 0..len_w {
+            pred[row_base + c] = ((left[r] as u32 * (IBP_WEIGHT_REF - left_weights[c] as u32)
+                + pred[row_base + c] as u32 * left_weights[c] as u32
+                + (1 << (IBP_WEIGHT_SHIFT - 1)))
+                >> IBP_WEIGHT_SHIFT) as u8;
+        }
     }
 }
 
@@ -1004,5 +1237,119 @@ mod tests {
         for &v in &pred {
             assert_eq!(v, 100, "D203 with uniform left should produce 100 everywhere");
         }
+    }
+
+    #[test]
+    fn dc_ibp_blends_top_and_left_regions() {
+        let stride = 16;
+        let mut recon = vec![0u8; stride * stride];
+        recon[..stride].fill(64);
+        for r in 0..stride {
+            recon[r * stride] = 192;
+        }
+
+        let pred = predict_intra_with_control(
+            &recon,
+            stride,
+            1,
+            1,
+            8,
+            8,
+            PredictionMode::DcPred,
+            0,
+            0,
+            0,
+            IntraPredictControl {
+                plane: 0,
+                enable_ibp: true,
+                is_cfl: false,
+            },
+        );
+
+        assert_eq!(pred[0], 107);
+        assert_eq!(pred[2 * 8], 149);
+        assert_eq!(pred[3 * 8 + 3], 128);
+    }
+
+    #[test]
+    fn dc_ibp_skips_cfl_chroma() {
+        let stride = 16;
+        let mut recon = vec![0u8; stride * stride];
+        recon[..stride].fill(64);
+        for r in 0..stride {
+            recon[r * stride] = 192;
+        }
+
+        let base = predict_intra(&recon, stride, 1, 1, 8, 8, PredictionMode::DcPred, 0, 0, 0);
+        let pred = predict_intra_with_control(
+            &recon,
+            stride,
+            1,
+            1,
+            8,
+            8,
+            PredictionMode::DcPred,
+            0,
+            0,
+            0,
+            IntraPredictControl {
+                plane: 1,
+                enable_ibp: true,
+                is_cfl: true,
+            },
+        );
+
+        assert_eq!(pred, base);
+    }
+
+    #[test]
+    fn directional_ibp_requires_even_delta_luma() {
+        let stride = 16;
+        let mut recon = vec![0u8; stride * stride];
+        for c in 0..stride {
+            recon[c] = 32 + c as u8;
+        }
+        for r in 0..stride {
+            recon[r * stride] = 160;
+        }
+
+        let base = predict_intra(&recon, stride, 1, 1, 8, 8, PredictionMode::D45Pred, 0, 0, 0);
+        let enabled = predict_intra_with_control(
+            &recon,
+            stride,
+            1,
+            1,
+            8,
+            8,
+            PredictionMode::D45Pred,
+            0,
+            0,
+            0,
+            IntraPredictControl {
+                plane: 0,
+                enable_ibp: true,
+                is_cfl: false,
+            },
+        );
+        let odd_delta = predict_intra_with_control(
+            &recon,
+            stride,
+            1,
+            1,
+            8,
+            8,
+            PredictionMode::D45Pred,
+            1,
+            0,
+            0,
+            IntraPredictControl {
+                plane: 0,
+                enable_ibp: true,
+                is_cfl: false,
+            },
+        );
+
+        assert_ne!(enabled, base);
+        assert_eq!(odd_delta, predict_intra(&recon, stride, 1, 1, 8, 8, PredictionMode::D45Pred, 1, 0, 0));
     }
 }

@@ -883,6 +883,7 @@ mod tests {
             sb_size: 64,
             enable_sdp: false,
             enable_cfl_intra: false,
+            enable_ibp: false,
             enable_mrls: false,
             enable_intra_dip: false,
             order_hint_bits: 6,

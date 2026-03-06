@@ -11,6 +11,7 @@ pub struct SequenceParams {
     pub enable_sdp: bool,
     pub enable_cfl_intra: bool,
     pub enable_mhccp: bool,
+    pub enable_ibp: bool,
     pub enable_mrls: bool,
     pub enable_intra_dip: bool,
     pub order_hint_bits: u32,
@@ -252,7 +253,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         let _cfl_ds_filter = r.read_literal(2);
     }
     let enable_mhccp = r.read_bit();
-    let _ibp = r.read_bit();
+    let enable_ibp = r.read_bit();
     eprintln!(
         "[SEQ_INTRA] enable_intra_dip={} enable_mrls={}",
         enable_intra_dip, enable_mrls
@@ -296,6 +297,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         enable_sdp,
         enable_cfl_intra,
         enable_mhccp,
+        enable_ibp,
         enable_mrls,
         enable_intra_dip,
         order_hint_bits,
@@ -648,7 +650,7 @@ fn parse_filter_group(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitstream::{BitWriter, SequenceHeaderConfig, write_sequence_header};
+    use crate::bitstream::{SequenceHeaderConfig, write_sequence_header};
 
     #[test]
     fn roundtrip_64x64() {
@@ -707,5 +709,13 @@ mod tests {
         let params = parse_sequence_header(&payload).unwrap();
         assert_eq!(params.width, 1920);
         assert_eq!(params.height, 1080);
+    }
+
+    #[test]
+    fn avmenc_nofilter_fixture_enables_ibp() {
+        let data = std::fs::read("tests/fixtures/avmenc_128x128_q30_nofilter.obu").unwrap();
+        let obus = crate::decode::obu::parse_obus(&data);
+        let params = parse_sequence_header(obus[0].payload).unwrap();
+        assert!(params.enable_ibp);
     }
 }

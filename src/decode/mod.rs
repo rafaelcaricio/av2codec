@@ -102,7 +102,8 @@ impl Decoder {
             };
 
             let (y_plane, u_plane, v_plane) = if !fp.tile_data.is_empty() {
-                let use_partitioned = !sb_aligned || fp.tx_mode_select || seq.enable_sdp;
+                let use_partitioned =
+                    !sb_aligned || fp.tx_mode_select || seq.enable_sdp || seq.enable_ibp;
                 if !use_partitioned {
                     let legacy_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -142,6 +143,7 @@ impl Decoder {
                                         uv_dequant,
                                         fp.tcq_mode,
                                         seq.sb_size as usize,
+                                        seq.enable_ibp,
                                     )
                                 }));
                             partitioned_result.unwrap_or_else(|_| gray_frame(seq.width, seq.height))
@@ -164,6 +166,7 @@ impl Decoder {
                         uv_dequant,
                         fp.tcq_mode,
                         seq.sb_size as usize,
+                        seq.enable_ibp,
                     )
                 }
             } else {
@@ -748,6 +751,7 @@ fn reconstruct_partitioned_frame(
     uv_dequant: i32,
     tcq_mode: bool,
     sb_size: usize,
+    enable_ibp: bool,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let w = width as usize;
     let h = height as usize;
@@ -872,23 +876,28 @@ fn reconstruct_partitioned_frame(
                 }
             } else {
                 let sb_y = (by / sb_size) * sb_size;
-                let y_pred = predict::predict_intra(
-                    &y_plane,
-                    w,
-                    bx,
-                    by,
-                    bw,
-                    bh,
-                    pred_mode,
-                    angle_delta,
-                    block.mrl_index,
-                    sb_y,
-                );
                 for tu in block.y_tu.iter() {
                     let tu_w = tu.tx_size.width();
                     let tu_h = tu.tx_size.height();
                     let tx = bx + tu.col_offset;
                     let ty = by + tu.row_offset;
+                    let y_pred = predict::predict_intra_with_control(
+                        &y_plane,
+                        w,
+                        tx,
+                        ty,
+                        tu_w,
+                        tu_h,
+                        pred_mode,
+                        angle_delta,
+                        block.mrl_index,
+                        sb_y,
+                        predict::IntraPredictControl {
+                            plane: 0,
+                            enable_ibp,
+                            is_cfl: false,
+                        },
+                    );
                     let residuals = transform::dequantize_and_inverse_tcq(
                         &tu.levels, tu.eob, dequant, tu.tx_size, tu.tx_type, tcq_mode,
                     );
@@ -900,23 +909,27 @@ fn reconstruct_partitioned_frame(
                         tu_w,
                         tu_h,
                         &y_pred,
-                        bw,
-                        tu.col_offset,
-                        tu.row_offset,
+                        tu_w,
+                        0,
+                        0,
                         &residuals,
                     );
                 }
             }
         }
 
-        if block.tree_type == tile::TreeType::Luma {
+        if block.tree_type == tile::TreeType::Luma || !block.is_chroma_ref {
             continue;
         }
 
-        let uv_bx = bx / 2;
-        let uv_by = by / 2;
-        let uv_bw = bw / 2;
-        let uv_bh = bh / 2;
+        let chroma_x = block.chroma_x;
+        let chroma_y = block.chroma_y;
+        let chroma_width = block.chroma_width;
+        let chroma_height = block.chroma_height;
+        let uv_bx = chroma_x / 2;
+        let uv_by = chroma_y / 2;
+        let uv_bw = chroma_width / 2;
+        let uv_bh = chroma_height / 2;
 
         if uv_bw >= 4 && uv_bh >= 4 {
             let (u_pred, v_pred) = if block.is_intrabc {
@@ -993,7 +1006,7 @@ fn reconstruct_partitioned_frame(
                     );
                     (u_pred, v_pred)
                 } else {
-                    let u_dc_pred = predict::predict_intra(
+                    let u_dc_pred = predict::predict_intra_with_control(
                         &u_plane,
                         uv_w,
                         uv_bx,
@@ -1004,8 +1017,13 @@ fn reconstruct_partitioned_frame(
                         0,
                         0,
                         0,
+                        predict::IntraPredictControl {
+                            plane: 1,
+                            enable_ibp,
+                            is_cfl: true,
+                        },
                     );
-                    let v_dc_pred = predict::predict_intra(
+                    let v_dc_pred = predict::predict_intra_with_control(
                         &v_plane,
                         uv_w,
                         uv_bx,
@@ -1016,13 +1034,18 @@ fn reconstruct_partitioned_frame(
                         0,
                         0,
                         0,
+                        predict::IntraPredictControl {
+                            plane: 2,
+                            enable_ibp,
+                            is_cfl: true,
+                        },
                     );
 
                     let mut recon_q3 = vec![0i16; uv_bw * uv_bh];
                     for r in 0..uv_bh {
                         for c in 0..uv_bw {
-                            let ly = by + r * 2;
-                            let lx = bx + c * 2;
+                            let ly = chroma_y + r * 2;
+                            let lx = chroma_x + c * 2;
                             let sum = y_plane[ly * w + lx] as i32
                                 + y_plane[ly * w + lx + 1] as i32
                                 + y_plane[(ly + 1) * w + lx] as i32
@@ -1072,31 +1095,146 @@ fn reconstruct_partitioned_frame(
                     } else {
                         0
                     };
-                let u_p = predict::predict_intra(
-                    &u_plane,
-                    uv_w,
-                    uv_bx,
-                    uv_by,
-                    uv_bw,
-                    uv_bh,
-                    uv_pred_mode,
-                    uv_angle_delta,
-                    0,
-                    0,
-                );
-                let v_p = predict::predict_intra(
-                    &v_plane,
-                    uv_w,
-                    uv_bx,
-                    uv_by,
-                    uv_bw,
-                    uv_bh,
-                    uv_pred_mode,
-                    uv_angle_delta,
-                    0,
-                    0,
-                );
-                (u_p, v_p)
+                let tu_count = block.u_tu.len().min(block.v_tu.len());
+                if tu_count == 0 {
+                    let u_p = predict::predict_intra_with_control(
+                        &u_plane,
+                        uv_w,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        uv_pred_mode,
+                        uv_angle_delta,
+                        0,
+                        0,
+                        predict::IntraPredictControl {
+                            plane: 1,
+                            enable_ibp,
+                            is_cfl: false,
+                        },
+                    );
+                    let v_p = predict::predict_intra_with_control(
+                        &v_plane,
+                        uv_w,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        uv_pred_mode,
+                        uv_angle_delta,
+                        0,
+                        0,
+                        predict::IntraPredictControl {
+                            plane: 2,
+                            enable_ibp,
+                            is_cfl: false,
+                        },
+                    );
+                    (u_p, v_p)
+                } else {
+                    for i in 0..tu_count {
+                        let u_tu = &block.u_tu[i];
+                        let v_tu = &block.v_tu[i];
+
+                        let mut u_dq = transform::dequantize_only(
+                            &u_tu.levels,
+                            u_tu.eob,
+                            uv_dequant,
+                            u_tu.tx_size,
+                            u_tu.tx_type,
+                            tcq_mode,
+                        );
+                        let mut v_dq = transform::dequantize_only(
+                            &v_tu.levels,
+                            v_tu.eob,
+                            uv_dequant,
+                            v_tu.tx_size,
+                            v_tu.tx_type,
+                            tcq_mode,
+                        );
+
+                        if u_tu.cctx_type != 0 {
+                            transform::inverse_cctx(&mut u_dq, &mut v_dq, u_tu.cctx_type);
+                        }
+
+                        let u_res =
+                            transform::inverse_transform_only(&u_dq, u_tu.tx_size, u_tu.tx_type);
+                        let v_res =
+                            transform::inverse_transform_only(&v_dq, v_tu.tx_size, v_tu.tx_type);
+
+                        let u_tu_w = u_tu.tx_size.width();
+                        let u_tu_h = u_tu.tx_size.height();
+                        let u_tx = uv_bx + u_tu.col_offset;
+                        let u_ty = uv_by + u_tu.row_offset;
+                        let u_pred = predict::predict_intra_with_control(
+                            &u_plane,
+                            uv_w,
+                            u_tx,
+                            u_ty,
+                            u_tu_w,
+                            u_tu_h,
+                            uv_pred_mode,
+                            uv_angle_delta,
+                            0,
+                            0,
+                            predict::IntraPredictControl {
+                                plane: 1,
+                                enable_ibp,
+                                is_cfl: false,
+                            },
+                        );
+                        reconstruct_tu(
+                            &mut u_plane,
+                            uv_w,
+                            u_tx,
+                            u_ty,
+                            u_tu_w,
+                            u_tu_h,
+                            &u_pred,
+                            u_tu_w,
+                            0,
+                            0,
+                            &u_res,
+                        );
+
+                        let v_tu_w = v_tu.tx_size.width();
+                        let v_tu_h = v_tu.tx_size.height();
+                        let v_tx = uv_bx + v_tu.col_offset;
+                        let v_ty = uv_by + v_tu.row_offset;
+                        let v_pred = predict::predict_intra_with_control(
+                            &v_plane,
+                            uv_w,
+                            v_tx,
+                            v_ty,
+                            v_tu_w,
+                            v_tu_h,
+                            uv_pred_mode,
+                            uv_angle_delta,
+                            0,
+                            0,
+                            predict::IntraPredictControl {
+                                plane: 2,
+                                enable_ibp,
+                                is_cfl: false,
+                            },
+                        );
+                        reconstruct_tu(
+                            &mut v_plane,
+                            uv_w,
+                            v_tx,
+                            v_ty,
+                            v_tu_w,
+                            v_tu_h,
+                            &v_pred,
+                            v_tu_w,
+                            0,
+                            0,
+                            &v_res,
+                        );
+                    }
+                    continue;
+                }
             };
 
             let tu_count = block.u_tu.len().min(block.v_tu.len());
@@ -1626,6 +1764,7 @@ mod tests {
             uv_dequant,
             fp.tcq_mode,
             seq.sb_size as usize,
+            seq.enable_ibp,
         );
 
         let w = seq.width as usize;
@@ -1855,6 +1994,7 @@ mod tests {
             uv_dequant_128,
             fp.tcq_mode,
             seq.sb_size as usize,
+            seq.enable_ibp,
         );
 
         let avmdec = "/Users/rafaelcaricio/development/avm_build/avmdec";

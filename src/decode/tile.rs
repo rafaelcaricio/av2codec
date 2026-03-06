@@ -23,6 +23,9 @@ const INTRABC_REFMV_BANK_SIZE: usize = 4;
 const MAX_RMB_SB_HITS: usize = 64;
 const BANK_1ST_UNIT_UPDATE_COUNT: usize = 4;
 const BANK_UNIT_MAX_ALLOWED_LEFTOVER_UPDATES: usize = 16;
+const AV2_EXT_TX_USED_FLAG: [u16; 10] = [
+    0x0001, 0x0201, 0x0C37, 0xFE37, 0x020F, 0x0E0F, 0x0FFF, 0xFFFF, 0xFFFF, 0x0E01,
+];
 
 const REORDERED_Y_MODE: [u8; 13] = [0, 9, 10, 11, 12, 3, 8, 1, 5, 4, 6, 2, 7];
 
@@ -160,11 +163,53 @@ fn build_uv_intra_mode_list(y_mode: u8) -> [u8; 13] {
     list
 }
 
+fn intra_mode_to_tx_type(pred_mode: u8) -> usize {
+    match pred_mode {
+        0 | 3 => DCT_DCT,
+        1 | 5 | 8 | 10 => ADST_DCT,
+        2 | 6 | 7 | 11 => DCT_ADST,
+        4 | 9 | 12 => ADST_ADST,
+        13 => DCT_DCT,
+        _ => DCT_DCT,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeType {
     Shared,
     Luma,
     Chroma,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChromaRefInfo {
+    is_chroma_ref: bool,
+    offset_started: bool,
+    x_base: usize,
+    y_base: usize,
+    w_base: usize,
+    h_base: usize,
+}
+
+impl ChromaRefInfo {
+    fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
+        Self {
+            is_chroma_ref: true,
+            offset_started: false,
+            x_base: x,
+            y_base: y,
+            w_base: w,
+            h_base: h,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChromaRefContext {
+    info: ChromaRefInfo,
+    partition: PartitionType,
+    width: usize,
+    height: usize,
 }
 
 const SKIP_CONTEXTS_Y: [[u8; 5]; 5] = [
@@ -1474,6 +1519,11 @@ pub struct DecodedBlock {
     pub y: usize,
     pub width: usize,
     pub height: usize,
+    pub is_chroma_ref: bool,
+    pub chroma_x: usize,
+    pub chroma_y: usize,
+    pub chroma_width: usize,
+    pub chroma_height: usize,
     pub tree_type: TreeType,
     pub is_intrabc: bool,
     pub morph_pred: bool,
@@ -1560,7 +1610,7 @@ fn get_inter_eob_tx_ctx(tx_size: TxSize, eob: u16) -> usize {
     }
 }
 
-fn get_inter_tx_set_type(tx_size: TxSize, reduced_tx_set_used: u8) -> usize {
+fn get_tx_set_type(tx_size: TxSize, inter_block: bool, reduced_tx_set_used: u8) -> usize {
     let tx_size_sqr_up = tx_size.sqr_up();
     let tx_size_sqr = tx_size.sqr();
     if tx_size_sqr_up > 3 {
@@ -1576,15 +1626,63 @@ fn get_inter_tx_set_type(tx_size: TxSize, reduced_tx_set_used: u8) -> usize {
             EXT_TX_SET_LONG_SIDE_32
         }
     } else if reduced_tx_set_used != 0 {
-        if reduced_tx_set_used <= 2 {
-            EXT_TX_SET_DCT_IDTX
+        const REDUCED_SET_MAP: [[usize; 3]; 2] = [
+            [EXT_NEW_TX_SET, EXT_TX_SET_DCT_IDTX, EXT_NEW_TX_SET],
+            [EXT_TX_SET_DCT_IDTX, EXT_TX_SET_DCT_IDTX, EXT_TX_SET_DCT_IDTX_IDDCT],
+        ];
+        let reduced_idx = (reduced_tx_set_used.saturating_sub(1) as usize).min(2);
+        REDUCED_SET_MAP[inter_block as usize][reduced_idx]
+    } else if inter_block {
+        if tx_size_sqr == 2 {
+            EXT_TX_SET_DTT9_IDTX_1DDCT
         } else {
-            EXT_TX_SET_DCT_IDTX_IDDCT
+            EXT_TX_SET_ALL16
         }
-    } else if tx_size_sqr == 2 {
-        EXT_TX_SET_DTT9_IDTX_1DDCT
     } else {
-        EXT_TX_SET_ALL16
+        EXT_NEW_TX_SET
+    }
+}
+
+fn adjust_ext_tx_used_flag(tx_size: TxSize, tx_set_type: usize, ext_tx_used_flag: &mut u16) {
+    let is_rect_horz = tx_size.width() > tx_size.height();
+    if tx_set_type == EXT_TX_SET_LONG_SIDE_64 {
+        if is_rect_horz {
+            *ext_tx_used_flag &= !((1 << DCT_ADST) | (1 << DCT_FLIPADST) | (1 << V_DCT));
+        } else {
+            *ext_tx_used_flag &= !((1 << ADST_DCT) | (1 << FLIPADST_DCT) | (1 << H_DCT));
+        }
+    } else if tx_set_type == EXT_TX_SET_LONG_SIDE_32 {
+        if is_rect_horz {
+            *ext_tx_used_flag &=
+                !((1 << DCT_ADST) | (1 << DCT_FLIPADST) | (1 << H_ADST) | (1 << H_FLIPADST));
+        } else {
+            *ext_tx_used_flag &=
+                !((1 << ADST_DCT) | (1 << FLIPADST_DCT) | (1 << V_ADST) | (1 << V_FLIPADST));
+        }
+    }
+}
+
+fn get_chroma_tx_type(
+    tx_size: TxSize,
+    pred_mode: u8,
+    inter_block: bool,
+    reduced_tx_set_used: u8,
+) -> usize {
+    if inter_block {
+        return DCT_DCT;
+    }
+
+    let tx_type = intra_mode_to_tx_type(pred_mode);
+    let tx_set_type = get_tx_set_type(tx_size, inter_block, reduced_tx_set_used);
+    let mut ext_tx_used_flag = AV2_EXT_TX_USED_FLAG[tx_set_type];
+    if tx_set_type == EXT_TX_SET_LONG_SIDE_64 || tx_set_type == EXT_TX_SET_LONG_SIDE_32 {
+        adjust_ext_tx_used_flag(tx_size, tx_set_type, &mut ext_tx_used_flag);
+    }
+
+    if (ext_tx_used_flag & (1 << tx_type)) == 0 {
+        DCT_DCT
+    } else {
+        tx_type
     }
 }
 
@@ -1607,7 +1705,7 @@ fn read_tx_type(
     }
 
     if inter_block {
-        let tx_set_type = get_inter_tx_set_type(tx_size, reduced_tx_set_used);
+        let tx_set_type = get_tx_set_type(tx_size, true, reduced_tx_set_used);
         if AV2_NUM_EXT_TX_SET[tx_set_type] <= 1 {
             return DCT_DCT;
         }
@@ -1986,7 +2084,7 @@ fn decode_coeff_tu(
     entropy_ctx: usize,
     u_has_coeffs: bool,
     inter_block: bool,
-    y_mode: u8,
+    pred_mode: u8,
     fsc_mode: usize,
     cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
@@ -2074,7 +2172,7 @@ fn decode_coeff_tu(
         read_tx_type(
             ec,
             tx_size,
-            y_mode,
+            pred_mode,
             fsc_mode,
             inter_block,
             cfg.reduced_tx_set_used,
@@ -2082,7 +2180,12 @@ fn decode_coeff_tu(
             cdf,
         )
     } else {
-        DCT_DCT
+        get_chroma_tx_type(
+            tx_size,
+            pred_mode,
+            inter_block,
+            cfg.reduced_tx_set_used,
+        )
     };
     ec.trace_state(&format!("after_tx_type_{} type={}", plane_name, tx_type));
 
@@ -2119,7 +2222,7 @@ fn decode_coeff_tu(
     let padded_stride = width + TX_PAD_HOR;
     let padded_height = height + 4;
     if plane == 0 && cfg.enable_ist && eob > 1 && fsc_mode == 0 && !inter_block {
-        read_sec_tx_type(ec, tx_size, tx_type, y_mode, eob as usize, cdf);
+        read_sec_tx_type(ec, tx_size, tx_type, pred_mode, eob as usize, cdf);
     }
 
     let tcq_active = cfg.tcq_mode && plane == 0 && tx_class == TxClass::TwoD;
@@ -2480,7 +2583,7 @@ fn decode_block_tus(
     block_h: usize,
     u_has_coeffs: bool,
     inter_block: bool,
-    y_mode: u8,
+    pred_mode: u8,
     fsc_mode: usize,
     cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
@@ -2544,7 +2647,7 @@ fn decode_block_tus(
             txb_skip_ctx,
             u_has_coeffs,
             inter_block,
-            y_mode,
+            pred_mode,
             fsc_mode,
             cfg,
             cdf,
@@ -3129,6 +3232,17 @@ impl ModeInfoGrid {
         cands.push(mv);
     }
 
+    fn push_intrabc_ref_bv_default(
+        cands: &mut Vec<(i32, i32)>,
+        mv: (i32, i32),
+        max_cands: usize,
+    ) {
+        if cands.len() >= max_cands {
+            return;
+        }
+        cands.push(mv);
+    }
+
     fn intrabc_ref_bv_valid_for_block(
         &self,
         x: usize,
@@ -3357,7 +3471,7 @@ impl ModeInfoGrid {
         ];
 
         for &mv in &default_ref_bv_list {
-            Self::push_intrabc_ref_bv(&mut cands, mv, max_cands);
+            Self::push_intrabc_ref_bv_default(&mut cands, mv, max_cands);
         }
 
         cands
@@ -3884,6 +3998,7 @@ fn decode_leaf_block(
     width: usize,
     height: usize,
     tree_type: TreeType,
+    chroma_ref_info: ChromaRefInfo,
     cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
     mi: &mut ModeInfoGrid,
@@ -3901,6 +4016,13 @@ fn decode_leaf_block(
     }
     let mut use_intrabc = false;
     let mut ibc_skip_txfm = false;
+    let chroma_x = chroma_ref_info.x_base;
+    let chroma_y = chroma_ref_info.y_base;
+    let chroma_width = chroma_ref_info.w_base;
+    let chroma_height = chroma_ref_info.h_base;
+    let uv_w = chroma_width / 2;
+    let uv_h = chroma_height / 2;
+    let decode_chroma = tree_type != TreeType::Luma && chroma_ref_info.is_chroma_ref && uv_w >= 4 && uv_h >= 4;
 
     if tree_type != TreeType::Chroma {
         ec.trace_state(&format!(
@@ -3979,21 +4101,16 @@ fn decode_leaf_block(
             mi.update_intrabc_refmv_bank(x, y, width, height, (bv_row, bv_col));
         }
 
-        let uv_w = width / 2;
-        let uv_h = height / 2;
         let (y_tu, u_tu, v_tu) = if ibc_skip_txfm {
             (vec![], vec![], vec![])
         } else {
-            let y_tu = decode_block_tus(
-                ec, 0, x, y, width, height, false, true, 0, 0, cfg, cdf, state,
-            );
-            let (u_tu, v_tu) = if tree_type != TreeType::Luma && uv_w >= 4 && uv_h >= 4 {
+            let y_tu = decode_block_tus(ec, 0, x, y, width, height, false, true, 0, 0, cfg, cdf, state);
+            let (u_tu, v_tu) = if decode_chroma {
                 let u_tu =
-                    decode_block_tus(ec, 1, x, y, uv_w, uv_h, false, true, 0, 0, cfg, cdf, state);
+                    decode_block_tus(ec, 1, chroma_x, chroma_y, uv_w, uv_h, false, true, 0, 0, cfg, cdf, state);
                 let v_u_has = u_tu.iter().any(|t| t.eob > 0);
-                let v_tu = decode_block_tus(
-                    ec, 2, x, y, uv_w, uv_h, v_u_has, true, 0, 0, cfg, cdf, state,
-                );
+                let v_tu =
+                    decode_block_tus(ec, 2, chroma_x, chroma_y, uv_w, uv_h, v_u_has, true, 0, 0, cfg, cdf, state);
                 (u_tu, v_tu)
             } else {
                 (vec![], vec![])
@@ -4010,6 +4127,11 @@ fn decode_leaf_block(
             y,
             width,
             height,
+            is_chroma_ref: chroma_ref_info.is_chroma_ref,
+            chroma_x,
+            chroma_y,
+            chroma_width,
+            chroma_height,
             tree_type,
             is_intrabc: true,
             morph_pred,
@@ -4158,7 +4280,8 @@ fn decode_leaf_block(
         let mi_row = y / 4;
         let mi_col = x / 4;
         let joint = mi.joint_y_mode[mi_row * mi.mi_cols + mi_col];
-        let (actual_mode, _) = set_y_mode_and_delta_angle(joint);
+        joint_y_mode = joint;
+        let (actual_mode, _delta_angle) = set_y_mode_and_delta_angle(joint);
         y_mode = actual_mode;
         if is_sb2c_block {
             eprintln!(
@@ -4173,7 +4296,7 @@ fn decode_leaf_block(
     let mut cfl_alpha_v = 0i8;
     let mut cfl_idx = 0u8;
     let mut mhccp_dir = 0u8;
-    if tree_type != TreeType::Luma {
+    if tree_type != TreeType::Luma && chroma_ref_info.is_chroma_ref {
         if is_sb2c_block {
             ec.trace_state(&format!(
                 "[SB2C_BLOCK] before_uv_mode mi=({},{}) {}x{} y_mode={}",
@@ -4184,12 +4307,12 @@ fn decode_leaf_block(
                 y_mode
             ));
         }
-        let cfl_ctx = mi.cfl_ctx(x, y);
+        let cfl_ctx = mi.cfl_ctx(chroma_x, chroma_y);
         let (mode, au, av, ci, md) = read_uv_mode(
             ec,
             y_mode,
-            width,
-            height,
+            chroma_width,
+            chroma_height,
             cfl_ctx,
             cfg.enable_cfl_intra,
             cfg.enable_mhccp,
@@ -4273,7 +4396,7 @@ fn decode_leaf_block(
             width,
             height,
             joint_y_mode,
-            is_cfl,
+            false,
             fsc_mode as u8,
             mrl_index,
             multi_line_mrl,
@@ -4281,21 +4404,32 @@ fn decode_leaf_block(
         if cfg.enable_refmvbank {
             mi.note_non_intrabc_refmv_bank_block(x, y, width, height);
         }
-    } else {
-        mi.fill_cfl(x, y, width, height, is_cfl);
+    }
+    if tree_type != TreeType::Luma && chroma_ref_info.is_chroma_ref {
+        mi.fill_cfl(chroma_x, chroma_y, chroma_width, chroma_height, is_cfl);
     }
 
     let y_tu = if tree_type != TreeType::Chroma {
         decode_block_tus(
-            ec, 0, x, y, width, height, false, false, y_mode, fsc_mode, cfg, cdf, state,
+            ec,
+            0,
+            x,
+            y,
+            width,
+            height,
+            false,
+            false,
+            y_mode,
+            fsc_mode,
+            cfg,
+            cdf,
+            state,
         )
     } else {
         vec![]
     };
 
-    let uv_w = width / 2;
-    let uv_h = height / 2;
-    let (u_tu, v_tu) = if tree_type != TreeType::Luma && uv_w >= 4 && uv_h >= 4 {
+    let (u_tu, v_tu) = if decode_chroma {
         if is_sb2c_block {
             ec.trace_state(&format!(
                 "[SB2C_BLOCK] before_u_coeffs mi=({},{}) uv={}x{}",
@@ -4306,7 +4440,7 @@ fn decode_leaf_block(
             ));
         }
         let u_tu = decode_block_tus(
-            ec, 1, x, y, uv_w, uv_h, false, false, y_mode, 0, cfg, cdf, state,
+            ec, 1, chroma_x, chroma_y, uv_w, uv_h, false, false, uv_mode, 0, cfg, cdf, state,
         );
         let v_u_has = u_tu.iter().any(|t| t.eob > 0);
         if is_sb2c_block {
@@ -4318,7 +4452,7 @@ fn decode_leaf_block(
             ));
         }
         let v_tu = decode_block_tus(
-            ec, 2, x, y, uv_w, uv_h, v_u_has, false, y_mode, 0, cfg, cdf, state,
+            ec, 2, chroma_x, chroma_y, uv_w, uv_h, v_u_has, false, uv_mode, 0, cfg, cdf, state,
         );
         if is_sb2c_block {
             ec.trace_state(&format!(
@@ -4356,6 +4490,11 @@ fn decode_leaf_block(
         y,
         width,
         height,
+        is_chroma_ref: chroma_ref_info.is_chroma_ref,
+        chroma_x,
+        chroma_y,
+        chroma_width,
+        chroma_height,
         tree_type,
         is_intrabc: false,
         morph_pred: false,
@@ -4455,6 +4594,224 @@ fn subblock_offsets(
             ]
         }
     }
+}
+
+fn have_nz_chroma_ref_offset(w: usize, h: usize, partition: PartitionType) -> bool {
+    let w_lt_8 = w < 8;
+    let h_lt_8 = h < 8;
+    let w_lt_16 = w < 16;
+    let h_lt_16 = h < 16;
+    let w_lt_32 = w < 32;
+    let h_lt_32 = h < 32;
+    let w_lt_64 = w < 64;
+    let h_lt_64 = h < 64;
+
+    match partition {
+        PartitionType::None => w_lt_8 || h_lt_8,
+        PartitionType::Horz => w_lt_8 || h_lt_16,
+        PartitionType::Vert => w_lt_16 || h_lt_8,
+        PartitionType::Split => w_lt_16 || h_lt_16,
+        PartitionType::Horz4A | PartitionType::Horz4B => w_lt_8 || h_lt_64,
+        PartitionType::Vert4A | PartitionType::Vert4B => w_lt_64 || h_lt_8,
+        PartitionType::Horz3 => w_lt_16 || h_lt_32,
+        PartitionType::Vert3 => w_lt_32 || h_lt_16,
+    }
+}
+
+fn is_sub_partition_chroma_ref(
+    partition: PartitionType,
+    index: usize,
+    w: usize,
+    h: usize,
+    parent_w: usize,
+    parent_h: usize,
+    offset_started: bool,
+) -> bool {
+    let w_lt_8 = w < 8;
+    let h_lt_8 = h < 8;
+
+    match partition {
+        PartitionType::None => true,
+        PartitionType::Horz | PartitionType::Vert => index == 1,
+        PartitionType::Split => {
+            if offset_started {
+                index == 3
+            } else if w_lt_8 && h_lt_8 {
+                index == 3
+            } else if w_lt_8 {
+                index == 1 || index == 3
+            } else if h_lt_8 {
+                index == 2 || index == 3
+            } else {
+                index == 1
+            }
+        }
+        PartitionType::Horz4A
+        | PartitionType::Horz4B
+        | PartitionType::Vert4A
+        | PartitionType::Vert4B => index == 3,
+        PartitionType::Horz3 => {
+            if parent_w == 8 && parent_h == 32 {
+                index != 1
+            } else {
+                index == 3
+            }
+        }
+        PartitionType::Vert3 => {
+            if parent_w == 32 && parent_h == 8 {
+                index != 1
+            } else {
+                index == 3
+            }
+        }
+    }
+}
+
+fn set_chroma_ref_offset_size(
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    parent_w: usize,
+    parent_h: usize,
+    partition: PartitionType,
+    parent_info: ChromaRefInfo,
+) -> ChromaRefInfo {
+    let mut info = ChromaRefInfo {
+        is_chroma_ref: true,
+        offset_started: true,
+        x_base: parent_info.x_base,
+        y_base: parent_info.y_base,
+        w_base: parent_info.w_base,
+        h_base: parent_info.h_base,
+    };
+
+    match partition {
+        PartitionType::None
+        | PartitionType::Horz
+        | PartitionType::Vert
+        | PartitionType::Horz4A
+        | PartitionType::Horz4B
+        | PartitionType::Vert4A
+        | PartitionType::Vert4B => {}
+        PartitionType::Horz3 => {
+            if parent_w == 8 && parent_h == 32 {
+                if w == 4 && h == 16 {
+                    info.y_base = parent_info.y_base + 8;
+                    info.w_base = 8;
+                    info.h_base = 16;
+                } else {
+                    info = ChromaRefInfo::new(x, y, w, h);
+                }
+            }
+        }
+        PartitionType::Vert3 => {
+            if parent_w == 32 && parent_h == 8 {
+                if w == 16 && h == 4 {
+                    info.x_base = parent_info.x_base + 8;
+                    info.w_base = 16;
+                    info.h_base = 8;
+                } else {
+                    info = ChromaRefInfo::new(x, y, w, h);
+                }
+            }
+        }
+        PartitionType::Split => {
+            if w < 8 && h < 8 {
+            } else if w < 8 {
+                info.w_base = parent_w;
+                info.h_base = h;
+                if y != parent_info.y_base {
+                    info.y_base = parent_info.y_base + h;
+                }
+            } else {
+                info.w_base = w;
+                info.h_base = parent_h;
+                if x != parent_info.x_base {
+                    info.x_base = parent_info.x_base + w;
+                }
+            }
+        }
+    }
+
+    info
+}
+
+fn compute_chroma_ref_info(
+    tree_type: TreeType,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    index: usize,
+    parent_ctx: Option<ChromaRefContext>,
+) -> ChromaRefInfo {
+    let mut info = ChromaRefInfo::new(x, y, w, h);
+
+    match tree_type {
+        TreeType::Luma => {
+            info.is_chroma_ref = false;
+            return info;
+        }
+        TreeType::Chroma => {
+            info.is_chroma_ref = true;
+            return info;
+        }
+        TreeType::Shared => {}
+    }
+
+    let Some(parent_ctx) = parent_ctx else {
+        return info;
+    };
+
+    if parent_ctx.info.is_chroma_ref {
+        if parent_ctx.info.offset_started {
+            info.is_chroma_ref = is_sub_partition_chroma_ref(
+                parent_ctx.partition,
+                index,
+                w,
+                h,
+                parent_ctx.width,
+                parent_ctx.height,
+                true,
+            );
+            info.offset_started = true;
+            info.x_base = parent_ctx.info.x_base;
+            info.y_base = parent_ctx.info.y_base;
+            info.w_base = parent_ctx.info.w_base;
+            info.h_base = parent_ctx.info.h_base;
+        } else if have_nz_chroma_ref_offset(parent_ctx.width, parent_ctx.height, parent_ctx.partition)
+        {
+            info = set_chroma_ref_offset_size(
+                x,
+                y,
+                w,
+                h,
+                parent_ctx.width,
+                parent_ctx.height,
+                parent_ctx.partition,
+                parent_ctx.info,
+            );
+            info.is_chroma_ref = is_sub_partition_chroma_ref(
+                parent_ctx.partition,
+                index,
+                w,
+                h,
+                parent_ctx.width,
+                parent_ctx.height,
+                false,
+            );
+        }
+    } else {
+        info.is_chroma_ref = false;
+        info.offset_started = true;
+        info.x_base = parent_ctx.info.x_base;
+        info.y_base = parent_ctx.info.y_base;
+        info.w_base = parent_ctx.info.w_base;
+        info.h_base = parent_ctx.info.h_base;
+    }
+
+    info
 }
 
 fn bsize_map_val(w: usize, h: usize) -> usize {
@@ -5217,6 +5574,8 @@ fn decode_partition(
     frame_w: usize,
     frame_h: usize,
     tree_type: TreeType,
+    index: usize,
+    parent_chroma_ctx: Option<ChromaRefContext>,
     cfg: &TileDecodeConfig,
     cdf: &mut FrameCdfContext,
     mi: &mut ModeInfoGrid,
@@ -5235,6 +5594,9 @@ fn decode_partition(
         return;
     }
 
+    let chroma_ref_info =
+        compute_chroma_ref_info(tree_type, x, y, w, h, index, parent_chroma_ctx);
+
     if cfg.enable_sdp && w == 64 && h == 64 && tree_type == TreeType::Shared {
         eprintln!("[PART] SDP split at ({},{}) {}x{}", x, y, w, h);
         state.sdp_luma_partition_64x64 = None;
@@ -5250,6 +5612,8 @@ fn decode_partition(
             frame_w,
             frame_h,
             TreeType::Luma,
+            0,
+            None,
             cfg,
             cdf,
             mi,
@@ -5284,6 +5648,8 @@ fn decode_partition(
             frame_w,
             frame_h,
             TreeType::Chroma,
+            0,
+            None,
             cfg,
             cdf,
             mi,
@@ -5332,7 +5698,20 @@ fn decode_partition(
                 ch
             ));
         }
-        decode_leaf_block(ec, x, y, cw, ch, tree_type, cfg, cdf, mi, blocks, state);
+        decode_leaf_block(
+            ec,
+            x,
+            y,
+            cw,
+            ch,
+            tree_type,
+            chroma_ref_info,
+            cfg,
+            cdf,
+            mi,
+            blocks,
+            state,
+        );
         if is_sb2c_leaf {
             ec.trace_state(&format!(
                 "[SB2C_LEAF_DONE] mi=({},{}) {}x{}",
@@ -5377,7 +5756,20 @@ fn decode_partition(
             "[PART] CHROMA_8x8_FORCED_NONE at ({},{}) tree={:?}",
             x, y, tree_type
         );
-        decode_leaf_block(ec, x, y, w, h, tree_type, cfg, cdf, mi, blocks, state);
+        decode_leaf_block(
+            ec,
+            x,
+            y,
+            w,
+            h,
+            tree_type,
+            chroma_ref_info,
+            cfg,
+            cdf,
+            mi,
+            blocks,
+            state,
+        );
         update_partition_context(state, tree_type, mi_col, mi_row, w, h);
         if was_tracking {
             state.sdp_luma_depth -= 1;
@@ -5475,6 +5867,13 @@ fn decode_partition(
         ));
     }
 
+    let child_chroma_ctx = ChromaRefContext {
+        info: chroma_ref_info,
+        partition,
+        width: w,
+        height: h,
+    };
+
     match partition {
         PartitionType::None => {
             if is_sb2_chroma {
@@ -5483,7 +5882,20 @@ fn decode_partition(
             if is_sb3_luma {
                 ec.trace_state(&format!("[SB3L_LEAF] mi=({},{}) {}x{}", y / 4, x / 4, w, h));
             }
-            decode_leaf_block(ec, x, y, w, h, tree_type, cfg, cdf, mi, blocks, state);
+            decode_leaf_block(
+                ec,
+                x,
+                y,
+                w,
+                h,
+                tree_type,
+                chroma_ref_info,
+                cfg,
+                cdf,
+                mi,
+                blocks,
+                state,
+            );
             if is_sb2_chroma {
                 ec.trace_state(&format!(
                     "[SB2C_LEAF_DONE] mi=({},{}) {}x{}",
@@ -5508,7 +5920,21 @@ fn decode_partition(
             let hw = w / 2;
             let hh = h / 2;
             decode_partition(
-                ec, x, y, hw, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state,
+                ec,
+                x,
+                y,
+                hw,
+                hh,
+                frame_w,
+                frame_h,
+                tree_type,
+                0,
+                Some(child_chroma_ctx),
+                cfg,
+                cdf,
+                mi,
+                blocks,
+                state,
             );
             decode_partition(
                 ec,
@@ -5519,6 +5945,8 @@ fn decode_partition(
                 frame_w,
                 frame_h,
                 tree_type,
+                1,
+                Some(child_chroma_ctx),
                 cfg,
                 cdf,
                 mi,
@@ -5534,6 +5962,8 @@ fn decode_partition(
                 frame_w,
                 frame_h,
                 tree_type,
+                2,
+                Some(child_chroma_ctx),
                 cfg,
                 cdf,
                 mi,
@@ -5549,6 +5979,8 @@ fn decode_partition(
                 frame_w,
                 frame_h,
                 tree_type,
+                3,
+                Some(child_chroma_ctx),
                 cfg,
                 cdf,
                 mi,
@@ -5559,7 +5991,21 @@ fn decode_partition(
         PartitionType::Horz => {
             let hh = h / 2;
             decode_partition(
-                ec, x, y, w, hh, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state,
+                ec,
+                x,
+                y,
+                w,
+                hh,
+                frame_w,
+                frame_h,
+                tree_type,
+                0,
+                Some(child_chroma_ctx),
+                cfg,
+                cdf,
+                mi,
+                blocks,
+                state,
             );
             decode_partition(
                 ec,
@@ -5570,6 +6016,8 @@ fn decode_partition(
                 frame_w,
                 frame_h,
                 tree_type,
+                1,
+                Some(child_chroma_ctx),
                 cfg,
                 cdf,
                 mi,
@@ -5580,7 +6028,21 @@ fn decode_partition(
         PartitionType::Vert => {
             let hw = w / 2;
             decode_partition(
-                ec, x, y, hw, h, frame_w, frame_h, tree_type, cfg, cdf, mi, blocks, state,
+                ec,
+                x,
+                y,
+                hw,
+                h,
+                frame_w,
+                frame_h,
+                tree_type,
+                0,
+                Some(child_chroma_ctx),
+                cfg,
+                cdf,
+                mi,
+                blocks,
+                state,
             );
             decode_partition(
                 ec,
@@ -5591,6 +6053,8 @@ fn decode_partition(
                 frame_w,
                 frame_h,
                 tree_type,
+                1,
+                Some(child_chroma_ctx),
                 cfg,
                 cdf,
                 mi,
@@ -5600,7 +6064,7 @@ fn decode_partition(
         }
         _ => {
             let subs = subblock_offsets(partition, w, h);
-            for (dx, dy, sw, sh) in subs {
+            for (child_index, (dx, dy, sw, sh)) in subs.into_iter().enumerate() {
                 if sw > 0 && sh > 0 {
                     decode_partition(
                         ec,
@@ -5611,6 +6075,8 @@ fn decode_partition(
                         frame_w,
                         frame_h,
                         tree_type,
+                        child_index,
+                        Some(child_chroma_ctx),
                         cfg,
                         cdf,
                         mi,
@@ -5977,6 +6443,8 @@ pub fn decode_tile_data_partitioned_cfg(
                 width,
                 height,
                 TreeType::Shared,
+                0,
+                None,
                 cfg,
                 &mut cdf,
                 &mut mi,
@@ -6113,5 +6581,78 @@ mod tests {
         assert_eq!(decoded[0].u_levels[0], 30);
         assert_eq!(decoded[0].v_eob, 1);
         assert_eq!(decoded[0].v_levels[0], -20);
+    }
+
+    #[test]
+    fn intrabc_default_ref_bvs_allow_duplicates() {
+        let mut mi = ModeInfoGrid::new(128, 128, 64);
+        mi.fill_intrabc(116, 76, 4, 4, false, false, -32, 0);
+
+        let cands = mi.intrabc_ref_bv_candidates(120, 76, 8, 4, false, 3);
+
+        assert_eq!(cands, vec![(-32, 0), (-512, 0), (0, -2560), (-32, 0)]);
+    }
+
+    #[test]
+    fn chroma_tx_type_tracks_uv_mode() {
+        assert_eq!(get_chroma_tx_type(TxSize::Tx8x8, 1, false, 0), ADST_DCT);
+        assert_eq!(get_chroma_tx_type(TxSize::Tx8x8, 2, false, 0), DCT_ADST);
+        assert_eq!(get_chroma_tx_type(TxSize::Tx8x8, 13, false, 0), DCT_DCT);
+    }
+
+    #[test]
+    fn chroma_tx_type_respects_rect_constraints() {
+        assert_eq!(get_chroma_tx_type(TxSize::Tx8x32, 1, false, 0), DCT_DCT);
+        assert_eq!(get_chroma_tx_type(TxSize::Tx32x8, 2, false, 0), DCT_DCT);
+    }
+
+    #[test]
+    fn chroma_tx_type_respects_reduced_tx_set() {
+        assert_eq!(get_chroma_tx_type(TxSize::Tx8x8, 1, false, 2), DCT_DCT);
+    }
+
+    #[test]
+    fn chroma_ref_info_merges_horz_sub8_blocks() {
+        let parent_ctx = ChromaRefContext {
+            info: ChromaRefInfo::new(0, 0, 8, 8),
+            partition: PartitionType::Horz,
+            width: 8,
+            height: 8,
+        };
+
+        let top = compute_chroma_ref_info(TreeType::Shared, 0, 0, 8, 4, 0, Some(parent_ctx));
+        let bottom = compute_chroma_ref_info(TreeType::Shared, 0, 4, 8, 4, 1, Some(parent_ctx));
+
+        assert!(!top.is_chroma_ref);
+        assert!(bottom.is_chroma_ref);
+        assert_eq!((top.x_base, top.y_base, top.w_base, top.h_base), (0, 0, 8, 8));
+        assert_eq!(
+            (bottom.x_base, bottom.y_base, bottom.w_base, bottom.h_base),
+            (0, 0, 8, 8)
+        );
+    }
+
+    #[test]
+    fn chroma_ref_info_tracks_horz3_special_middle_pair() {
+        let parent_ctx = ChromaRefContext {
+            info: ChromaRefInfo::new(0, 0, 8, 32),
+            partition: PartitionType::Horz3,
+            width: 8,
+            height: 32,
+        };
+
+        let left_mid = compute_chroma_ref_info(TreeType::Shared, 0, 8, 4, 16, 1, Some(parent_ctx));
+        let right_mid = compute_chroma_ref_info(TreeType::Shared, 4, 8, 4, 16, 2, Some(parent_ctx));
+
+        assert!(!left_mid.is_chroma_ref);
+        assert!(right_mid.is_chroma_ref);
+        assert_eq!(
+            (left_mid.x_base, left_mid.y_base, left_mid.w_base, left_mid.h_base),
+            (0, 8, 8, 16)
+        );
+        assert_eq!(
+            (right_mid.x_base, right_mid.y_base, right_mid.w_base, right_mid.h_base),
+            (0, 8, 8, 16)
+        );
     }
 }
