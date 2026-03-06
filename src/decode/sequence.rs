@@ -1,5 +1,5 @@
-use super::bitreader::BitReader;
 use super::DecodeError;
+use super::bitreader::BitReader;
 
 const SEQ_LEVEL_4_0: u32 = 8;
 
@@ -17,6 +17,7 @@ pub struct SequenceParams {
     pub number_of_bits_for_lt_frame_id: u32,
     pub force_screen_content_tools: u32,
     pub force_integer_mv: u32,
+    pub enable_refmvbank: bool,
     pub allow_frame_max_bvp_drl_bits: bool,
     pub enable_fsc: bool,
     pub enable_idtx_intra: bool,
@@ -69,34 +70,65 @@ fn read_quniform(r: &mut BitReader, n: u32) -> u32 {
 pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeError> {
     let mut r = BitReader::new(payload);
 
-    eprintln!("[SEQ_RAW] payload first 8 bytes: {:02x?}", &payload[..payload.len().min(8)]);
+    eprintln!(
+        "[SEQ_RAW] payload first 8 bytes: {:02x?}",
+        &payload[..payload.len().min(8)]
+    );
     let _seq_header_id = r.read_uvlc();
-    eprintln!("[SEQ_BITS] after seq_header_id={}: bit_pos={}", _seq_header_id, r.total_bits_read());
+    eprintln!(
+        "[SEQ_BITS] after seq_header_id={}: bit_pos={}",
+        _seq_header_id,
+        r.total_bits_read()
+    );
     let profile = r.read_literal(5);
     if profile != 0 {
         return Err(DecodeError::UnsupportedProfile);
     }
 
     let sph = r.read_bit();
-    eprintln!("[SEQ_BITS] after sph={}: bit_pos={}", sph, r.total_bits_read());
+    eprintln!(
+        "[SEQ_BITS] after sph={}: bit_pos={}",
+        sph,
+        r.total_bits_read()
+    );
     if !sph {
         let _seq_lcr_id = r.read_literal(3);
         let _still_picture = r.read_bit();
-        eprintln!("[SEQ_BITS] after lcr_id={} still_pic={}: bit_pos={}", _seq_lcr_id, _still_picture, r.total_bits_read());
+        eprintln!(
+            "[SEQ_BITS] after lcr_id={} still_pic={}: bit_pos={}",
+            _seq_lcr_id,
+            _still_picture,
+            r.total_bits_read()
+        );
     }
 
     let level = r.read_literal(5);
-    eprintln!("[SEQ_BITS] after level={}: bit_pos={}", level, r.total_bits_read());
+    eprintln!(
+        "[SEQ_BITS] after level={}: bit_pos={}",
+        level,
+        r.total_bits_read()
+    );
     if level >= SEQ_LEVEL_4_0 && !sph {
         let _seq_tier = r.read_bit();
-        eprintln!("[SEQ_BITS] after tier={}: bit_pos={}", _seq_tier, r.total_bits_read());
+        eprintln!(
+            "[SEQ_BITS] after tier={}: bit_pos={}",
+            _seq_tier,
+            r.total_bits_read()
+        );
     }
 
     let num_bits_width = r.read_literal(4) + 1;
     let num_bits_height = r.read_literal(4) + 1;
     let width = r.read_literal(num_bits_width as u8) + 1;
     let height = r.read_literal(num_bits_height as u8) + 1;
-    eprintln!("[SEQ_BITS] after dims {}x{} (nbw={} nbh={}): bit_pos={}", width, height, num_bits_width, num_bits_height, r.total_bits_read());
+    eprintln!(
+        "[SEQ_BITS] after dims {}x{} (nbw={} nbh={}): bit_pos={}",
+        width,
+        height,
+        num_bits_width,
+        num_bits_height,
+        r.total_bits_read()
+    );
 
     let conf_win = r.read_bit();
     if conf_win {
@@ -105,12 +137,21 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         let _top = r.read_uvlc();
         let _bottom = r.read_uvlc();
     }
-    eprintln!("[SEQ_BITS] after conf_win={}: bit_pos={}", conf_win, r.total_bits_read());
+    eprintln!(
+        "[SEQ_BITS] after conf_win={}: bit_pos={}",
+        conf_win,
+        r.total_bits_read()
+    );
 
     let chroma_format = r.read_uvlc();
     let monochrome = chroma_format == 1;
     let _bitdepth_idx = r.read_uvlc();
-    eprintln!("[SEQ_BITS] after chroma={} bitdepth_idx={}: bit_pos={}", chroma_format, _bitdepth_idx, r.total_bits_read());
+    eprintln!(
+        "[SEQ_BITS] after chroma={} bitdepth_idx={}: bit_pos={}",
+        chroma_format,
+        _bitdepth_idx,
+        r.total_bits_read()
+    );
 
     if !sph {
         let display_model = r.read_bit();
@@ -127,10 +168,20 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
                 let _low_delay = r.read_bit();
             }
         }
-        eprintln!("[SEQ_BITS] after display/decoder model (disp={} dec={}): bit_pos={}", display_model, decoder_model, r.total_bits_read());
+        eprintln!(
+            "[SEQ_BITS] after display/decoder model (disp={} dec={}): bit_pos={}",
+            display_model,
+            decoder_model,
+            r.total_bits_read()
+        );
         let max_tlayer = r.read_literal(2);
         let max_mlayer = r.read_literal(3);
-        eprintln!("[SEQ_BITS] after tlayer={} mlayer={}: bit_pos={}", max_tlayer, max_mlayer, r.total_bits_read());
+        eprintln!(
+            "[SEQ_BITS] after tlayer={} mlayer={}: bit_pos={}",
+            max_tlayer,
+            max_mlayer,
+            r.total_bits_read()
+        );
         if max_mlayer > 0 {
             let n = ceil_log2(max_mlayer + 1);
             let _mlayer_cnt = r.read_literal(n as u8);
@@ -150,7 +201,10 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
                 parse_tlayer_dependency(&mut r, max_tlayer);
             }
         }
-        eprintln!("[SEQ_BITS] after temporal/multi-layer: bit_pos={}", r.total_bits_read());
+        eprintln!(
+            "[SEQ_BITS] after temporal/multi-layer: bit_pos={}",
+            r.total_bits_read()
+        );
     }
 
     eprintln!("[SEQ_BITS] before sb_size: bit_pos={}", r.total_bits_read());
@@ -161,7 +215,11 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
     } else {
         64
     };
-    eprintln!("[SEQ_BITS] after sb_size={}: bit_pos={}", sb_size, r.total_bits_read());
+    eprintln!(
+        "[SEQ_BITS] after sb_size={}: bit_pos={}",
+        sb_size,
+        r.total_bits_read()
+    );
 
     let enable_sdp = if !monochrome { r.read_bit() } else { false };
     if enable_sdp && !sph {
@@ -195,18 +253,32 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
     }
     let enable_mhccp = r.read_bit();
     let _ibp = r.read_bit();
-    eprintln!("[SEQ_INTRA] enable_intra_dip={} enable_mrls={}", enable_intra_dip, enable_mrls);
+    eprintln!(
+        "[SEQ_INTRA] enable_intra_dip={} enable_mrls={}",
+        enable_intra_dip, enable_mrls
+    );
 
-    let (order_hint_bits, number_of_bits_for_lt_frame_id, allow_frame_max_bvp_drl_bits, enable_intra_bawp) =
-        parse_inter_group(&mut r, sph);
+    let (
+        order_hint_bits,
+        number_of_bits_for_lt_frame_id,
+        enable_refmvbank,
+        allow_frame_max_bvp_drl_bits,
+        enable_intra_bawp,
+    ) = parse_inter_group(&mut r, sph);
 
     let (force_screen_content_tools, force_integer_mv) = parse_scc_group(&mut r, sph);
 
     let tq = parse_tq_group(&mut r, sph, monochrome);
 
-    let (enable_cdef, enable_gdf, enable_restoration, enable_ccso, df_par_bits,
-         enable_cdef_on_skip_txfm, lr_frame_tools_count) =
-        parse_filter_group(&mut r, sph);
+    let (
+        enable_cdef,
+        enable_gdf,
+        enable_restoration,
+        enable_ccso,
+        df_par_bits,
+        enable_cdef_on_skip_txfm,
+        lr_frame_tools_count,
+    ) = parse_filter_group(&mut r, sph);
 
     let _seq_tile_info_present = r.read_bit();
     if _seq_tile_info_present {
@@ -230,6 +302,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         number_of_bits_for_lt_frame_id,
         force_screen_content_tools,
         force_integer_mv,
+        enable_refmvbank,
         allow_frame_max_bvp_drl_bits,
         enable_fsc: tq.enable_fsc,
         enable_idtx_intra: tq.enable_idtx_intra,
@@ -292,7 +365,7 @@ fn parse_sequence_tile_info(r: &mut BitReader) {
     let _uniform = r.read_bit();
 }
 
-fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool, bool) {
+fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool, bool, bool) {
     let mut order_hint_bits = 0u32;
     let mut number_of_bits_for_lt_frame_id = 0u32;
     let mut enable_tip = 0u32;
@@ -306,7 +379,8 @@ fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool, bool) {
         let mode_warp_delta = r.read_bit();
         let mode_warp_extend = r.read_bit();
 
-        let any_motion = mode_interintra || _mode_warp_causal || mode_warp_delta || mode_warp_extend;
+        let any_motion =
+            mode_interintra || _mode_warp_causal || mode_warp_delta || mode_warp_extend;
         if any_motion {
             let _frame_motion_modes_present = r.read_bit();
         }
@@ -323,7 +397,7 @@ fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool, bool) {
         order_hint_bits = r.read_literal(3) + 1;
     }
 
-    let _refmvbank = r.read_bit();
+    let enable_refmvbank = r.read_bit();
 
     let drl_disabled = r.read_bit();
     if !drl_disabled {
@@ -334,11 +408,7 @@ fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool, bool) {
         let _explicit_ref_map = r.read_bit();
 
         let custom_ref = r.read_bit();
-        let _ref_frames = if custom_ref {
-            r.read_literal(4) + 1
-        } else {
-            8
-        };
+        let _ref_frames = if custom_ref { r.read_literal(4) + 1 } else { 8 };
 
         number_of_bits_for_lt_frame_id = r.read_literal(3);
 
@@ -396,7 +466,13 @@ fn parse_inter_group(r: &mut BitReader, sph: bool) -> (u32, u32, bool, bool) {
         let _short_refresh = r.read_bit();
     }
 
-    (order_hint_bits, number_of_bits_for_lt_frame_id, allow_frame_max_bvp_drl_bits, enable_intra_bawp)
+    (
+        order_hint_bits,
+        number_of_bits_for_lt_frame_id,
+        enable_refmvbank,
+        allow_frame_max_bvp_drl_bits,
+        enable_intra_bawp,
+    )
 }
 
 fn parse_scc_group(r: &mut BitReader, sph: bool) -> (u32, u32) {
@@ -405,19 +481,11 @@ fn parse_scc_group(r: &mut BitReader, sph: bool) -> (u32, u32) {
     }
 
     let select = r.read_bit();
-    let force_sct = if select {
-        2
-    } else {
-        r.read_bit() as u32
-    };
+    let force_sct = if select { 2 } else { r.read_bit() as u32 };
 
     let force_imv = if force_sct > 0 {
         let imv_select = r.read_bit();
-        if imv_select {
-            2
-        } else {
-            r.read_bit() as u32
-        }
+        if imv_select { 2 } else { r.read_bit() as u32 }
     } else {
         2
     };
@@ -440,17 +508,9 @@ struct TqGroupParams {
     uv_ac_delta_q_enabled: bool,
 }
 
-fn parse_tq_group(
-    r: &mut BitReader,
-    sph: bool,
-    monochrome: bool,
-) -> TqGroupParams {
+fn parse_tq_group(r: &mut BitReader, sph: bool, monochrome: bool) -> TqGroupParams {
     let enable_fsc = r.read_bit();
-    let enable_idtx_intra = if !enable_fsc {
-        r.read_bit()
-    } else {
-        true
-    };
+    let enable_idtx_intra = if !enable_fsc { r.read_bit() } else { true };
 
     let enable_ist = r.read_bit();
     let _inter_ist = r.read_bit();
@@ -462,7 +522,10 @@ fn parse_tq_group(
 
     let enable_cctx = if !monochrome { r.read_bit() } else { false };
 
-    eprintln!("[SEQ_TQ] enable_fsc={} enable_idtx_intra={} enable_ist={} reduced_tx_part_set={} enable_cctx={}", enable_fsc, enable_idtx_intra, enable_ist, reduced_tx_part_set, enable_cctx);
+    eprintln!(
+        "[SEQ_TQ] enable_fsc={} enable_idtx_intra={} enable_ist={} reduced_tx_part_set={} enable_cctx={}",
+        enable_fsc, enable_idtx_intra, enable_ist, reduced_tx_part_set, enable_cctx
+    );
 
     let tcq_bit = r.read_bit();
     let mut enable_tcq = 0u32;
@@ -524,7 +587,10 @@ fn parse_tq_group(
     }
 }
 
-fn parse_filter_group(r: &mut BitReader, sph: bool) -> (bool, bool, bool, bool, u32, u32, [u32; 3]) {
+fn parse_filter_group(
+    r: &mut BitReader,
+    sph: bool,
+) -> (bool, bool, bool, bool, u32, u32, [u32; 3]) {
     let _loopfilters_across_tiles = r.read_bit();
     let enable_cdef = r.read_bit();
     let enable_gdf = r.read_bit();
@@ -568,7 +634,15 @@ fn parse_filter_group(r: &mut BitReader, sph: bool) -> (bool, bool, bool, bool, 
 
     let df_par_bits = r.read_literal(2) + 2;
 
-    (enable_cdef, enable_gdf, enable_restoration, enable_ccso, df_par_bits, enable_cdef_on_skip_txfm, lr_frame_tools_count)
+    (
+        enable_cdef,
+        enable_gdf,
+        enable_restoration,
+        enable_ccso,
+        df_par_bits,
+        enable_cdef_on_skip_txfm,
+        lr_frame_tools_count,
+    )
 }
 
 #[cfg(test)]

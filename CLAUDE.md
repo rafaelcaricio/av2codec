@@ -50,7 +50,9 @@ See `docs/plans/` for the full phase breakdown.
 ## Key Technical Reference
 
 - AVM reference source: `../av2/` (encoder and decoder reference implementation)
-- avmdec binary: `../avm_build/avmdec`
+- avmdec binary: `/Users/rafaelcaricio/development/avm_build/avmdec`
+- avmdec usage: `/Users/rafaelcaricio/development/avm_build/avmdec -o /tmp/output.y4m <input.obu>`
+- avmdec raw output: `/Users/rafaelcaricio/development/avm_build/avmdec --rawvideo -o /tmp/output.raw <input.obu>`
 - AV2 bitstream format: OBU-based (Open Bitstream Units)
 - Video mode: `single_picture_header_flag = 0`, CLK OBUs with order_hint
 - Profile 0: 8-bit 4:2:0

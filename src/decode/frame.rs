@@ -1,6 +1,6 @@
+use super::DecodeError;
 use super::bitreader::BitReader;
 use super::sequence::SequenceParams;
-use super::DecodeError;
 
 fn tile_log2(blk_size: u32, target: u32) -> u32 {
     let mut k = 0;
@@ -83,7 +83,11 @@ fn read_delta_q(r: &mut BitReader) -> i32 {
     if r.read_bit() {
         let magnitude = r.read_literal(6);
         let sign = r.read_bit();
-        if sign { -(magnitude as i32) } else { magnitude as i32 }
+        if sign {
+            -(magnitude as i32)
+        } else {
+            magnitude as i32
+        }
     } else {
         0
     }
@@ -141,7 +145,11 @@ fn parse_quantization(r: &mut BitReader, seq: &SequenceParams) -> QuantParams {
         }
     }
 
-    QuantParams { base_qindex, u_ac_delta_q, v_ac_delta_q }
+    QuantParams {
+        base_qindex,
+        u_ac_delta_q,
+        v_ac_delta_q,
+    }
 }
 
 fn parse_deblocking(r: &mut BitReader, df_par_bits: u32) {
@@ -268,72 +276,139 @@ fn parse_frame_header_sph0<'a>(
     payload: &'a [u8],
     seq: &SequenceParams,
 ) -> Result<FrameParams<'a>, DecodeError> {
-    eprintln!("[FH0] payload first8={:02x?}", &payload[..payload.len().min(8)]);
+    eprintln!(
+        "[FH0] payload first8={:02x?}",
+        &payload[..payload.len().min(8)]
+    );
     let mut r = BitReader::new(payload);
 
     let _first_tile_group = r.read_bit();
-    eprintln!("[FH0] after first_tile_group={}: pos={}", _first_tile_group, r.total_bits_read());
+    eprintln!(
+        "[FH0] after first_tile_group={}: pos={}",
+        _first_tile_group,
+        r.total_bits_read()
+    );
 
     let mfh_id = r.read_uvlc();
     eprintln!("[FH0] after mfh_id={}: pos={}", mfh_id, r.total_bits_read());
     if mfh_id == 0 {
         let _seq_header_id = r.read_uvlc();
-        eprintln!("[FH0] after seq_header_id={}: pos={}", _seq_header_id, r.total_bits_read());
+        eprintln!(
+            "[FH0] after seq_header_id={}: pos={}",
+            _seq_header_id,
+            r.total_bits_read()
+        );
     }
 
     let _long_term_id = r.read_literal(seq.number_of_bits_for_lt_frame_id as u8);
-    eprintln!("[FH0] after long_term_id={} (bits={}): pos={}", _long_term_id, seq.number_of_bits_for_lt_frame_id, r.total_bits_read());
+    eprintln!(
+        "[FH0] after long_term_id={} (bits={}): pos={}",
+        _long_term_id,
+        seq.number_of_bits_for_lt_frame_id,
+        r.total_bits_read()
+    );
 
     let immediate_output_picture = r.read_bit();
-    eprintln!("[FH0] after immediate_output={}: pos={}", immediate_output_picture, r.total_bits_read());
+    eprintln!(
+        "[FH0] after immediate_output={}: pos={}",
+        immediate_output_picture,
+        r.total_bits_read()
+    );
     if !immediate_output_picture {
         let _implicit_output_picture = r.read_bit();
-        eprintln!("[FH0] after implicit_output={}: pos={}", _implicit_output_picture, r.total_bits_read());
+        eprintln!(
+            "[FH0] after implicit_output={}: pos={}",
+            _implicit_output_picture,
+            r.total_bits_read()
+        );
     }
 
     let frame_size_override_flag = r.read_bit();
-    eprintln!("[FH0] after frame_size_override={}: pos={}", frame_size_override_flag, r.total_bits_read());
+    eprintln!(
+        "[FH0] after frame_size_override={}: pos={}",
+        frame_size_override_flag,
+        r.total_bits_read()
+    );
 
     let order_hint = if seq.order_hint_bits > 0 {
         r.read_literal(seq.order_hint_bits as u8)
     } else {
         0
     };
-    eprintln!("[FH0] after order_hint={} (bits={}): pos={}", order_hint, seq.order_hint_bits, r.total_bits_read());
+    eprintln!(
+        "[FH0] after order_hint={} (bits={}): pos={}",
+        order_hint,
+        seq.order_hint_bits,
+        r.total_bits_read()
+    );
 
     if frame_size_override_flag {
         let _override_width = r.read_literal(16);
         let _override_height = r.read_literal(16);
-        eprintln!("[FH0] after frame_size override {}x{}: pos={}", _override_width, _override_height, r.total_bits_read());
+        eprintln!(
+            "[FH0] after frame_size override {}x{}: pos={}",
+            _override_width,
+            _override_height,
+            r.total_bits_read()
+        );
     }
 
     let allow_screen_content_tools = if seq.force_screen_content_tools == 2 {
         let v = r.read_bit();
-        eprintln!("[FH0] after allow_sct={} (force_sct=2): pos={}", v, r.total_bits_read());
+        eprintln!(
+            "[FH0] after allow_sct={} (force_sct=2): pos={}",
+            v,
+            r.total_bits_read()
+        );
         v
     } else {
-        eprintln!("[FH0] allow_sct derived={} (force_sct={}): pos={}", seq.force_screen_content_tools != 0, seq.force_screen_content_tools, r.total_bits_read());
+        eprintln!(
+            "[FH0] allow_sct derived={} (force_sct={}): pos={}",
+            seq.force_screen_content_tools != 0,
+            seq.force_screen_content_tools,
+            r.total_bits_read()
+        );
         seq.force_screen_content_tools != 0
     };
 
-
     let cur_frame_force_integer_mv = if allow_screen_content_tools && seq.force_integer_mv == 2 {
         let v = r.read_bit();
-        eprintln!("[FH0] after force_int_mv={}: pos={}", v, r.total_bits_read());
+        eprintln!(
+            "[FH0] after force_int_mv={}: pos={}",
+            v,
+            r.total_bits_read()
+        );
         v
     } else {
-        eprintln!("[FH0] force_int_mv derived={} (force_int_mv={}): pos={}", seq.force_integer_mv != 0, seq.force_integer_mv, r.total_bits_read());
+        eprintln!(
+            "[FH0] force_int_mv derived={} (force_int_mv={}): pos={}",
+            seq.force_integer_mv != 0,
+            seq.force_integer_mv,
+            r.total_bits_read()
+        );
         seq.force_integer_mv != 0
     };
 
     let allow_intrabc = r.read_bit();
-    eprintln!("[FH0] after allow_intrabc={}: pos={}", allow_intrabc, r.total_bits_read());
+    eprintln!(
+        "[FH0] after allow_intrabc={}: pos={}",
+        allow_intrabc,
+        r.total_bits_read()
+    );
     let max_bvp_drl_bits = if allow_intrabc {
         let allow_global_intrabc = r.read_bit();
-        eprintln!("[FH0] after allow_global_intrabc={}: pos={}", allow_global_intrabc, r.total_bits_read());
+        eprintln!(
+            "[FH0] after allow_global_intrabc={}: pos={}",
+            allow_global_intrabc,
+            r.total_bits_read()
+        );
         if allow_global_intrabc {
             let _allow_local_intrabc = r.read_bit();
-            eprintln!("[FH0] after allow_local_intrabc={}: pos={}", _allow_local_intrabc, r.total_bits_read());
+            eprintln!(
+                "[FH0] after allow_local_intrabc={}: pos={}",
+                _allow_local_intrabc,
+                r.total_bits_read()
+            );
         }
         if seq.allow_frame_max_bvp_drl_bits {
             let v = read_uniform(&mut r, 4);
@@ -348,7 +423,11 @@ fn parse_frame_header_sph0<'a>(
     eprintln!("[FH0] max_bvp_drl_bits={}", max_bvp_drl_bits);
 
     let disable_cdf_update = r.read_bit();
-    eprintln!("[FH0] after disable_cdf_update={}: pos={}", disable_cdf_update, r.total_bits_read());
+    eprintln!(
+        "[FH0] after disable_cdf_update={}: pos={}",
+        disable_cdf_update,
+        r.total_bits_read()
+    );
 
     parse_tile_info(&mut r, seq.width, seq.height, seq.sb_size);
 
@@ -426,11 +505,7 @@ fn parse_frame_header_sph0<'a>(
         }
     }
 
-    let tx_mode_select = if !coded_lossless {
-        r.read_bit()
-    } else {
-        false
-    };
+    let tx_mode_select = if !coded_lossless { r.read_bit() } else { false };
 
     let reduced_tx_set_used = r.read_literal(2) as u8;
 
@@ -450,8 +525,12 @@ fn parse_frame_header_sph0<'a>(
     } else {
         &[]
     };
-    eprintln!("[FH] header_bits={} tile_data_len={} first8={:02x?}",
-        header_bits, tile_data.len(), &tile_data[..tile_data.len().min(8)]);
+    eprintln!(
+        "[FH] header_bits={} tile_data_len={} first8={:02x?}",
+        header_bits,
+        tile_data.len(),
+        &tile_data[..tile_data.len().min(8)]
+    );
 
     Ok(FrameParams {
         base_qindex,
@@ -484,37 +563,73 @@ fn parse_frame_header_sph1<'a>(
     let mut r = BitReader::new(payload);
 
     let _is_first_tile_group = r.read_bit();
-    eprintln!("[FH_BITS] after is_first_tile_group={}: pos={}", _is_first_tile_group, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after is_first_tile_group={}: pos={}",
+        _is_first_tile_group,
+        r.total_bits_read()
+    );
 
     let mfh_id = r.read_uvlc();
-    eprintln!("[FH_BITS] after mfh_id={}: pos={}", mfh_id, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after mfh_id={}: pos={}",
+        mfh_id,
+        r.total_bits_read()
+    );
     if mfh_id == 0 {
         let _seq_header_id = r.read_uvlc();
-        eprintln!("[FH_BITS] after seq_header_id={}: pos={}", _seq_header_id, r.total_bits_read());
+        eprintln!(
+            "[FH_BITS] after seq_header_id={}: pos={}",
+            _seq_header_id,
+            r.total_bits_read()
+        );
     }
 
     let allow_screen_content_tools = r.read_bit();
-    eprintln!("[FH_BITS] after allow_sct={}: pos={}", allow_screen_content_tools, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after allow_sct={}: pos={}",
+        allow_screen_content_tools,
+        r.total_bits_read()
+    );
     let cur_frame_force_integer_mv = if allow_screen_content_tools {
         let v = r.read_bit();
-        eprintln!("[FH_BITS] after force_int_mv={}: pos={}", v, r.total_bits_read());
+        eprintln!(
+            "[FH_BITS] after force_int_mv={}: pos={}",
+            v,
+            r.total_bits_read()
+        );
         v
     } else {
         false
     };
 
     let allow_intrabc = r.read_bit();
-    eprintln!("[FH_BITS] after allow_intrabc={}: pos={}", allow_intrabc, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after allow_intrabc={}: pos={}",
+        allow_intrabc,
+        r.total_bits_read()
+    );
     let max_bvp_drl_bits = if allow_intrabc {
         let allow_global_intrabc = r.read_bit();
-        eprintln!("[FH_BITS] after allow_global_intrabc={}: pos={}", allow_global_intrabc, r.total_bits_read());
+        eprintln!(
+            "[FH_BITS] after allow_global_intrabc={}: pos={}",
+            allow_global_intrabc,
+            r.total_bits_read()
+        );
         if allow_global_intrabc {
             let _allow_local_intrabc = r.read_bit();
-            eprintln!("[FH_BITS] after allow_local_intrabc={}: pos={}", _allow_local_intrabc, r.total_bits_read());
+            eprintln!(
+                "[FH_BITS] after allow_local_intrabc={}: pos={}",
+                _allow_local_intrabc,
+                r.total_bits_read()
+            );
         }
         if seq.allow_frame_max_bvp_drl_bits {
             let v = read_uniform(&mut r, 4);
-            eprintln!("[FH_BITS] after max_bvp_drl_bits={}: pos={}", v, r.total_bits_read());
+            eprintln!(
+                "[FH_BITS] after max_bvp_drl_bits={}: pos={}",
+                v,
+                r.total_bits_read()
+            );
             v
         } else {
             3
@@ -524,30 +639,61 @@ fn parse_frame_header_sph1<'a>(
     };
 
     let disable_cdf_update = r.read_bit();
-    eprintln!("[FH_BITS] after disable_cdf_update={}: pos={}", disable_cdf_update, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after disable_cdf_update={}: pos={}",
+        disable_cdf_update,
+        r.total_bits_read()
+    );
 
     let pos_before_tile = r.total_bits_read();
     parse_tile_info(&mut r, seq.width, seq.height, seq.sb_size);
-    eprintln!("[FH_BITS] after tile_info: pos={} (consumed {})", r.total_bits_read(), r.total_bits_read() - pos_before_tile);
+    eprintln!(
+        "[FH_BITS] after tile_info: pos={} (consumed {})",
+        r.total_bits_read(),
+        r.total_bits_read() - pos_before_tile
+    );
 
     let pos_before_quant = r.total_bits_read();
     let qparams = parse_quantization(&mut r, seq);
     let base_qindex = qparams.base_qindex;
-    eprintln!("[FH_BITS] after quantization qindex={} u_ac_dq={} v_ac_dq={}: pos={} (consumed {})", base_qindex, qparams.u_ac_delta_q, qparams.v_ac_delta_q, r.total_bits_read(), r.total_bits_read() - pos_before_quant);
+    eprintln!(
+        "[FH_BITS] after quantization qindex={} u_ac_dq={} v_ac_dq={}: pos={} (consumed {})",
+        base_qindex,
+        qparams.u_ac_delta_q,
+        qparams.v_ac_delta_q,
+        r.total_bits_read(),
+        r.total_bits_read() - pos_before_quant
+    );
 
     let _seg_enabled = r.read_bit();
-    eprintln!("[FH_BITS] after seg_enabled={}: pos={}", _seg_enabled, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after seg_enabled={}: pos={}",
+        _seg_enabled,
+        r.total_bits_read()
+    );
     let _using_qmatrix = r.read_bit();
-    eprintln!("[FH_BITS] after using_qmatrix={}: pos={}", _using_qmatrix, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after using_qmatrix={}: pos={}",
+        _using_qmatrix,
+        r.total_bits_read()
+    );
 
     let mut delta_q_present = false;
     let mut delta_q_res = 0u32;
     if base_qindex > 0 {
         delta_q_present = r.read_bit();
-        eprintln!("[FH_BITS] after delta_q_present={}: pos={}", delta_q_present, r.total_bits_read());
+        eprintln!(
+            "[FH_BITS] after delta_q_present={}: pos={}",
+            delta_q_present,
+            r.total_bits_read()
+        );
         if delta_q_present {
             delta_q_res = r.read_literal(2);
-            eprintln!("[FH_BITS] after delta_q_res={}: pos={}", delta_q_res, r.total_bits_read());
+            eprintln!(
+                "[FH_BITS] after delta_q_res={}: pos={}",
+                delta_q_res,
+                r.total_bits_read()
+            );
         }
     }
 
@@ -560,19 +706,33 @@ fn parse_frame_header_sph1<'a>(
     } else {
         seq.enable_tcq == 1
     };
-    eprintln!("[FH_BITS] after tcq_mode={} (enable_tcq={}): pos={}", tcq_mode, seq.enable_tcq, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after tcq_mode={} (enable_tcq={}): pos={}",
+        tcq_mode,
+        seq.enable_tcq,
+        r.total_bits_read()
+    );
 
     let mut allow_parity_hiding = false;
     if !coded_lossless && seq.enable_parity_hiding && !tcq_mode {
         allow_parity_hiding = r.read_bit();
-        eprintln!("[FH_BITS] after parity_hiding={} (enable_ph={}): pos={}", allow_parity_hiding, seq.enable_parity_hiding, r.total_bits_read());
+        eprintln!(
+            "[FH_BITS] after parity_hiding={} (enable_ph={}): pos={}",
+            allow_parity_hiding,
+            seq.enable_parity_hiding,
+            r.total_bits_read()
+        );
     }
 
     let pos_before_deblock = r.total_bits_read();
     if !coded_lossless {
         parse_deblocking(&mut r, seq.df_par_bits);
     }
-    eprintln!("[FH_BITS] after deblocking: pos={} (consumed {})", r.total_bits_read(), r.total_bits_read() - pos_before_deblock);
+    eprintln!(
+        "[FH_BITS] after deblocking: pos={} (consumed {})",
+        r.total_bits_read(),
+        r.total_bits_read() - pos_before_deblock
+    );
 
     let mut gdf_mode = 0u32;
     if !coded_lossless && seq.enable_gdf {
@@ -588,7 +748,11 @@ fn parse_frame_header_sph1<'a>(
         let _gdf_pic_qp_idx = r.read_literal(2);
         let _gdf_pic_scale_idx = r.read_literal(2);
     }
-    eprintln!("[FH_BITS] after gdf (enable={}): pos={}", seq.enable_gdf, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after gdf (enable={}): pos={}",
+        seq.enable_gdf,
+        r.total_bits_read()
+    );
 
     let mut cdef_frame_enable = false;
     let mut nb_cdef_strengths = 0u32;
@@ -596,14 +760,22 @@ fn parse_frame_header_sph1<'a>(
         cdef_frame_enable = true;
         nb_cdef_strengths = parse_cdef_params(&mut r, seq.enable_cdef_on_skip_txfm);
     }
-    eprintln!("[FH_BITS] after cdef (enable={}): pos={}", seq.enable_cdef, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after cdef (enable={}): pos={}",
+        seq.enable_cdef,
+        r.total_bits_read()
+    );
 
     if !coded_lossless && seq.enable_restoration {
         for plane in 0..3 {
             let _restoration_type = read_uniform(&mut r, seq.lr_frame_tools_count[plane]);
         }
     }
-    eprintln!("[FH_BITS] after restoration (enable={}): pos={}", seq.enable_restoration, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after restoration (enable={}): pos={}",
+        seq.enable_restoration,
+        r.total_bits_read()
+    );
 
     let mut ccso_frame_enable = false;
     let mut ccso_enable = [false; 3];
@@ -611,26 +783,47 @@ fn parse_frame_header_sph1<'a>(
         ccso_frame_enable = true;
         ccso_enable = parse_ccso_params(&mut r);
     }
-    eprintln!("[FH_BITS] after ccso (enable={}): pos={}", seq.enable_ccso, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after ccso (enable={}): pos={}",
+        seq.enable_ccso,
+        r.total_bits_read()
+    );
 
-    eprintln!("[FH_BITS] before tx_mode_select: pos={} byte_pos={} bit_pos={} raw_byte=0x{:02x} payload_first4={:02x?}",
-        r.total_bits_read(), r.byte_position(), r.bit_position(),
-        r.peek_current_byte(), &payload[..payload.len().min(4)]);
-    let tx_mode_select = if !coded_lossless {
-        r.read_bit()
-    } else {
-        false
-    };
-    eprintln!("[FH_BITS] after tx_mode_select={}: pos={}", tx_mode_select, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] before tx_mode_select: pos={} byte_pos={} bit_pos={} raw_byte=0x{:02x} payload_first4={:02x?}",
+        r.total_bits_read(),
+        r.byte_position(),
+        r.bit_position(),
+        r.peek_current_byte(),
+        &payload[..payload.len().min(4)]
+    );
+    let tx_mode_select = if !coded_lossless { r.read_bit() } else { false };
+    eprintln!(
+        "[FH_BITS] after tx_mode_select={}: pos={}",
+        tx_mode_select,
+        r.total_bits_read()
+    );
 
     let reduced_tx_set_used = r.read_literal(2) as u8;
-    eprintln!("[FH_BITS] after reduced_tx_set_used={}: pos={}", reduced_tx_set_used, r.total_bits_read());
+    eprintln!(
+        "[FH_BITS] after reduced_tx_set_used={}: pos={}",
+        reduced_tx_set_used,
+        r.total_bits_read()
+    );
 
-    eprintln!("[FH_BITS] film_grain_params_present={}", seq.film_grain_params_present);
+    eprintln!(
+        "[FH_BITS] film_grain_params_present={}",
+        seq.film_grain_params_present
+    );
     if seq.film_grain_params_present {
         let fgm_id = r.read_literal(3);
         let random_seed = r.read_literal(16);
-        eprintln!("[FH_BITS] film_grain: fgm_id={} random_seed={} pos={}", fgm_id, random_seed, r.total_bits_read());
+        eprintln!(
+            "[FH_BITS] film_grain: fgm_id={} random_seed={} pos={}",
+            fgm_id,
+            random_seed,
+            r.total_bits_read()
+        );
     }
 
     let header_bits = r.total_bits_read();
@@ -641,9 +834,17 @@ fn parse_frame_header_sph1<'a>(
     } else {
         &[]
     };
-    eprintln!("[FH_SPH1] header_bits={} tile_data_len={} first8={:02x?} delta_q_present={} ccso_enable={:?} nb_cdef={} gdf_mode={} reduced_tx_set={}",
-        header_bits, tile_data.len(), &tile_data[..tile_data.len().min(8)],
-        delta_q_present, ccso_enable, nb_cdef_strengths, gdf_mode, reduced_tx_set_used);
+    eprintln!(
+        "[FH_SPH1] header_bits={} tile_data_len={} first8={:02x?} delta_q_present={} ccso_enable={:?} nb_cdef={} gdf_mode={} reduced_tx_set={}",
+        header_bits,
+        tile_data.len(),
+        &tile_data[..tile_data.len().min(8)],
+        delta_q_present,
+        ccso_enable,
+        nb_cdef_strengths,
+        gdf_mode,
+        reduced_tx_set_used
+    );
 
     Ok(FrameParams {
         base_qindex,
@@ -672,7 +873,7 @@ fn parse_frame_header_sph1<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitstream::{write_clk_obu_payload, FrameHeaderConfig};
+    use crate::bitstream::{FrameHeaderConfig, write_clk_obu_payload};
 
     fn sph0_seq(width: u32, height: u32) -> SequenceParams {
         SequenceParams {
@@ -688,6 +889,7 @@ mod tests {
             number_of_bits_for_lt_frame_id: 3,
             force_screen_content_tools: 0,
             force_integer_mv: 2,
+            enable_refmvbank: false,
             allow_frame_max_bvp_drl_bits: false,
             enable_fsc: false,
             enable_idtx_intra: false,

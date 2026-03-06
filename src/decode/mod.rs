@@ -54,7 +54,11 @@ impl Decoder {
         let mut frames = Vec::new();
         let mut frame_number = 0u64;
 
-        let sb_aligned = seq.sb_size == 64 && seq.width % 64 == 0 && seq.height % 64 == 0 && seq.width > 0 && seq.height > 0;
+        let sb_aligned = seq.sb_size == 64
+            && seq.width % 64 == 0
+            && seq.height % 64 == 0
+            && seq.width > 0
+            && seq.height > 0;
 
         for raw_obu in &obus[1..] {
             if raw_obu.obu_type != 4 {
@@ -91,6 +95,7 @@ impl Decoder {
                 allow_parity_hiding: fp.allow_parity_hiding,
                 enable_ext_partitions: seq.enable_ext_partitions,
                 enable_uneven_4way_partitions: seq.enable_uneven_4way_partitions,
+                enable_refmvbank: seq.enable_refmvbank,
                 max_bvp_drl_bits: fp.max_bvp_drl_bits,
                 cur_frame_force_integer_mv: fp.cur_frame_force_integer_mv,
                 allow_intrabc_morph_pred: seq.enable_intra_bawp && fp.allow_screen_content_tools,
@@ -99,29 +104,67 @@ impl Decoder {
             let (y_plane, u_plane, v_plane) = if !fp.tile_data.is_empty() {
                 let use_partitioned = !sb_aligned || fp.tx_mode_select || seq.enable_sdp;
                 if !use_partitioned {
-                    let legacy_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let decoded_sbs = tile::decode_tile_data_multi_sb(fp.tile_data, sb_cols, sb_rows, !fp.disable_cdf_update);
-                        reconstruct_frame(&decoded_sbs, sb_cols, sb_rows, seq.width, seq.height, dequant)
-                    }));
+                    let legacy_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let decoded_sbs = tile::decode_tile_data_multi_sb(
+                                fp.tile_data,
+                                sb_cols,
+                                sb_rows,
+                                !fp.disable_cdf_update,
+                            );
+                            reconstruct_frame(
+                                &decoded_sbs,
+                                sb_cols,
+                                sb_rows,
+                                seq.width,
+                                seq.height,
+                                dequant,
+                            )
+                        }));
                     match legacy_result {
                         Ok(planes) => planes,
                         Err(_) => {
-                            let partitioned_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                let blocks = tile::decode_tile_data_partitioned_cfg(
-                                    fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
-                                    fp.base_qindex, &tile_cfg,
-                                );
-                                reconstruct_partitioned_frame(&blocks, seq.width, seq.height, dequant, uv_dequant, fp.tcq_mode, seq.sb_size as usize)
-                            }));
+                            let partitioned_result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    let blocks = tile::decode_tile_data_partitioned_cfg(
+                                        fp.tile_data,
+                                        seq.width as usize,
+                                        seq.height as usize,
+                                        seq.sb_size as usize,
+                                        fp.base_qindex,
+                                        &tile_cfg,
+                                    );
+                                    reconstruct_partitioned_frame(
+                                        &blocks,
+                                        seq.width,
+                                        seq.height,
+                                        dequant,
+                                        uv_dequant,
+                                        fp.tcq_mode,
+                                        seq.sb_size as usize,
+                                    )
+                                }));
                             partitioned_result.unwrap_or_else(|_| gray_frame(seq.width, seq.height))
                         }
                     }
                 } else {
                     let blocks = tile::decode_tile_data_partitioned_cfg(
-                        fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
-                        fp.base_qindex, &tile_cfg,
+                        fp.tile_data,
+                        seq.width as usize,
+                        seq.height as usize,
+                        seq.sb_size as usize,
+                        fp.base_qindex,
+                        &tile_cfg,
                     );
-                    reconstruct_partitioned_frame(&blocks, seq.width, seq.height, dequant, uv_dequant, fp.tcq_mode, seq.sb_size as usize)
+                    reconstruct_partitioned_frame(
+                        &blocks,
+                        seq.width,
+                        seq.height,
+                        dequant,
+                        uv_dequant,
+                        fp.tcq_mode,
+                        seq.sb_size as usize,
+                    )
                 }
             } else {
                 gray_frame(seq.width, seq.height)
@@ -149,18 +192,28 @@ fn round_power_of_two_signed(value: i32, n: u32) -> i32 {
     }
 }
 
-fn predict_dc_rect(
-    recon: &[u8],
-    stride: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-) -> Vec<u8> {
-    predict::predict_intra(recon, stride, x, y, w, h, predict::PredictionMode::DcPred, 0, 0, 0)
+fn predict_dc_rect(recon: &[u8], stride: usize, x: usize, y: usize, w: usize, h: usize) -> Vec<u8> {
+    predict::predict_intra(
+        recon,
+        stride,
+        x,
+        y,
+        w,
+        h,
+        predict::PredictionMode::DcPred,
+        0,
+        0,
+        0,
+    )
 }
 
-fn subsampled_luma_q3(y_plane: &[u8], y_w: usize, y_h: usize, uv_x: usize, uv_y: usize) -> Option<i64> {
+fn subsampled_luma_q3(
+    y_plane: &[u8],
+    y_w: usize,
+    y_h: usize,
+    uv_x: usize,
+    uv_y: usize,
+) -> Option<i64> {
     let lx = uv_x * 2;
     let ly = uv_y * 2;
     if lx + 1 >= y_w || ly + 1 >= y_h {
@@ -558,7 +611,13 @@ fn derive_linear_parameters_alpha(
     alpha as i32
 }
 
-fn derive_linear_parameters_beta(sum_x: i32, sum_y: i32, count: i32, shift: i32, alpha: i32) -> i32 {
+fn derive_linear_parameters_beta(
+    sum_x: i32,
+    sum_y: i32,
+    count: i32,
+    shift: i32,
+    alpha: i32,
+) -> i32 {
     if count == 0 {
         return 0;
     }
@@ -767,8 +826,16 @@ fn reconstruct_partitioned_frame(
                             &tu.levels, tu.eob, dequant, tu.tx_size, tu.tx_type, tcq_mode,
                         );
                         reconstruct_tu(
-                            &mut y_plane, w, tx, ty, tu_w, tu_h,
-                            &y_pred, bw, tu.col_offset, tu.row_offset,
+                            &mut y_plane,
+                            w,
+                            tx,
+                            ty,
+                            tu_w,
+                            tu_h,
+                            &y_pred,
+                            bw,
+                            tu.col_offset,
+                            tu.row_offset,
                             &residuals,
                         );
                     }
@@ -790,15 +857,32 @@ fn reconstruct_partitioned_frame(
                         &tu.levels, tu.eob, dequant, tu.tx_size, tu.tx_type, tcq_mode,
                     );
                     reconstruct_tu(
-                        &mut y_plane, w, tx, ty, tu_w, tu_h,
-                        &y_pred, bw, tu.col_offset, tu.row_offset,
+                        &mut y_plane,
+                        w,
+                        tx,
+                        ty,
+                        tu_w,
+                        tu_h,
+                        &y_pred,
+                        bw,
+                        tu.col_offset,
+                        tu.row_offset,
                         &residuals,
                     );
                 }
             } else {
                 let sb_y = (by / sb_size) * sb_size;
                 let y_pred = predict::predict_intra(
-                    &y_plane, w, bx, by, bw, bh, pred_mode, angle_delta, block.mrl_index, sb_y,
+                    &y_plane,
+                    w,
+                    bx,
+                    by,
+                    bw,
+                    bh,
+                    pred_mode,
+                    angle_delta,
+                    block.mrl_index,
+                    sb_y,
                 );
                 for tu in block.y_tu.iter() {
                     let tu_w = tu.tx_size.width();
@@ -809,8 +893,16 @@ fn reconstruct_partitioned_frame(
                         &tu.levels, tu.eob, dequant, tu.tx_size, tu.tx_type, tcq_mode,
                     );
                     reconstruct_tu(
-                        &mut y_plane, w, tx, ty, tu_w, tu_h,
-                        &y_pred, bw, tu.col_offset, tu.row_offset,
+                        &mut y_plane,
+                        w,
+                        tx,
+                        ty,
+                        tu_w,
+                        tu_h,
+                        &y_pred,
+                        bw,
+                        tu.col_offset,
+                        tu.row_offset,
                         &residuals,
                     );
                 }
@@ -846,26 +938,84 @@ fn reconstruct_partitioned_frame(
             } else if block.uv_mode == 13 {
                 if block.cfl_idx == 2 {
                     let u_params = derive_mhccp_params_neighbors(
-                        &y_plane, w, h, &u_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh, block.mhccp_dir,
+                        &y_plane,
+                        w,
+                        h,
+                        &u_plane,
+                        uv_w,
+                        uv_h,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        block.mhccp_dir,
                     )
                     .unwrap_or([0.0, 0.0, 1.0]);
                     let v_params = derive_mhccp_params_neighbors(
-                        &y_plane, w, h, &v_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh, block.mhccp_dir,
+                        &y_plane,
+                        w,
+                        h,
+                        &v_plane,
+                        uv_w,
+                        uv_h,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        block.mhccp_dir,
                     )
                     .unwrap_or([0.0, 0.0, 1.0]);
                     let u_pred = mhccp_predict_block(
-                        &y_plane, w, h, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh, block.mhccp_dir, u_params,
+                        &y_plane,
+                        w,
+                        h,
+                        uv_w,
+                        uv_h,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        block.mhccp_dir,
+                        u_params,
                     );
                     let v_pred = mhccp_predict_block(
-                        &y_plane, w, h, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh, block.mhccp_dir, v_params,
+                        &y_plane,
+                        w,
+                        h,
+                        uv_w,
+                        uv_h,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        block.mhccp_dir,
+                        v_params,
                     );
                     (u_pred, v_pred)
                 } else {
                     let u_dc_pred = predict::predict_intra(
-                        &u_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh, predict::PredictionMode::DcPred, 0, 0, 0,
+                        &u_plane,
+                        uv_w,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        predict::PredictionMode::DcPred,
+                        0,
+                        0,
+                        0,
                     );
                     let v_dc_pred = predict::predict_intra(
-                        &v_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh, predict::PredictionMode::DcPred, 0, 0, 0,
+                        &v_plane,
+                        uv_w,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        predict::PredictionMode::DcPred,
+                        0,
+                        0,
+                        0,
                     );
 
                     let mut recon_q3 = vec![0i16; uv_bw * uv_bh];
@@ -881,9 +1031,8 @@ fn reconstruct_partitioned_frame(
                         }
                     }
 
-                    let avg_q3 = cfl_neighbor_avg_q3(
-                        &y_plane, w, h, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh,
-                    );
+                    let avg_q3 =
+                        cfl_neighbor_avg_q3(&y_plane, w, h, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh);
 
                     let (alpha_u_q3, alpha_v_q3) = if block.cfl_idx == 0 {
                         (block.cfl_alpha_u as i32 * 32, block.cfl_alpha_v as i32 * 32)
@@ -917,16 +1066,35 @@ fn reconstruct_partitioned_frame(
             } else {
                 let uv_pred_mode = predict::PredictionMode::from_u8(block.uv_mode);
                 let (_, y_angle_delta) = predict::decode_prediction_mode(block.joint_y_mode);
-                let uv_angle_delta = if block.uv_mode == block.y_mode && (1..=8).contains(&block.uv_mode) {
-                    y_angle_delta
-                } else {
-                    0
-                };
+                let uv_angle_delta =
+                    if block.uv_mode == block.y_mode && (1..=8).contains(&block.uv_mode) {
+                        y_angle_delta
+                    } else {
+                        0
+                    };
                 let u_p = predict::predict_intra(
-                    &u_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh, uv_pred_mode, uv_angle_delta, 0, 0,
+                    &u_plane,
+                    uv_w,
+                    uv_bx,
+                    uv_by,
+                    uv_bw,
+                    uv_bh,
+                    uv_pred_mode,
+                    uv_angle_delta,
+                    0,
+                    0,
                 );
                 let v_p = predict::predict_intra(
-                    &v_plane, uv_w, uv_bx, uv_by, uv_bw, uv_bh, uv_pred_mode, uv_angle_delta, 0, 0,
+                    &v_plane,
+                    uv_w,
+                    uv_bx,
+                    uv_by,
+                    uv_bw,
+                    uv_bh,
+                    uv_pred_mode,
+                    uv_angle_delta,
+                    0,
+                    0,
                 );
                 (u_p, v_p)
             };
@@ -945,31 +1113,61 @@ fn reconstruct_partitioned_frame(
                     let v_tu = &block.v_tu[i];
 
                     let mut u_dq = transform::dequantize_only(
-                        &u_tu.levels, u_tu.eob, uv_dequant, u_tu.tx_size, u_tu.tx_type, tcq_mode,
+                        &u_tu.levels,
+                        u_tu.eob,
+                        uv_dequant,
+                        u_tu.tx_size,
+                        u_tu.tx_type,
+                        tcq_mode,
                     );
                     let mut v_dq = transform::dequantize_only(
-                        &v_tu.levels, v_tu.eob, uv_dequant, v_tu.tx_size, v_tu.tx_type, tcq_mode,
+                        &v_tu.levels,
+                        v_tu.eob,
+                        uv_dequant,
+                        v_tu.tx_size,
+                        v_tu.tx_type,
+                        tcq_mode,
                     );
 
                     if u_tu.cctx_type != 0 {
                         transform::inverse_cctx(&mut u_dq, &mut v_dq, u_tu.cctx_type);
                     }
 
-                    let u_res = transform::inverse_transform_only(&u_dq, u_tu.tx_size, u_tu.tx_type);
-                    let v_res = transform::inverse_transform_only(&v_dq, v_tu.tx_size, v_tu.tx_type);
+                    let u_res =
+                        transform::inverse_transform_only(&u_dq, u_tu.tx_size, u_tu.tx_type);
+                    let v_res =
+                        transform::inverse_transform_only(&v_dq, v_tu.tx_size, v_tu.tx_type);
 
                     let u_tu_w = u_tu.tx_size.width();
                     let u_tu_h = u_tu.tx_size.height();
                     reconstruct_tu(
-                        &mut u_plane, uv_w, uv_bx + u_tu.col_offset, uv_by + u_tu.row_offset,
-                        u_tu_w, u_tu_h, &u_pred, uv_bw, u_tu.col_offset, u_tu.row_offset, &u_res,
+                        &mut u_plane,
+                        uv_w,
+                        uv_bx + u_tu.col_offset,
+                        uv_by + u_tu.row_offset,
+                        u_tu_w,
+                        u_tu_h,
+                        &u_pred,
+                        uv_bw,
+                        u_tu.col_offset,
+                        u_tu.row_offset,
+                        &u_res,
                     );
 
                     let v_tu_w = v_tu.tx_size.width();
                     let v_tu_h = v_tu.tx_size.height();
                     reconstruct_tu(
-                        &mut v_plane, uv_w, uv_bx + v_tu.col_offset, uv_by + v_tu.row_offset,
-                        v_tu_w, v_tu_h, &v_pred, uv_bw, v_tu.col_offset, v_tu.row_offset, &v_res,
+                        &mut v_plane,
+                        uv_w,
+                        uv_bx + v_tu.col_offset,
+                        uv_by + v_tu.row_offset,
+                        v_tu_w,
+                        v_tu_h,
+                        &v_pred,
+                        uv_bw,
+                        v_tu.col_offset,
+                        v_tu.row_offset,
+                        &v_res,
                     );
                 }
             }
@@ -1012,23 +1210,50 @@ fn reconstruct_frame(
             let y_x = sb_col * 64;
             let y_y = sb_row * 64;
             let y_mode = crate::encode::IntraMode::from_index(sb.y_mode);
-            let y_pred_block = crate::encode::predict_intra_block(&y_plane, w, y_x, y_y, 64, y_mode);
+            let y_pred_block =
+                crate::encode::predict_intra_block(&y_plane, w, y_x, y_y, 64, y_mode);
             let y_residuals =
                 transform::dequantize_and_inverse(&sb.y_levels, sb.y_eob, dequant, 2, true);
-            crate::encode::reconstruct_block(&mut y_plane, w, y_x, y_y, 64, &y_pred_block, &y_residuals);
+            crate::encode::reconstruct_block(
+                &mut y_plane,
+                w,
+                y_x,
+                y_y,
+                64,
+                &y_pred_block,
+                &y_residuals,
+            );
 
             let uv_x = sb_col * 32;
             let uv_y = sb_row * 32;
             let uv_mode = crate::encode::IntraMode::from_index(sb.uv_mode);
-            let u_pred_block = crate::encode::predict_intra_block(&u_plane, uv_w, uv_x, uv_y, 32, uv_mode);
+            let u_pred_block =
+                crate::encode::predict_intra_block(&u_plane, uv_w, uv_x, uv_y, 32, uv_mode);
             let u_residuals =
                 transform::dequantize_and_inverse(&sb.u_levels, sb.u_eob, dequant, 1, false);
-            crate::encode::reconstruct_block(&mut u_plane, uv_w, uv_x, uv_y, 32, &u_pred_block, &u_residuals);
+            crate::encode::reconstruct_block(
+                &mut u_plane,
+                uv_w,
+                uv_x,
+                uv_y,
+                32,
+                &u_pred_block,
+                &u_residuals,
+            );
 
-            let v_pred_block = crate::encode::predict_intra_block(&v_plane, uv_w, uv_x, uv_y, 32, uv_mode);
+            let v_pred_block =
+                crate::encode::predict_intra_block(&v_plane, uv_w, uv_x, uv_y, 32, uv_mode);
             let v_residuals =
                 transform::dequantize_and_inverse(&sb.v_levels, sb.v_eob, dequant, 1, false);
-            crate::encode::reconstruct_block(&mut v_plane, uv_w, uv_x, uv_y, 32, &v_pred_block, &v_residuals);
+            crate::encode::reconstruct_block(
+                &mut v_plane,
+                uv_w,
+                uv_x,
+                uv_y,
+                32,
+                &v_pred_block,
+                &v_residuals,
+            );
         }
     }
 
@@ -1232,7 +1457,11 @@ mod tests {
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         for &p in &frames[0].y {
-            assert!((p as i32 - 200).abs() <= 1, "Y pixel = {}, expected ~200", p);
+            assert!(
+                (p as i32 - 200).abs() <= 1,
+                "Y pixel = {}, expected ~200",
+                p
+            );
         }
     }
 
@@ -1247,7 +1476,11 @@ mod tests {
         assert_eq!(frames[0].width, 128);
         assert_eq!(frames[0].height, 128);
         for &p in &frames[0].y {
-            assert!((p as i32 - 160).abs() <= 1, "Y pixel = {}, expected ~160", p);
+            assert!(
+                (p as i32 - 160).abs() <= 1,
+                "Y pixel = {}, expected ~160",
+                p
+            );
         }
     }
 
@@ -1312,20 +1545,26 @@ mod tests {
             enable_ext_partitions: seq.enable_ext_partitions,
             enable_uneven_4way_partitions: seq.enable_uneven_4way_partitions,
             enable_mhccp: seq.enable_mhccp,
+            enable_refmvbank: seq.enable_refmvbank,
             max_bvp_drl_bits: fp.max_bvp_drl_bits,
             cur_frame_force_integer_mv: fp.cur_frame_force_integer_mv,
             allow_intrabc_morph_pred: seq.enable_intra_bawp && fp.allow_screen_content_tools,
         };
 
         let blocks = tile::decode_tile_data_partitioned_cfg(
-            fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
-            fp.base_qindex, &tile_cfg,
+            fp.tile_data,
+            seq.width as usize,
+            seq.height as usize,
+            seq.sb_size as usize,
+            fp.base_qindex,
+            &tile_cfg,
         );
 
         for (i, block) in blocks.iter().enumerate() {
-            eprintln!("Block {}: ({},{}) {}x{} y_mode={} uv_mode={}",
-                i, block.x, block.y, block.width, block.height,
-                block.y_mode, block.uv_mode);
+            eprintln!(
+                "Block {}: ({},{}) {}x{} y_mode={} uv_mode={}",
+                i, block.x, block.y, block.width, block.height, block.y_mode, block.uv_mode
+            );
         }
 
         assert!(!blocks.is_empty(), "Should decode at least one block");
@@ -1362,20 +1601,31 @@ mod tests {
             enable_ext_partitions: seq.enable_ext_partitions,
             enable_uneven_4way_partitions: seq.enable_uneven_4way_partitions,
             enable_mhccp: seq.enable_mhccp,
+            enable_refmvbank: seq.enable_refmvbank,
             max_bvp_drl_bits: fp.max_bvp_drl_bits,
             cur_frame_force_integer_mv: fp.cur_frame_force_integer_mv,
             allow_intrabc_morph_pred: seq.enable_intra_bawp && fp.allow_screen_content_tools,
         };
 
         let blocks = tile::decode_tile_data_partitioned_cfg(
-            fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
-            fp.base_qindex, &tile_cfg,
+            fp.tile_data,
+            seq.width as usize,
+            seq.height as usize,
+            seq.sb_size as usize,
+            fp.base_qindex,
+            &tile_cfg,
         );
         let uv_dequant = crate::encode::ac_qlookup(
             (fp.base_qindex as i32 + fp.u_ac_delta_q).clamp(0, 255) as u8,
         );
         let (y_plane, u_plane, v_plane) = reconstruct_partitioned_frame(
-            &blocks, seq.width, seq.height, dequant, uv_dequant, fp.tcq_mode, seq.sb_size as usize,
+            &blocks,
+            seq.width,
+            seq.height,
+            dequant,
+            uv_dequant,
+            fp.tcq_mode,
+            seq.sb_size as usize,
         );
 
         let w = seq.width as usize;
@@ -1390,24 +1640,53 @@ mod tests {
         let ref_y = &ref_y4m[header_len..header_len + w * h];
         let ref_u = &ref_y4m[header_len + w * h..header_len + w * h + w / 2 * h / 2];
 
-        let y_mse: f64 = y_plane.iter().zip(ref_y.iter())
+        let y_mse: f64 = y_plane
+            .iter()
+            .zip(ref_y.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w * h) as f64;
-        let y_psnr = if y_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / y_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w * h) as f64;
+        let y_psnr = if y_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / y_mse).log10()
+        } else {
+            100.0
+        };
 
-        let u_mse: f64 = u_plane.iter().zip(ref_u.iter())
+        let u_mse: f64 = u_plane
+            .iter()
+            .zip(ref_u.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w / 2 * h / 2) as f64;
-        let u_psnr = if u_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / u_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w / 2 * h / 2) as f64;
+        let u_psnr = if u_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / u_mse).log10()
+        } else {
+            100.0
+        };
 
-        let ref_v = &ref_y4m[header_len + w * h + w / 2 * h / 2..header_len + w * h + 2 * (w / 2 * h / 2)];
-        let v_mse: f64 = v_plane.iter().zip(ref_v.iter())
+        let ref_v =
+            &ref_y4m[header_len + w * h + w / 2 * h / 2..header_len + w * h + 2 * (w / 2 * h / 2)];
+        let v_mse: f64 = v_plane
+            .iter()
+            .zip(ref_v.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w / 2 * h / 2) as f64;
-        let v_psnr = if v_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / v_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w / 2 * h / 2) as f64;
+        let v_psnr = if v_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / v_mse).log10()
+        } else {
+            100.0
+        };
 
-        eprintln!("PSNR: Y={:.2} dB, U={:.2} dB, V={:.2} dB", y_psnr, u_psnr, v_psnr);
-        assert!(y_psnr >= 40.0, "Y PSNR={:.2} dB, expected >= 40 dB (entropy sync verified, reconstruction pending)", y_psnr);
+        eprintln!(
+            "PSNR: Y={:.2} dB, U={:.2} dB, V={:.2} dB",
+            y_psnr, u_psnr, v_psnr
+        );
+        assert!(
+            y_psnr >= 40.0,
+            "Y PSNR={:.2} dB, expected >= 40 dB (entropy sync verified, reconstruction pending)",
+            y_psnr
+        );
         assert!(u_psnr >= 40.0, "U PSNR={:.2} dB, expected >= 40 dB", u_psnr);
         assert!(v_psnr >= 40.0, "V PSNR={:.2} dB, expected >= 40 dB", v_psnr);
     }
@@ -1420,23 +1699,49 @@ mod tests {
         assert_eq!(seq.width, 128);
         assert_eq!(seq.height, 128);
 
-        eprintln!("SEQ: sph={} sb_size={} enable_sdp={} enable_cfl={} oh_bits={} lt_id_bits={} force_sct={} force_imv={} bvp_drl={} tcq={} ph={} sep_uv={} eq_dc={} y_dc={} uv_dc={} uv_ac={} cdef={} gdf={} rest={} ccso={} df_par={} fg={}",
-            seq.single_picture_header_flag, seq.sb_size, seq.enable_sdp, seq.enable_cfl_intra,
-            seq.order_hint_bits, seq.number_of_bits_for_lt_frame_id,
-            seq.force_screen_content_tools, seq.force_integer_mv,
+        eprintln!(
+            "SEQ: sph={} sb_size={} enable_sdp={} enable_cfl={} oh_bits={} lt_id_bits={} force_sct={} force_imv={} bvp_drl={} tcq={} ph={} sep_uv={} eq_dc={} y_dc={} uv_dc={} uv_ac={} cdef={} gdf={} rest={} ccso={} df_par={} fg={}",
+            seq.single_picture_header_flag,
+            seq.sb_size,
+            seq.enable_sdp,
+            seq.enable_cfl_intra,
+            seq.order_hint_bits,
+            seq.number_of_bits_for_lt_frame_id,
+            seq.force_screen_content_tools,
+            seq.force_integer_mv,
             seq.allow_frame_max_bvp_drl_bits,
-            seq.enable_tcq, seq.enable_parity_hiding,
-            seq.separate_uv_delta_q, seq.equal_ac_dc_q,
-            seq.y_dc_delta_q_enabled, seq.uv_dc_delta_q_enabled, seq.uv_ac_delta_q_enabled,
-            seq.enable_cdef, seq.enable_gdf, seq.enable_restoration, seq.enable_ccso,
-            seq.df_par_bits, seq.film_grain_params_present);
+            seq.enable_tcq,
+            seq.enable_parity_hiding,
+            seq.separate_uv_delta_q,
+            seq.equal_ac_dc_q,
+            seq.y_dc_delta_q_enabled,
+            seq.uv_dc_delta_q_enabled,
+            seq.uv_ac_delta_q_enabled,
+            seq.enable_cdef,
+            seq.enable_gdf,
+            seq.enable_restoration,
+            seq.enable_ccso,
+            seq.df_par_bits,
+            seq.film_grain_params_present
+        );
 
         let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
         let header_bytes = obus[1].payload.len() - fp.tile_data.len();
-        eprintln!("FRAME: qindex={} disable_cdf={} oh={} header_bytes={} tile_data_len={} tx_mode_select={} tcq_mode={} reduced_tx_set={}",
-            fp.base_qindex, fp.disable_cdf_update, fp.order_hint, header_bytes, fp.tile_data.len(),
-            fp.tx_mode_select, fp.tcq_mode, fp.reduced_tx_set_used);
-        eprintln!("tile_data first 16 bytes: {:02x?}", &fp.tile_data[..fp.tile_data.len().min(16)]);
+        eprintln!(
+            "FRAME: qindex={} disable_cdf={} oh={} header_bytes={} tile_data_len={} tx_mode_select={} tcq_mode={} reduced_tx_set={}",
+            fp.base_qindex,
+            fp.disable_cdf_update,
+            fp.order_hint,
+            header_bytes,
+            fp.tile_data.len(),
+            fp.tx_mode_select,
+            fp.tcq_mode,
+            fp.reduced_tx_set_used
+        );
+        eprintln!(
+            "tile_data first 16 bytes: {:02x?}",
+            &fp.tile_data[..fp.tile_data.len().min(16)]
+        );
         eprintln!("expected tile_data start: f6 ac 00 72 85 91 72 ff (from reference)");
         let dequant = crate::encode::ac_qlookup(fp.base_qindex);
 
@@ -1463,54 +1768,103 @@ mod tests {
             enable_ext_partitions: seq.enable_ext_partitions,
             enable_uneven_4way_partitions: seq.enable_uneven_4way_partitions,
             enable_mhccp: seq.enable_mhccp,
+            enable_refmvbank: seq.enable_refmvbank,
             max_bvp_drl_bits: fp.max_bvp_drl_bits,
             cur_frame_force_integer_mv: fp.cur_frame_force_integer_mv,
             allow_intrabc_morph_pred: seq.enable_intra_bawp && fp.allow_screen_content_tools,
         };
 
         let blocks = tile::decode_tile_data_partitioned_cfg(
-            fp.tile_data, seq.width as usize, seq.height as usize, seq.sb_size as usize,
-            fp.base_qindex, &tile_cfg,
+            fp.tile_data,
+            seq.width as usize,
+            seq.height as usize,
+            seq.sb_size as usize,
+            fp.base_qindex,
+            &tile_cfg,
         );
 
         for (i, block) in blocks.iter().enumerate() {
             let y_eob: u32 = block.y_tu.iter().map(|t| t.eob as u32).sum();
-            eprintln!("Block[{:2}]: ({:3},{:3}) {:3}x{:3} y_mode={:2} y_tu={} y_eob={}",
-                i, block.x, block.y, block.width, block.height,
-                block.y_mode, block.y_tu.len(), y_eob);
+            eprintln!(
+                "Block[{:2}]: ({:3},{:3}) {:3}x{:3} y_mode={:2} y_tu={} y_eob={}",
+                i,
+                block.x,
+                block.y,
+                block.width,
+                block.height,
+                block.y_mode,
+                block.y_tu.len(),
+                y_eob
+            );
             for (ti, tu) in block.y_tu.iter().enumerate() {
                 let residuals = transform::dequantize_and_inverse_tcq(
-                    &tu.levels, tu.eob, dequant, tu.tx_size, tu.tx_type, fp.tcq_mode,
+                    &tu.levels,
+                    tu.eob,
+                    dequant,
+                    tu.tx_size,
+                    tu.tx_type,
+                    fp.tcq_mode,
                 );
                 let nonzero: usize = residuals.iter().filter(|&&v| v != 0).count();
-                let dc = if !tu.levels.is_empty() { tu.levels[0] } else { 0 };
-                eprintln!("  TU[{}]: tx={:?} eob={} dc_level={} nonzero_residuals={} first_res=[{}, {}, {}, {}]",
-                    ti, tu.tx_size, tu.eob, dc, nonzero,
-                    residuals[0], residuals[1], residuals[2], residuals[3]);
+                let dc = if !tu.levels.is_empty() {
+                    tu.levels[0]
+                } else {
+                    0
+                };
+                eprintln!(
+                    "  TU[{}]: tx={:?} eob={} dc_level={} nonzero_residuals={} first_res=[{}, {}, {}, {}]",
+                    ti,
+                    tu.tx_size,
+                    tu.eob,
+                    dc,
+                    nonzero,
+                    residuals[0],
+                    residuals[1],
+                    residuals[2],
+                    residuals[3]
+                );
             }
         }
 
-        let luma_pixels: usize = blocks.iter()
+        let luma_pixels: usize = blocks
+            .iter()
             .filter(|b| !b.y_tu.is_empty())
             .map(|b| b.width * b.height)
             .sum();
-        let chroma_blocks: usize = blocks.iter()
-            .filter(|b| b.y_tu.is_empty())
-            .count();
-        eprintln!("luma_pixels={} chroma_blocks={} total_blocks={}", luma_pixels, chroma_blocks, blocks.len());
-        assert!(luma_pixels <= 128 * 128, "luma coverage exceeds frame: {}", luma_pixels);
+        let chroma_blocks: usize = blocks.iter().filter(|b| b.y_tu.is_empty()).count();
+        eprintln!(
+            "luma_pixels={} chroma_blocks={} total_blocks={}",
+            luma_pixels,
+            chroma_blocks,
+            blocks.len()
+        );
+        assert!(
+            luma_pixels <= 128 * 128,
+            "luma coverage exceeds frame: {}",
+            luma_pixels
+        );
 
         let uv_dequant_128 = crate::encode::ac_qlookup(
             (fp.base_qindex as i32 + fp.u_ac_delta_q).clamp(0, 255) as u8,
         );
         let (y_plane, _u_plane, _v_plane) = reconstruct_partitioned_frame(
-            &blocks, seq.width, seq.height, dequant, uv_dequant_128, fp.tcq_mode, seq.sb_size as usize,
+            &blocks,
+            seq.width,
+            seq.height,
+            dequant,
+            uv_dequant_128,
+            fp.tcq_mode,
+            seq.sb_size as usize,
         );
 
         let avmdec = "/Users/rafaelcaricio/development/avm_build/avmdec";
         let output = std::process::Command::new(avmdec)
-            .args(["--codec=av2", "-o", "/tmp/avmenc_128x128_q30_ref.y4m",
-                   "tests/fixtures/avmenc_128x128_q30.obu"])
+            .args([
+                "--codec=av2",
+                "-o",
+                "/tmp/avmenc_128x128_q30_ref.y4m",
+                "tests/fixtures/avmenc_128x128_q30.obu",
+            ])
             .output()
             .expect("avmdec not found");
         assert!(output.status.success(), "avmdec failed");
@@ -1521,11 +1875,21 @@ mod tests {
         let y4m_header = format!("YUV4MPEG2 W{} H{} F0:0 Ip C420jpeg\nFRAME\n", w, h);
         let ref_y = &ref_y4m[y4m_header.len()..y4m_header.len() + w * h];
 
-        let y_mse: f64 = y_plane.iter().zip(ref_y.iter())
+        let y_mse: f64 = y_plane
+            .iter()
+            .zip(ref_y.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w * h) as f64;
-        let y_psnr = if y_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / y_mse).log10() } else { 100.0 };
-        eprintln!("Y PSNR={:.2} dB (MSE={:.2}) sb_size={}", y_psnr, y_mse, seq.sb_size);
+            .sum::<f64>()
+            / (w * h) as f64;
+        let y_psnr = if y_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / y_mse).log10()
+        } else {
+            100.0
+        };
+        eprintln!(
+            "Y PSNR={:.2} dB (MSE={:.2}) sb_size={}",
+            y_psnr, y_mse, seq.sb_size
+        );
 
         for (bi, block) in blocks.iter().enumerate() {
             let (bx, by, bw, bh) = (block.x, block.y, block.width, block.height);
@@ -1542,15 +1906,21 @@ mod tests {
             let block_mse = block_sse / block_count as f64;
             let block_psnr = if block_mse > 0.0 {
                 10.0 * (255.0f64 * 255.0 / block_mse).log10()
-            } else { 100.0 };
+            } else {
+                100.0
+            };
 
             if block_psnr < 40.0 {
                 let sample_row = by;
                 let end_col = (bx + 8).min(bx + bw).min(w);
-                let our_samples: Vec<u8> = (bx..end_col).map(|c| y_plane[sample_row * w + c]).collect();
-                let ref_samples: Vec<u8> = (bx..end_col).map(|c| ref_y[sample_row * w + c]).collect();
-                eprintln!("  BAD Block[{:2}] ({},{}) {}x{}: PSNR={:.1} ours={:?} ref={:?}",
-                    bi, bx, by, bw, bh, block_psnr, our_samples, ref_samples);
+                let our_samples: Vec<u8> =
+                    (bx..end_col).map(|c| y_plane[sample_row * w + c]).collect();
+                let ref_samples: Vec<u8> =
+                    (bx..end_col).map(|c| ref_y[sample_row * w + c]).collect();
+                eprintln!(
+                    "  BAD Block[{:2}] ({},{}) {}x{}: PSNR={:.1} ours={:?} ref={:?}",
+                    bi, bx, by, bw, bh, block_psnr, our_samples, ref_samples
+                );
             }
         }
     }
@@ -1575,7 +1945,11 @@ mod tests {
             .args(["--codec=av2", "-o", ref_path, obu_path])
             .output()
             .expect("avmdec not found");
-        assert!(output.status.success(), "avmdec failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "avmdec failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let ref_y4m = std::fs::read(ref_path).unwrap();
         let y4m_header = format!("YUV4MPEG2 W{} H{} F0:0 Ip C420jpeg\nFRAME\n", w, h);
@@ -1584,28 +1958,61 @@ mod tests {
         let ref_u = &ref_y4m[hlen + w * h..hlen + w * h + w / 2 * h / 2];
         let ref_v = &ref_y4m[hlen + w * h + w / 2 * h / 2..hlen + w * h + 2 * (w / 2 * h / 2)];
 
-        let y_mse: f64 = frame.y.iter().zip(ref_y.iter())
+        let y_mse: f64 = frame
+            .y
+            .iter()
+            .zip(ref_y.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w * h) as f64;
-        let y_psnr = if y_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / y_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w * h) as f64;
+        let y_psnr = if y_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / y_mse).log10()
+        } else {
+            100.0
+        };
 
-        let u_mse: f64 = frame.u.iter().zip(ref_u.iter())
+        let u_mse: f64 = frame
+            .u
+            .iter()
+            .zip(ref_u.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w / 2 * h / 2) as f64;
-        let u_psnr = if u_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / u_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w / 2 * h / 2) as f64;
+        let u_psnr = if u_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / u_mse).log10()
+        } else {
+            100.0
+        };
 
-        let v_mse: f64 = frame.v.iter().zip(ref_v.iter())
+        let v_mse: f64 = frame
+            .v
+            .iter()
+            .zip(ref_v.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w / 2 * h / 2) as f64;
-        let v_psnr = if v_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / v_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w / 2 * h / 2) as f64;
+        let v_psnr = if v_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / v_mse).log10()
+        } else {
+            100.0
+        };
 
-        eprintln!("No-filter PSNR: Y={:.2} dB  U={:.2} dB  V={:.2} dB", y_psnr, u_psnr, v_psnr);
+        eprintln!(
+            "No-filter PSNR: Y={:.2} dB  U={:.2} dB  V={:.2} dB",
+            y_psnr, u_psnr, v_psnr
+        );
         for row_y in [0, 8, 16, 32, 48, 64, 80, 96, 112] {
             if row_y < h {
                 let ours: Vec<u8> = (0..16.min(w)).map(|c| frame.y[row_y * w + c]).collect();
                 let refs: Vec<u8> = (0..16.min(w)).map(|c| ref_y[row_y * w + c]).collect();
-                let row_mse: f64 = (0..w).map(|c| (frame.y[row_y * w + c] as f64 - ref_y[row_y * w + c] as f64).powi(2)).sum::<f64>() / w as f64;
-                eprintln!("Row {:3}: ours={:?} ref={:?} row_mse={:.1}", row_y, ours, refs, row_mse);
+                let row_mse: f64 = (0..w)
+                    .map(|c| (frame.y[row_y * w + c] as f64 - ref_y[row_y * w + c] as f64).powi(2))
+                    .sum::<f64>()
+                    / w as f64;
+                eprintln!(
+                    "Row {:3}: ours={:?} ref={:?} row_mse={:.1}",
+                    row_y, ours, refs, row_mse
+                );
             }
         }
 
@@ -1613,11 +2020,20 @@ mod tests {
         let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
         let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
         let dequant = crate::encode::ac_qlookup(fp.base_qindex);
-        eprintln!("SEQ: sb_size={} sdp={} cdef={} gdf={} rest={} ccso={} tcq={}",
-            seq.sb_size, seq.enable_sdp, seq.enable_cdef, seq.enable_gdf,
-            seq.enable_restoration, seq.enable_ccso, seq.enable_tcq);
-        eprintln!("FP: qindex={} dequant={} tx_mode_select={} disable_cdf={}",
-            fp.base_qindex, dequant, fp.tx_mode_select, fp.disable_cdf_update);
+        eprintln!(
+            "SEQ: sb_size={} sdp={} cdef={} gdf={} rest={} ccso={} tcq={}",
+            seq.sb_size,
+            seq.enable_sdp,
+            seq.enable_cdef,
+            seq.enable_gdf,
+            seq.enable_restoration,
+            seq.enable_ccso,
+            seq.enable_tcq
+        );
+        eprintln!(
+            "FP: qindex={} dequant={} tx_mode_select={} disable_cdf={}",
+            fp.base_qindex, dequant, fp.tx_mode_select, fp.disable_cdf_update
+        );
 
         let tile_cfg = tile::TileDecodeConfig {
             enable_cfl_intra: seq.enable_cfl_intra,
@@ -1642,26 +2058,57 @@ mod tests {
             enable_ext_partitions: seq.enable_ext_partitions,
             enable_uneven_4way_partitions: seq.enable_uneven_4way_partitions,
             enable_mhccp: seq.enable_mhccp,
+            enable_refmvbank: seq.enable_refmvbank,
             max_bvp_drl_bits: fp.max_bvp_drl_bits,
             cur_frame_force_integer_mv: fp.cur_frame_force_integer_mv,
             allow_intrabc_morph_pred: seq.enable_intra_bawp && fp.allow_screen_content_tools,
         };
         let blocks = tile::decode_tile_data_partitioned_cfg(
-            fp.tile_data, w, h, seq.sb_size as usize, fp.base_qindex, &tile_cfg,
+            fp.tile_data,
+            w,
+            h,
+            seq.sb_size as usize,
+            fp.base_qindex,
+            &tile_cfg,
         );
         for (i, block) in blocks.iter().enumerate().take(15) {
             let y_eob: u32 = block.y_tu.iter().map(|t| t.eob as u32).sum();
-            eprintln!("NF Block[{:2}]: ({:3},{:3}) {:3}x{:3} y_mode={:2} y_tu={} y_eob={}",
-                i, block.x, block.y, block.width, block.height,
-                block.y_mode, block.y_tu.len(), y_eob);
+            eprintln!(
+                "NF Block[{:2}]: ({:3},{:3}) {:3}x{:3} y_mode={:2} y_tu={} y_eob={}",
+                i,
+                block.x,
+                block.y,
+                block.width,
+                block.height,
+                block.y_mode,
+                block.y_tu.len(),
+                y_eob
+            );
             for (ti, tu) in block.y_tu.iter().enumerate() {
                 let residuals = transform::dequantize_and_inverse_tcq(
-                    &tu.levels, tu.eob, dequant, tu.tx_size, tu.tx_type, fp.tcq_mode,
+                    &tu.levels,
+                    tu.eob,
+                    dequant,
+                    tu.tx_size,
+                    tu.tx_type,
+                    fp.tcq_mode,
                 );
-                let dc = if !tu.levels.is_empty() { tu.levels[0] } else { 0 };
-                eprintln!("  TU[{}]: tx={:?} eob={} dc_level={} first_res=[{}, {}, {}, {}]",
-                    ti, tu.tx_size, tu.eob, dc,
-                    residuals[0], residuals[1], residuals[2], residuals[3]);
+                let dc = if !tu.levels.is_empty() {
+                    tu.levels[0]
+                } else {
+                    0
+                };
+                eprintln!(
+                    "  TU[{}]: tx={:?} eob={} dc_level={} first_res=[{}, {}, {}, {}]",
+                    ti,
+                    tu.tx_size,
+                    tu.eob,
+                    dc,
+                    residuals[0],
+                    residuals[1],
+                    residuals[2],
+                    residuals[3]
+                );
             }
         }
     }
@@ -1686,43 +2133,98 @@ mod tests {
             .args(["--codec=av2", "-o", ref_path, obu_path])
             .output()
             .expect("avmdec not found");
-        assert!(output.status.success(), "avmdec failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "avmdec failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let ref_y4m = std::fs::read(ref_path).unwrap();
         let y4m_header = format!("YUV4MPEG2 W{} H{} F0:0 Ip C420jpeg\nFRAME\n", w, h);
         let hlen = y4m_header.len();
         let ref_y = &ref_y4m[hlen..hlen + w * h];
 
-        let y_mse: f64 = frame.y.iter().zip(ref_y.iter())
+        let y_mse: f64 = frame
+            .y
+            .iter()
+            .zip(ref_y.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w * h) as f64;
-        let y_psnr = if y_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / y_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w * h) as f64;
+        let y_psnr = if y_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / y_mse).log10()
+        } else {
+            100.0
+        };
 
         let ref_u = &ref_y4m[hlen + w * h..hlen + w * h + w / 2 * h / 2];
         let ref_v = &ref_y4m[hlen + w * h + w / 2 * h / 2..hlen + w * h + 2 * (w / 2 * h / 2)];
-        let u_mse: f64 = frame.u.iter().zip(ref_u.iter())
+        let u_mse: f64 = frame
+            .u
+            .iter()
+            .zip(ref_u.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w / 2 * h / 2) as f64;
-        let u_psnr = if u_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / u_mse).log10() } else { 100.0 };
-        let v_mse: f64 = frame.v.iter().zip(ref_v.iter())
+            .sum::<f64>()
+            / (w / 2 * h / 2) as f64;
+        let u_psnr = if u_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / u_mse).log10()
+        } else {
+            100.0
+        };
+        let v_mse: f64 = frame
+            .v
+            .iter()
+            .zip(ref_v.iter())
             .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
-            .sum::<f64>() / (w / 2 * h / 2) as f64;
-        let v_psnr = if v_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / v_mse).log10() } else { 100.0 };
+            .sum::<f64>()
+            / (w / 2 * h / 2) as f64;
+        let v_psnr = if v_mse > 0.0 {
+            10.0 * (255.0f64 * 255.0 / v_mse).log10()
+        } else {
+            100.0
+        };
 
         eprintln!("=== OVERALL PSNR ===");
-        eprintln!("NOIBC PSNR: Y={:.2} dB  U={:.2} dB  V={:.2} dB", y_psnr, u_psnr, v_psnr);
-        eprintln!("[ROW63] ours[0..32]={:?}", &frame.y[63*w..63*w+32].iter().map(|&v| v).collect::<Vec<u8>>());
-        eprintln!("[ROW63] ours[32..64]={:?}", &frame.y[63*w+32..63*w+64].iter().map(|&v| v).collect::<Vec<u8>>());
-        eprintln!("[ROW63] ref[0..32]={:?}", &ref_y[63*w..63*w+32].iter().map(|&v| v).collect::<Vec<u8>>());
-        eprintln!("[ROW63] ref[32..64]={:?}", &ref_y[63*w+32..63*w+64].iter().map(|&v| v).collect::<Vec<u8>>());
+        eprintln!(
+            "NOIBC PSNR: Y={:.2} dB  U={:.2} dB  V={:.2} dB",
+            y_psnr, u_psnr, v_psnr
+        );
+        eprintln!(
+            "[ROW63] ours[0..32]={:?}",
+            &frame.y[63 * w..63 * w + 32]
+                .iter()
+                .map(|&v| v)
+                .collect::<Vec<u8>>()
+        );
+        eprintln!(
+            "[ROW63] ours[32..64]={:?}",
+            &frame.y[63 * w + 32..63 * w + 64]
+                .iter()
+                .map(|&v| v)
+                .collect::<Vec<u8>>()
+        );
+        eprintln!(
+            "[ROW63] ref[0..32]={:?}",
+            &ref_y[63 * w..63 * w + 32]
+                .iter()
+                .map(|&v| v)
+                .collect::<Vec<u8>>()
+        );
+        eprintln!(
+            "[ROW63] ref[32..64]={:?}",
+            &ref_y[63 * w + 32..63 * w + 64]
+                .iter()
+                .map(|&v| v)
+                .collect::<Vec<u8>>()
+        );
         eprintln!("Y MSE={:.4}  U MSE={:.4}  V MSE={:.4}", y_mse, u_mse, v_mse);
 
         eprintln!("\n=== PER-SB (64x64 quadrant) Y PSNR ===");
         let sb_regions = [
-            ("Top-Left",     0usize, 0usize, 64usize, 64usize),
-            ("Top-Right",    64,     0,      64,      64),
-            ("Bottom-Left",  0,      64,     64,      64),
-            ("Bottom-Right", 64,     64,     64,      64),
+            ("Top-Left", 0usize, 0usize, 64usize, 64usize),
+            ("Top-Right", 64, 0, 64, 64),
+            ("Bottom-Left", 0, 64, 64, 64),
+            ("Bottom-Right", 64, 64, 64, 64),
         ];
         for (name, sx, sy, sw, sh) in &sb_regions {
             let mut mse_sum = 0.0f64;
@@ -1743,9 +2245,24 @@ mod tests {
                 }
             }
             let sb_mse = mse_sum / count as f64;
-            let sb_psnr = if sb_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / sb_mse).log10() } else { 100.0 };
-            eprintln!("  {} ({},{})-({},{}) : PSNR={:.2} dB  MSE={:.4}  max_err={} at ({},{})",
-                name, sx, sy, sx + sw, sy + sh, sb_psnr, sb_mse, max_err, max_err_pos.0, max_err_pos.1);
+            let sb_psnr = if sb_mse > 0.0 {
+                10.0 * (255.0f64 * 255.0 / sb_mse).log10()
+            } else {
+                100.0
+            };
+            eprintln!(
+                "  {} ({},{})-({},{}) : PSNR={:.2} dB  MSE={:.4}  max_err={} at ({},{})",
+                name,
+                sx,
+                sy,
+                sx + sw,
+                sy + sh,
+                sb_psnr,
+                sb_mse,
+                max_err,
+                max_err_pos.0,
+                max_err_pos.1
+            );
         }
 
         eprintln!("\n=== PER-BLOCK Y ANALYSIS ===");
@@ -1776,12 +2293,18 @@ mod tests {
             enable_ext_partitions: seq.enable_ext_partitions,
             enable_uneven_4way_partitions: seq.enable_uneven_4way_partitions,
             enable_mhccp: seq.enable_mhccp,
+            enable_refmvbank: seq.enable_refmvbank,
             max_bvp_drl_bits: fp.max_bvp_drl_bits,
             cur_frame_force_integer_mv: fp.cur_frame_force_integer_mv,
             allow_intrabc_morph_pred: seq.enable_intra_bawp && fp.allow_screen_content_tools,
         };
         let blocks = tile::decode_tile_data_partitioned_cfg(
-            fp.tile_data, w, h, seq.sb_size as usize, fp.base_qindex, &tile_cfg,
+            fp.tile_data,
+            w,
+            h,
+            seq.sb_size as usize,
+            fp.base_qindex,
+            &tile_cfg,
         );
 
         let mode_name = |joint: u8| -> &str {
@@ -1827,7 +2350,11 @@ mod tests {
                     }
                 }
             }
-            let block_mse = if block_count > 0 { block_mse_sum / block_count as f64 } else { 0.0 };
+            let block_mse = if block_count > 0 {
+                block_mse_sum / block_count as f64
+            } else {
+                0.0
+            };
             if block_mse > 0.0 {
                 error_blocks.push((i, block_mse, block_max_err));
             }
@@ -1835,7 +2362,11 @@ mod tests {
 
         error_blocks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        eprintln!("Total blocks: {}  Blocks with non-zero MSE: {}", blocks.len(), error_blocks.len());
+        eprintln!(
+            "Total blocks: {}  Blocks with non-zero MSE: {}",
+            blocks.len(),
+            error_blocks.len()
+        );
 
         for &(i, block_mse, max_err) in error_blocks.iter() {
             let block = &blocks[i];
@@ -1846,11 +2377,28 @@ mod tests {
             let (mode, angle_delta) = predict::decode_prediction_mode(block.joint_y_mode);
             let y_eob: u32 = block.y_tu.iter().map(|t| t.eob as u32).sum();
             let is_palette = !block.palette_y_map.is_empty();
-            let block_psnr = if block_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / block_mse).log10() } else { 100.0 };
+            let block_psnr = if block_mse > 0.0 {
+                10.0 * (255.0f64 * 255.0 / block_mse).log10()
+            } else {
+                100.0
+            };
 
-            eprintln!("  Block[{:3}] ({:3},{:3}) {:3}x{:3} mode={:<8} delta={:2} palette={} y_tu={} y_eob={:4} | MSE={:.2} PSNR={:.1}dB max_err={}",
-                i, bx, by, bw, bh, mode_name(block.joint_y_mode), angle_delta, is_palette,
-                block.y_tu.len(), y_eob, block_mse, block_psnr, max_err);
+            eprintln!(
+                "  Block[{:3}] ({:3},{:3}) {:3}x{:3} mode={:<8} delta={:2} palette={} y_tu={} y_eob={:4} | MSE={:.2} PSNR={:.1}dB max_err={}",
+                i,
+                bx,
+                by,
+                bw,
+                bh,
+                mode_name(block.joint_y_mode),
+                angle_delta,
+                is_palette,
+                block.y_tu.len(),
+                y_eob,
+                block_mse,
+                block_psnr,
+                max_err
+            );
 
             if block_mse > 10.0 {
                 eprintln!("    Sample pixels (first row of block):");
@@ -1858,7 +2406,9 @@ mod tests {
                 let end_c = (bx + bw).min(w).min(bx + 16);
                 let ours_row: Vec<u8> = (bx..end_c).map(|c| frame.y[r * w + c]).collect();
                 let refs_row: Vec<u8> = (bx..end_c).map(|c| ref_y[r * w + c]).collect();
-                let diffs: Vec<i32> = (bx..end_c).map(|c| frame.y[r * w + c] as i32 - ref_y[r * w + c] as i32).collect();
+                let diffs: Vec<i32> = (bx..end_c)
+                    .map(|c| frame.y[r * w + c] as i32 - ref_y[r * w + c] as i32)
+                    .collect();
                 eprintln!("      ours: {:?}", ours_row);
                 eprintln!("      ref:  {:?}", refs_row);
                 eprintln!("      diff: {:?}", diffs);
@@ -1866,7 +2416,9 @@ mod tests {
                     let r2 = by + 1;
                     let ours_row2: Vec<u8> = (bx..end_c).map(|c| frame.y[r2 * w + c]).collect();
                     let refs_row2: Vec<u8> = (bx..end_c).map(|c| ref_y[r2 * w + c]).collect();
-                    let diffs2: Vec<i32> = (bx..end_c).map(|c| frame.y[r2 * w + c] as i32 - ref_y[r2 * w + c] as i32).collect();
+                    let diffs2: Vec<i32> = (bx..end_c)
+                        .map(|c| frame.y[r2 * w + c] as i32 - ref_y[r2 * w + c] as i32)
+                        .collect();
                     eprintln!("    Row+1:");
                     eprintln!("      ours: {:?}", ours_row2);
                     eprintln!("      ref:  {:?}", refs_row2);
@@ -1878,21 +2430,34 @@ mod tests {
         eprintln!("\n=== PER-ROW Y MSE (all 128 rows) ===");
         let mut worst_rows: Vec<(usize, f64)> = Vec::new();
         for row in 0..h {
-            let row_mse: f64 = (0..w).map(|c| {
-                let d = frame.y[row * w + c] as f64 - ref_y[row * w + c] as f64;
-                d * d
-            }).sum::<f64>() / w as f64;
+            let row_mse: f64 = (0..w)
+                .map(|c| {
+                    let d = frame.y[row * w + c] as f64 - ref_y[row * w + c] as f64;
+                    d * d
+                })
+                .sum::<f64>()
+                / w as f64;
             if row_mse > 0.0 {
                 worst_rows.push((row, row_mse));
             }
         }
         worst_rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         for &(row, row_mse) in worst_rows.iter().take(20) {
-            let row_psnr = if row_mse > 0.0 { 10.0 * (255.0f64 * 255.0 / row_mse).log10() } else { 100.0 };
-            eprintln!("  Row {:3}: MSE={:.2}  PSNR={:.1}dB", row, row_mse, row_psnr);
+            let row_psnr = if row_mse > 0.0 {
+                10.0 * (255.0f64 * 255.0 / row_mse).log10()
+            } else {
+                100.0
+            };
+            eprintln!(
+                "  Row {:3}: MSE={:.2}  PSNR={:.1}dB",
+                row, row_mse, row_psnr
+            );
         }
         if worst_rows.len() > 20 {
-            eprintln!("  ... and {} more rows with non-zero MSE", worst_rows.len() - 20);
+            eprintln!(
+                "  ... and {} more rows with non-zero MSE",
+                worst_rows.len() - 20
+            );
         }
 
         eprintln!("\n=== PER-BLOCK UV ANALYSIS (worst 20) ===");
@@ -1904,7 +2469,9 @@ mod tests {
             let uv_by = block.y / 2;
             let uv_bw = block.width / 2;
             let uv_bh = block.height / 2;
-            if uv_bw < 4 || uv_bh < 4 { continue; }
+            if uv_bw < 4 || uv_bh < 4 {
+                continue;
+            }
 
             let mut u_mse_sum = 0.0f64;
             let mut v_mse_sum = 0.0f64;
@@ -1920,9 +2487,21 @@ mod tests {
                     count += 1;
                 }
             }
-            let u_mse = if count > 0 { u_mse_sum / count as f64 } else { 0.0 };
-            let v_mse = if count > 0 { v_mse_sum / count as f64 } else { 0.0 };
-            let cfl_type = if block.uv_mode == 13 { "CFL" } else { "non-CFL" };
+            let u_mse = if count > 0 {
+                u_mse_sum / count as f64
+            } else {
+                0.0
+            };
+            let v_mse = if count > 0 {
+                v_mse_sum / count as f64
+            } else {
+                0.0
+            };
+            let cfl_type = if block.uv_mode == 13 {
+                "CFL"
+            } else {
+                "non-CFL"
+            };
             if u_mse > 0.01 || v_mse > 0.01 {
                 uv_error_blocks.push((i, u_mse, v_mse, cfl_type));
             }
@@ -1931,20 +2510,46 @@ mod tests {
         for &(i, u_mse, v_mse, cfl_type) in uv_error_blocks.iter().take(20) {
             let block = &blocks[i];
             let uv_mode_str = match block.uv_mode {
-                0 => "DC", 1 => "V", 2 => "H", 3 => "D45", 4 => "D135",
-                5 => "D113", 6 => "D157", 7 => "D203", 8 => "D67",
-                9 => "SMOOTH", 10 => "SMOOTH_V", 11 => "SMOOTH_H",
-                12 => "PAETH", 13 => "CFL", _ => "?",
+                0 => "DC",
+                1 => "V",
+                2 => "H",
+                3 => "D45",
+                4 => "D135",
+                5 => "D113",
+                6 => "D157",
+                7 => "D203",
+                8 => "D67",
+                9 => "SMOOTH",
+                10 => "SMOOTH_V",
+                11 => "SMOOTH_H",
+                12 => "PAETH",
+                13 => "CFL",
+                _ => "?",
             };
             let tree_str = match block.tree_type {
                 tile::TreeType::Shared => "S",
                 tile::TreeType::Luma => "L",
                 tile::TreeType::Chroma => "C",
             };
-            eprintln!("  Block[{:3}] ({:3},{:3}) {:3}x{:3} tree={} uv_mode={:<8} {} cfl_idx={} mh_dir={} alpha=({},{}) | U_MSE={:.1} V_MSE={:.1} u_tu={} v_tu={}",
-                i, block.x, block.y, block.width, block.height, tree_str,
-                uv_mode_str, cfl_type, block.cfl_idx, block.mhccp_dir, block.cfl_alpha_u, block.cfl_alpha_v,
-                u_mse, v_mse, block.u_tu.len(), block.v_tu.len());
+            eprintln!(
+                "  Block[{:3}] ({:3},{:3}) {:3}x{:3} tree={} uv_mode={:<8} {} cfl_idx={} mh_dir={} alpha=({},{}) | U_MSE={:.1} V_MSE={:.1} u_tu={} v_tu={}",
+                i,
+                block.x,
+                block.y,
+                block.width,
+                block.height,
+                tree_str,
+                uv_mode_str,
+                cfl_type,
+                block.cfl_idx,
+                block.mhccp_dir,
+                block.cfl_alpha_u,
+                block.cfl_alpha_v,
+                u_mse,
+                v_mse,
+                block.u_tu.len(),
+                block.v_tu.len()
+            );
         }
         eprintln!("Total UV error blocks: {}", uv_error_blocks.len());
     }
