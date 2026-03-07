@@ -385,7 +385,8 @@ pub fn predict_intra_with_control_and_availability(
         }
         p_angle = wide_angle_mapping(p_angle, w, h);
         let apply_ibp_refs = control.enable_ibp && !(w == 4 && h == 4);
-        let apply_ibp_blend = apply_ibp_refs && control.plane == 0 && mrl_index == 0 && angle_delta % 2 == 0;
+        let apply_ibp_blend =
+            apply_ibp_refs && control.plane == 0 && mrl_index == 0 && angle_delta % 2 == 0;
         return predict_directional(
             recon,
             stride,
@@ -476,8 +477,17 @@ fn predict_directional(
         return predict_h(recon, stride, x, y, w, h, availability);
     }
     if mrl_index == 0 {
-        let mut refs =
-            prepare_directional_refs(recon, stride, x, y, w, h, p_angle, apply_ibp_refs, availability);
+        let mut refs = prepare_directional_refs(
+            recon,
+            stride,
+            x,
+            y,
+            w,
+            h,
+            p_angle,
+            apply_ibp_refs,
+            availability,
+        );
         apply_directional_edge_filter(
             &mut refs,
             w,
@@ -2081,7 +2091,9 @@ mod tests {
 
     #[test]
     fn dc_rect_16x4_matches_av2_divisor() {
-        let above = [232, 242, 242, 199, 202, 206, 212, 218, 220, 217, 214, 210, 210, 205, 194, 184];
+        let above = [
+            232, 242, 242, 199, 202, 206, 212, 218, 220, 217, 214, 210, 210, 205, 194, 184,
+        ];
         let left = [240, 240, 240, 240];
         let pred = predict_dc_from_refs(&above, &left, 16, 4, true, true);
         assert!(pred.iter().all(|&value| value == 219));

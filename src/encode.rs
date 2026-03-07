@@ -269,6 +269,8 @@ struct RefPixels {
     above: Vec<u8>,
     left: Vec<u8>,
     top_left: u8,
+    above_right: u8,
+    below_left: u8,
     has_above: bool,
     has_left: bool,
 }
@@ -277,24 +279,47 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
     let has_above = y > 0;
     let has_left = x > 0;
 
+    let compute_above_right = |above: &[u8]| -> u8 {
+        if has_above && x + bsize < stride {
+            recon[(y - 1) * stride + x + bsize]
+        } else {
+            above[bsize - 1]
+        }
+    };
+
+    let compute_below_left = |left: &[u8]| -> u8 { left[bsize - 1] };
+
     match (has_above, has_left) {
-        (false, false) => RefPixels {
-            above: vec![127; bsize],
-            left: vec![129; bsize],
-            top_left: 128,
-            has_above: false,
-            has_left: false,
-        },
+        (false, false) => {
+            let above = vec![127; bsize];
+            let left = vec![129; bsize];
+            let ar = above[bsize - 1];
+            let bl = left[bsize - 1];
+            RefPixels {
+                above,
+                left,
+                top_left: 128,
+                above_right: ar,
+                below_left: bl,
+                has_above: false,
+                has_left: false,
+            }
+        }
         (true, false) => {
             let mut above = vec![0u8; bsize];
             for i in 0..bsize {
                 above[i] = recon[(y - 1) * stride + x + i];
             }
             let tl = above[0];
+            let ar = compute_above_right(&above);
+            let left = vec![tl; bsize];
+            let bl = left[bsize - 1];
             RefPixels {
-                left: vec![tl; bsize],
-                top_left: tl,
                 above,
+                left,
+                top_left: tl,
+                above_right: ar,
+                below_left: bl,
                 has_above: true,
                 has_left: false,
             }
@@ -305,9 +330,14 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
                 left[j] = recon[(y + j) * stride + x - 1];
             }
             let tl = left[0];
+            let bl = compute_below_left(&left);
+            let above = vec![tl; bsize];
+            let ar = above[bsize - 1];
             RefPixels {
-                above: vec![tl; bsize],
+                above,
                 top_left: tl,
+                above_right: ar,
+                below_left: bl,
                 left,
                 has_above: false,
                 has_left: true,
@@ -323,10 +353,14 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
                 left[j] = recon[(y + j) * stride + x - 1];
             }
             let tl = recon[(y - 1) * stride + x - 1];
+            let ar = compute_above_right(&above);
+            let bl = compute_below_left(&left);
             RefPixels {
                 above,
                 left,
                 top_left: tl,
+                above_right: ar,
+                below_left: bl,
                 has_above: true,
                 has_left: true,
             }
@@ -374,50 +408,84 @@ fn predict_dc_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     vec![val; bsize * bsize]
 }
 
+fn divide_round(value: i32, bits: u32) -> i32 {
+    (value + (1 << (bits - 1))) >> bits
+}
+
+const BLK_SIZE_LOG2: [u8; 65] = [
+    0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6,
+    6,
+];
+const BLEND_WEIGHT_MAX: i32 = 32;
+
 fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
-    let weights = smooth_weights(bsize);
-    let below_pred = refs.left[bsize - 1] as u32;
-    let right_pred = refs.above[bsize - 1] as u32;
+    let bl = refs.below_left as i32;
+    let tr = refs.above_right as i32;
+    let bw = bsize;
+    let bh = bsize;
+    let scale = ((BLK_SIZE_LOG2[bh] as i32 - 2 + BLK_SIZE_LOG2[bw] as i32 - 2 + 2) >> 2) as u32;
+    let blend_max_log2 = BLK_SIZE_LOG2[BLEND_WEIGHT_MAX as usize] as u32;
+    let blend_lut_idx = BLK_SIZE_LOG2[(BLEND_WEIGHT_MAX as usize) << 1] as u32;
+    let bh_log2 = BLK_SIZE_LOG2[bh] as u32;
+    let bw_log2 = BLK_SIZE_LOG2[bw] as u32;
+
     let mut pred = vec![0u8; bsize * bsize];
-    for r in 0..bsize {
-        for c in 0..bsize {
-            let w_h = weights[r] as u32;
-            let w_w = weights[c] as u32;
-            let above = refs.above[c] as u32;
-            let left = refs.left[r] as u32;
-            let val =
-                w_h * above + (256 - w_h) * below_pred + w_w * left + (256 - w_w) * right_pred;
-            pred[r * bsize + c] = ((val + 256) >> 9) as u8;
+    for r in 0..bh {
+        let s_top = BLEND_WEIGHT_MAX >> blend_lut_idx.min(((r << 1) as u32) >> scale);
+        let l = refs.left[r] as i32;
+        for c in 0..bw {
+            let s_left = BLEND_WEIGHT_MAX >> blend_lut_idx.min(((c << 1) as u32) >> scale);
+            let top = refs.above[c] as i32;
+            let predv = bl + divide_round((top - bl) * (bh as i32 - 1 - r as i32), bh_log2);
+            let predh = tr + divide_round((l - tr) * (bw as i32 - 1 - c as i32), bw_log2);
+            let predv = predv + divide_round((top - predv) * s_top, blend_max_log2 + 1);
+            let predh = predh + divide_round((l - predh) * s_left, blend_max_log2 + 1);
+            pred[r * bsize + c] = divide_round(predv + predh, 1) as u8;
         }
     }
     pred
 }
 
 fn predict_smooth_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
-    let weights = smooth_weights(bsize);
-    let below_pred = refs.left[bsize - 1] as u32;
+    let bl = refs.below_left as i32;
+    let bw = bsize;
+    let bh = bsize;
+    let scale = ((BLK_SIZE_LOG2[bh] as i32 - 2 + BLK_SIZE_LOG2[bw] as i32 - 2 + 2) >> 2) as u32;
+    let blend_max_log2 = BLK_SIZE_LOG2[BLEND_WEIGHT_MAX as usize] as u32;
+    let blend_lut_idx = BLK_SIZE_LOG2[(BLEND_WEIGHT_MAX as usize) << 1] as u32;
+    let bh_log2 = BLK_SIZE_LOG2[bh] as u32;
+
     let mut pred = vec![0u8; bsize * bsize];
-    for r in 0..bsize {
-        let w = weights[r] as u32;
-        for c in 0..bsize {
-            let above = refs.above[c] as u32;
-            let val = w * above + (256 - w) * below_pred;
-            pred[r * bsize + c] = ((val + 128) >> 8) as u8;
+    for r in 0..bh {
+        let s_top = BLEND_WEIGHT_MAX >> blend_lut_idx.min(((r << 1) as u32) >> scale);
+        for c in 0..bw {
+            let top = refs.above[c] as i32;
+            let predv = bl + divide_round((top - bl) * (bh as i32 - 1 - r as i32), bh_log2);
+            pred[r * bsize + c] =
+                (predv + divide_round((top - predv) * s_top, blend_max_log2 + 1)) as u8;
         }
     }
     pred
 }
 
 fn predict_smooth_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
-    let weights = smooth_weights(bsize);
-    let right_pred = refs.above[bsize - 1] as u32;
+    let tr = refs.above_right as i32;
+    let bw = bsize;
+    let bh = bsize;
+    let scale = ((BLK_SIZE_LOG2[bh] as i32 - 2 + BLK_SIZE_LOG2[bw] as i32 - 2 + 2) >> 2) as u32;
+    let blend_max_log2 = BLK_SIZE_LOG2[BLEND_WEIGHT_MAX as usize] as u32;
+    let blend_lut_idx = BLK_SIZE_LOG2[(BLEND_WEIGHT_MAX as usize) << 1] as u32;
+    let bw_log2 = BLK_SIZE_LOG2[bw] as u32;
+
     let mut pred = vec![0u8; bsize * bsize];
-    for r in 0..bsize {
-        let left = refs.left[r] as u32;
-        for c in 0..bsize {
-            let w = weights[c] as u32;
-            let val = w * left + (256 - w) * right_pred;
-            pred[r * bsize + c] = ((val + 128) >> 8) as u8;
+    for r in 0..bh {
+        let l = refs.left[r] as i32;
+        for c in 0..bw {
+            let s_left = BLEND_WEIGHT_MAX >> blend_lut_idx.min(((c << 1) as u32) >> scale);
+            let predh = tr + divide_round((l - tr) * (bw as i32 - 1 - c as i32), bw_log2);
+            pred[r * bsize + c] =
+                (predh + divide_round((l - predh) * s_left, blend_max_log2 + 1)) as u8;
         }
     }
     pred
@@ -498,6 +566,20 @@ fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode
     best_mode
 }
 
+fn downsample_64_to_32(residual: &[i32; 4096]) -> [i32; 1024] {
+    let mut out = [0i32; 1024];
+    for r in 0..32 {
+        for c in 0..32 {
+            let tl = residual[(2 * r) * 64 + 2 * c];
+            let tr = residual[(2 * r) * 64 + 2 * c + 1];
+            let bl = residual[(2 * r + 1) * 64 + 2 * c];
+            let br = residual[(2 * r + 1) * 64 + 2 * c + 1];
+            out[r * 32 + c] = (tl + tr + bl + br + 2) >> 2;
+        }
+    }
+    out
+}
+
 fn encode_plane_block_64(
     pixels: &[u8],
     plane_w: usize,
@@ -514,11 +596,12 @@ fn encode_plane_block_64(
     let residual = compute_residual_block(&y_block, &pred_block);
     let mut residual_arr = [0i32; 4096];
     residual_arr.copy_from_slice(&residual);
-    let dct_coeffs = dct::forward_dct2_64x64(&residual_arr);
+    let residual_32 = downsample_64_to_32(&residual_arr);
+    let dct_coeffs = dct::forward_dct2_32x32(&residual_32);
     let (levels, eob) = quantize_block(&dct_coeffs, dequant, 2);
 
     let dqcoeffs = dequantize_block(&levels, eob, dequant, 2);
-    let inv_residual = dct::inverse_dct2_64x64(&dqcoeffs);
+    let inv_residual = dct::inverse_dct2_64x64_av2(&dqcoeffs);
     reconstruct_block(recon, plane_w, x, y, 64, &pred_block, &inv_residual);
 
     (levels, eob, mode)
@@ -1419,6 +1502,8 @@ mod tests {
             top_left: 128,
             has_above: false,
             has_left: false,
+            above_right: 127,
+            below_left: 129,
         };
         let pred = predict_dc_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 128));
@@ -1432,6 +1517,8 @@ mod tests {
             top_left: 150,
             has_above: true,
             has_left: true,
+            above_right: 200,
+            below_left: 100,
         };
         let pred = predict_dc_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 150));
@@ -1445,6 +1532,8 @@ mod tests {
             top_left: 128,
             has_above: false,
             has_left: false,
+            above_right: 127,
+            below_left: 129,
         };
         let pred = predict_smooth_block(&refs, 32);
         for &v in &pred {
@@ -1464,11 +1553,13 @@ mod tests {
             top_left: 255,
             has_above: true,
             has_left: true,
+            above_right: 255,
+            below_left: 0,
         };
         let pred = predict_smooth_v_block(&refs, 32);
         assert!(pred[0] > pred[31 * 32], "should decrease top to bottom");
         assert!(
-            pred[0] >= 254,
+            pred[0] >= 240,
             "top row should be near 255, got {}",
             pred[0]
         );
@@ -1482,11 +1573,13 @@ mod tests {
             top_left: 255,
             has_above: true,
             has_left: true,
+            above_right: 0,
+            below_left: 255,
         };
         let pred = predict_smooth_h_block(&refs, 32);
         assert!(pred[0] > pred[31], "should decrease left to right");
         assert!(
-            pred[0] >= 254,
+            pred[0] >= 240,
             "left col should be near 255, got {}",
             pred[0]
         );
@@ -1500,6 +1593,8 @@ mod tests {
             top_left: 128,
             has_above: true,
             has_left: true,
+            above_right: 128,
+            below_left: 128,
         };
         let pred = predict_paeth_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 128));
@@ -1513,6 +1608,8 @@ mod tests {
             top_left: 200,
             has_above: true,
             has_left: true,
+            above_right: 200,
+            below_left: 100,
         };
         let pred = predict_paeth_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 100));
@@ -1526,6 +1623,8 @@ mod tests {
             top_left: 200,
             has_above: true,
             has_left: true,
+            above_right: 100,
+            below_left: 200,
         };
         let pred = predict_paeth_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 100));
@@ -1540,6 +1639,8 @@ mod tests {
             top_left: 150,
             has_above: true,
             has_left: true,
+            above_right: 150,
+            below_left: 150,
         };
         assert_eq!(select_intra_mode(&pixels, &refs, 32), IntraMode::DcPred);
     }
@@ -1552,6 +1653,8 @@ mod tests {
             top_left: 255,
             has_above: true,
             has_left: true,
+            above_right: 255,
+            below_left: 0,
         };
         let pred_sv = predict_smooth_v_block(&refs, 32);
         let mode = select_intra_mode(&pred_sv, &refs, 32);

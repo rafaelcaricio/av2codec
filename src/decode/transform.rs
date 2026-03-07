@@ -79,7 +79,7 @@ pub fn dequantize_and_inverse(
     let coeffs = dequantize_block(levels, eob, dequant, log_scale);
 
     if is_64x64 {
-        let residuals = dct::inverse_dct2_64x64(&coeffs);
+        let residuals = dct::inverse_dct2_64x64_av2(&coeffs);
         residuals.to_vec()
     } else {
         let residuals = dct::inverse_dct2_32x32(&coeffs);

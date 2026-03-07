@@ -378,28 +378,36 @@ pub fn forward_dct2_32x32(residual: &[i32; 1024]) -> [i32; 1024] {
 }
 
 pub fn inverse_dct2_32x32(coeffs: &[i32; 1024]) -> [i32; 1024] {
-    let mut temp = [[0i32; 32]; 32];
+    inverse_dct2_32x32_clamped(coeffs, 8)
+}
 
-    for col in 0..32 {
-        for spatial_row in 0..32 {
-            let mut sum = 0i64;
-            for freq_row in 0..32 {
-                sum +=
-                    FWD_DCT2_32[freq_row][spatial_row] as i64 * coeffs[freq_row * 32 + col] as i64;
-            }
-            temp[spatial_row][col] = round_shift(sum, 6);
-        }
-    }
+pub fn inverse_dct2_32x32_clamped(coeffs: &[i32; 1024], bd: u32) -> [i32; 1024] {
+    let rng_max = (1i32 << (bd + 7)) - 1;
+    let rng_min = -(1i32 << (bd + 7));
+    let col_max = (1i32 << bd) - 1;
+    let col_min = -(1i32 << bd);
 
-    let mut output = [0i32; 1024];
-    for spatial_row in 0..32 {
+    let mut temp = [0i32; 1024];
+
+    for row in 0..32 {
         for spatial_col in 0..32 {
             let mut sum = 0i64;
             for freq_col in 0..32 {
                 sum +=
-                    FWD_DCT2_32[freq_col][spatial_col] as i64 * temp[spatial_row][freq_col] as i64;
+                    FWD_DCT2_32[freq_col][spatial_col] as i64 * coeffs[row * 32 + freq_col] as i64;
             }
-            output[spatial_row * 32 + spatial_col] = round_shift(sum, 13);
+            temp[spatial_col * 32 + row] = round_shift(sum, 6).clamp(rng_min, rng_max);
+        }
+    }
+
+    let mut output = [0i32; 1024];
+    for col in 0..32 {
+        for spatial_row in 0..32 {
+            let mut sum = 0i64;
+            for freq_row in 0..32 {
+                sum += FWD_DCT2_32[freq_row][spatial_row] as i64 * temp[col * 32 + freq_row] as i64;
+            }
+            output[spatial_row * 32 + col] = round_shift(sum, 13).clamp(col_min, col_max);
         }
     }
 
