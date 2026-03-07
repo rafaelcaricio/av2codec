@@ -255,6 +255,24 @@ pub struct IntraPredictControl {
     pub is_cfl: bool,
 }
 
+fn trace_intra_block_match(x: usize, y: usize) -> bool {
+    match std::env::var("WAV2C_TRACE_INTRA") {
+        Ok(spec) => {
+            let mut parts = spec.split(',');
+            let sx = parts.next().and_then(|value| value.trim().parse::<usize>().ok());
+            let sy = parts.next().and_then(|value| value.trim().parse::<usize>().ok());
+            sx == Some(x) && sy == Some(y)
+        }
+        Err(_) => false,
+    }
+}
+
+struct PreparedRefs {
+    above: Vec<u8>,
+    left: Vec<u8>,
+    top_left: u8,
+}
+
 pub fn predict_intra(
     recon: &[u8],
     stride: usize,
@@ -267,7 +285,7 @@ pub fn predict_intra(
     mrl_index: u8,
     sb_y: usize,
 ) -> Vec<u8> {
-    predict_intra_with_control(
+    predict_intra_with_control_and_availability(
         recon,
         stride,
         x,
@@ -279,6 +297,7 @@ pub fn predict_intra(
         mrl_index,
         sb_y,
         IntraPredictControl::default(),
+        None,
     )
 }
 
@@ -295,8 +314,41 @@ pub fn predict_intra_with_control(
     sb_y: usize,
     control: IntraPredictControl,
 ) -> Vec<u8> {
-    let has_above = y > 0;
-    let has_left = x > 0;
+    predict_intra_with_control_and_availability(
+        recon,
+        stride,
+        x,
+        y,
+        w,
+        h,
+        mode,
+        angle_delta,
+        mrl_index,
+        sb_y,
+        control,
+        None,
+    )
+}
+
+pub fn predict_intra_with_control_and_availability(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    mode: PredictionMode,
+    angle_delta: i32,
+    mrl_index: u8,
+    sb_y: usize,
+    control: IntraPredictControl,
+    availability: Option<&[bool]>,
+) -> Vec<u8> {
+    let frame_h = recon.len() / stride;
+    let has_above =
+        y > 0 && count_available_horizontal(availability, stride, frame_h, x, y - 1, w) > 0;
+    let has_left =
+        x > 0 && count_available_vertical(availability, stride, frame_h, x - 1, y, h) > 0;
     let apply_ibp = control.enable_ibp && !(w == 4 && h == 4);
 
     if mode.is_directional() {
@@ -315,23 +367,23 @@ pub fn predict_intra_with_control(
             mrl_index,
             sb_y,
             apply_ibp && control.plane == 0 && mrl_index == 0 && angle_delta % 2 == 0,
+            availability,
         );
     }
 
     match mode {
         PredictionMode::DcPred => {
-            let mut pred = predict_dc(recon, stride, x, y, w, h, has_above, has_left);
+            let refs = prepare_intra_refs(recon, stride, x, y, w, h, mode, availability);
+            let mut pred =
+                predict_dc_from_refs(&refs.above, &refs.left, w, h, has_above, has_left);
             if apply_ibp && (control.plane == 0 || !control.is_cfl) && (has_above || has_left) {
-                let (above, left, _) = ref_samples(recon, stride, x, y, w, h, has_above, has_left);
-                apply_ibp_dc(&mut pred, w, h, &above, &left, has_above, has_left);
+                apply_ibp_dc(&mut pred, w, h, &refs.above, &refs.left, has_above, has_left);
             }
             pred
         }
-        PredictionMode::PaethPred => {
-            predict_paeth(recon, stride, x, y, w, h, has_above, has_left)
-        }
+        PredictionMode::PaethPred => predict_paeth(recon, stride, x, y, w, h, availability),
         PredictionMode::SmoothPred | PredictionMode::SmoothVPred | PredictionMode::SmoothHPred => {
-            predict_smooth(recon, stride, x, y, w, h, has_above, has_left, mode)
+            predict_smooth(recon, stride, x, y, w, h, mode, availability)
         }
         _ => vec![BASE_DC; w * h],
     }
@@ -350,12 +402,61 @@ fn predict_directional(
     mrl_index: u8,
     sb_y: usize,
     apply_ibp: bool,
+    availability: Option<&[bool]>,
 ) -> Vec<u8> {
     if p_angle == 90 && mrl_index == 0 {
-        return predict_v(recon, stride, x, y, w, h, has_above, has_left);
+        return predict_v(recon, stride, x, y, w, h, availability);
     }
     if p_angle == 180 && mrl_index == 0 {
-        return predict_h(recon, stride, x, y, w, h, has_above, has_left);
+        return predict_h(recon, stride, x, y, w, h, availability);
+    }
+    if mrl_index == 0 {
+        let refs =
+            prepare_directional_refs(recon, stride, x, y, w, h, p_angle, apply_ibp, availability);
+        let mut pred = if p_angle > 0 && p_angle < 90 {
+            predict_zone1_angle(&refs.above, w, h, get_dx(p_angle), 0)
+        } else if p_angle > 90 && p_angle < 180 {
+            predict_zone2_angle(
+                &refs.above,
+                &refs.left,
+                refs.top_left,
+                w,
+                h,
+                get_dx(p_angle),
+                get_dy(p_angle),
+                0,
+            )
+        } else if p_angle > 180 && p_angle < 270 {
+            predict_zone3_angle(&refs.left, w, h, get_dy(p_angle), 0)
+        } else {
+            vec![BASE_DC; w * h]
+        };
+
+        if apply_ibp {
+            if let Some(mode_index) = ibp_mode_index(p_angle) {
+                if p_angle < 90 {
+                    let second = predict_zone3_angle(
+                        &refs.left,
+                        w,
+                        h,
+                        DR_INTRA_DERIVATIVE[(90 - p_angle) as usize],
+                        0,
+                    );
+                    apply_ibp_directional_zone1(&mut pred, &second, w, h, mode_index, p_angle);
+                } else if p_angle > 180 {
+                    let second = predict_zone1_angle(
+                        &refs.above,
+                        w,
+                        h,
+                        DR_INTRA_DERIVATIVE[(p_angle - 180) as usize],
+                        0,
+                    );
+                    apply_ibp_directional_zone3(&mut pred, &second, w, h, mode_index, 270 - p_angle);
+                }
+            }
+        }
+
+        return pred;
     }
 
     let above_mrl = if y == sb_y { 0 } else { mrl_index };
@@ -391,6 +492,283 @@ fn predict_directional(
     }
 
     pred
+}
+
+fn mode_uses_top_extension(mode: PredictionMode) -> bool {
+    matches!(mode, PredictionMode::SmoothPred | PredictionMode::SmoothHPred)
+}
+
+fn mode_uses_left_extension(mode: PredictionMode) -> bool {
+    matches!(mode, PredictionMode::SmoothPred | PredictionMode::SmoothVPred)
+}
+
+fn pixel_is_available(
+    availability: Option<&[bool]>,
+    stride: usize,
+    frame_h: usize,
+    x: usize,
+    y: usize,
+) -> bool {
+    x < stride && y < frame_h && availability.map_or(true, |ready| ready[y * stride + x])
+}
+
+fn count_available_horizontal(
+    availability: Option<&[bool]>,
+    stride: usize,
+    frame_h: usize,
+    x: usize,
+    y: usize,
+    len: usize,
+) -> usize {
+    if y >= frame_h || x >= stride {
+        return 0;
+    }
+    let limit = len.min(stride - x);
+    let mut count = 0;
+    while count < limit && pixel_is_available(availability, stride, frame_h, x + count, y) {
+        count += 1;
+    }
+    count
+}
+
+fn count_available_vertical(
+    availability: Option<&[bool]>,
+    stride: usize,
+    frame_h: usize,
+    x: usize,
+    y: usize,
+    len: usize,
+) -> usize {
+    if y >= frame_h || x >= stride {
+        return 0;
+    }
+    let limit = len.min(frame_h - y);
+    let mut count = 0;
+    while count < limit && pixel_is_available(availability, stride, frame_h, x, y + count) {
+        count += 1;
+    }
+    count
+}
+
+fn prepare_intra_refs(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    mode: PredictionMode,
+    availability: Option<&[bool]>,
+) -> PreparedRefs {
+    let frame_h = recon.len() / stride;
+    let needs_top_extension = mode_uses_top_extension(mode);
+    let needs_left_extension = mode_uses_left_extension(mode);
+    let above_len = w + if needs_top_extension { h } else { 0 };
+    let left_len = h + if needs_left_extension { w } else { 0 };
+    let n_top_px = if y > 0 {
+        count_available_horizontal(availability, stride, frame_h, x, y - 1, w)
+    } else {
+        0
+    };
+    let n_left_px = if x > 0 {
+        count_available_vertical(availability, stride, frame_h, x - 1, y, h)
+    } else {
+        0
+    };
+    let n_topright_px = if needs_top_extension && n_top_px == w && y > 0 {
+        count_available_horizontal(availability, stride, frame_h, x + w, y - 1, h)
+    } else {
+        0
+    };
+    let n_bottomleft_px = if needs_left_extension && n_left_px == h && x > 0 {
+        count_available_vertical(availability, stride, frame_h, x - 1, y + h, w)
+    } else {
+        0
+    };
+
+    let mut above = vec![DEFAULT_ABOVE; above_len];
+    if n_top_px > 0 {
+        let top_row = (y - 1) * stride + x;
+        above[..n_top_px].copy_from_slice(&recon[top_row..top_row + n_top_px]);
+        let mut filled = n_top_px;
+        if needs_top_extension && n_topright_px > 0 {
+            let ext_start = top_row + w;
+            above[w..w + n_topright_px].copy_from_slice(&recon[ext_start..ext_start + n_topright_px]);
+            filled += n_topright_px;
+        }
+        let pad = above[filled - 1];
+        above[filled..].fill(pad);
+    } else if n_left_px > 0 {
+        above.fill(recon[y * stride + x - 1]);
+    }
+
+    let mut left = vec![DEFAULT_LEFT; left_len];
+    if n_left_px > 0 {
+        let mut filled = n_left_px;
+        for row in 0..n_left_px {
+            left[row] = recon[(y + row) * stride + x - 1];
+        }
+        if needs_left_extension && n_bottomleft_px > 0 {
+            for row in 0..n_bottomleft_px {
+                left[h + row] = recon[(y + h + row) * stride + x - 1];
+            }
+            filled += n_bottomleft_px;
+        }
+        let pad = left[filled - 1];
+        left[filled..].fill(pad);
+    } else if n_top_px > 0 {
+        left.fill(recon[(y - 1) * stride + x]);
+    }
+
+    let top_left = if n_top_px > 0
+        && n_left_px > 0
+        && x > 0
+        && y > 0
+        && pixel_is_available(availability, stride, frame_h, x - 1, y - 1)
+    {
+        recon[(y - 1) * stride + x - 1]
+    } else if n_top_px > 0 {
+        above[0]
+    } else if n_left_px > 0 {
+        left[0]
+    } else {
+        DEFAULT_TOP_LEFT
+    };
+
+    if trace_intra_block_match(x, y) {
+        eprintln!(
+            "[WAV2C_INTRA_REFS] xy=({}, {}) size={}x{} mode={:?} n_top={} n_top_right={} n_left={} n_bottom_left={} top_left={} above={:?} left={:?}",
+            x,
+            y,
+            w,
+            h,
+            mode,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+            top_left,
+            above,
+            left
+        );
+    }
+
+    PreparedRefs {
+        above,
+        left,
+        top_left,
+    }
+}
+
+fn prepare_directional_refs(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    p_angle: i32,
+    apply_ibp: bool,
+    availability: Option<&[bool]>,
+) -> PreparedRefs {
+    let frame_h = recon.len() / stride;
+    let needs_top_extension = (p_angle < 90) || (apply_ibp && p_angle > 180);
+    let needs_left_extension = (p_angle > 180) || (apply_ibp && p_angle < 90);
+    let above_len = w + if needs_top_extension { h } else { 0 };
+    let left_len = h + if needs_left_extension { w } else { 0 };
+    let n_top_px = if y > 0 {
+        count_available_horizontal(availability, stride, frame_h, x, y - 1, w)
+    } else {
+        0
+    };
+    let n_left_px = if x > 0 {
+        count_available_vertical(availability, stride, frame_h, x - 1, y, h)
+    } else {
+        0
+    };
+    let n_topright_px = if needs_top_extension && n_top_px == w && y > 0 {
+        count_available_horizontal(availability, stride, frame_h, x + w, y - 1, h)
+    } else {
+        0
+    };
+    let n_bottomleft_px = if needs_left_extension && n_left_px == h && x > 0 {
+        count_available_vertical(availability, stride, frame_h, x - 1, y + h, w)
+    } else {
+        0
+    };
+
+    let mut above = vec![DEFAULT_ABOVE; above_len];
+    if n_top_px > 0 {
+        let top_row = (y - 1) * stride + x;
+        above[..n_top_px].copy_from_slice(&recon[top_row..top_row + n_top_px]);
+        let mut filled = n_top_px;
+        if needs_top_extension && n_topright_px > 0 {
+            let ext_start = top_row + w;
+            above[w..w + n_topright_px].copy_from_slice(&recon[ext_start..ext_start + n_topright_px]);
+            filled += n_topright_px;
+        }
+        let pad = above[filled - 1];
+        above[filled..].fill(pad);
+    } else if n_left_px > 0 {
+        above.fill(recon[y * stride + x - 1]);
+    }
+
+    let mut left = vec![DEFAULT_LEFT; left_len];
+    if n_left_px > 0 {
+        let mut filled = n_left_px;
+        for row in 0..n_left_px {
+            left[row] = recon[(y + row) * stride + x - 1];
+        }
+        if needs_left_extension && n_bottomleft_px > 0 {
+            for row in 0..n_bottomleft_px {
+                left[h + row] = recon[(y + h + row) * stride + x - 1];
+            }
+            filled += n_bottomleft_px;
+        }
+        let pad = left[filled - 1];
+        left[filled..].fill(pad);
+    } else if n_top_px > 0 {
+        left.fill(recon[(y - 1) * stride + x]);
+    }
+
+    let top_left = if n_top_px > 0
+        && n_left_px > 0
+        && x > 0
+        && y > 0
+        && pixel_is_available(availability, stride, frame_h, x - 1, y - 1)
+    {
+        recon[(y - 1) * stride + x - 1]
+    } else if n_top_px > 0 {
+        above[0]
+    } else if n_left_px > 0 {
+        left[0]
+    } else {
+        DEFAULT_TOP_LEFT
+    };
+
+    if trace_intra_block_match(x, y) {
+        eprintln!(
+            "[WAV2C_INTRA_REFS] xy=({}, {}) size={}x{} p_angle={} n_top={} n_top_right={} n_left={} n_bottom_left={} top_left={} above={:?} left={:?}",
+            x,
+            y,
+            w,
+            h,
+            p_angle,
+            n_top_px,
+            n_topright_px,
+            n_left_px,
+            n_bottomleft_px,
+            top_left,
+            above,
+            left
+        );
+    }
+
+    PreparedRefs {
+        above,
+        left,
+        top_left,
+    }
 }
 
 fn ibp_mode_index(angle: i32) -> Option<usize> {
@@ -823,11 +1201,9 @@ fn predict_zone3_angle(left: &[u8], w: usize, h: usize, dy: i32, mrl: usize) -> 
     pred
 }
 
-fn predict_dc(
-    recon: &[u8],
-    stride: usize,
-    x: usize,
-    y: usize,
+fn predict_dc_from_refs(
+    above: &[u8],
+    left: &[u8],
     w: usize,
     h: usize,
     has_above: bool,
@@ -836,18 +1212,16 @@ fn predict_dc(
     let val = match (has_above, has_left) {
         (false, false) => BASE_DC,
         (true, false) => {
-            let sum: u32 = (0..w).map(|i| recon[(y - 1) * stride + x + i] as u32).sum();
+            let sum: u32 = above[..w].iter().map(|&value| value as u32).sum();
             ((sum + w as u32 / 2) / w as u32) as u8
         }
         (false, true) => {
-            let sum: u32 = (0..h).map(|j| recon[(y + j) * stride + x - 1] as u32).sum();
+            let sum: u32 = left[..h].iter().map(|&value| value as u32).sum();
             ((sum + h as u32 / 2) / h as u32) as u8
         }
         (true, true) => {
-            let sum_above: u32 =
-                (0..w).map(|i| recon[(y - 1) * stride + x + i] as u32).sum();
-            let sum_left: u32 =
-                (0..h).map(|j| recon[(y + j) * stride + x - 1] as u32).sum();
+            let sum_above: u32 = above[..w].iter().map(|&value| value as u32).sum();
+            let sum_left: u32 = left[..h].iter().map(|&value| value as u32).sum();
             ((sum_above + sum_left + (w + h) as u32 / 2) / (w + h) as u32) as u8
         }
     };
@@ -861,20 +1235,26 @@ fn predict_v(
     y: usize,
     w: usize,
     h: usize,
-    has_above: bool,
-    has_left: bool,
+    availability: Option<&[bool]>,
 ) -> Vec<u8> {
-    if !has_above {
-        return if has_left {
-            vec![recon[y * stride + x - 1]; w * h]
-        } else {
-            vec![DEFAULT_ABOVE; w * h]
-        };
-    }
+    let refs = prepare_intra_refs(
+        recon,
+        stride,
+        x,
+        y,
+        w,
+        h,
+        PredictionMode::VPred,
+        availability,
+    );
+    predict_v_from_refs(&refs.above, w, h)
+}
+
+fn predict_v_from_refs(above: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut pred = vec![0u8; w * h];
     for row in 0..h {
         for col in 0..w {
-            pred[row * w + col] = recon[(y - 1) * stride + x + col];
+            pred[row * w + col] = above[col];
         }
     }
     pred
@@ -887,19 +1267,25 @@ fn predict_h(
     y: usize,
     w: usize,
     h: usize,
-    has_above: bool,
-    has_left: bool,
+    availability: Option<&[bool]>,
 ) -> Vec<u8> {
-    if !has_left {
-        return if has_above {
-            vec![recon[(y - 1) * stride + x]; w * h]
-        } else {
-            vec![DEFAULT_LEFT; w * h]
-        };
-    }
+    let refs = prepare_intra_refs(
+        recon,
+        stride,
+        x,
+        y,
+        w,
+        h,
+        PredictionMode::HPred,
+        availability,
+    );
+    predict_h_from_refs(&refs.left, w, h)
+}
+
+fn predict_h_from_refs(left: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut pred = vec![0u8; w * h];
     for row in 0..h {
-        let left_val = recon[(y + row) * stride + x - 1];
+        let left_val = left[row];
         for col in 0..w {
             pred[row * w + col] = left_val;
         }
@@ -914,41 +1300,31 @@ fn predict_paeth(
     y: usize,
     w: usize,
     h: usize,
-    has_above: bool,
-    has_left: bool,
+    availability: Option<&[bool]>,
 ) -> Vec<u8> {
-    let (above, left, tl) = if !has_above && !has_left {
-        default_ref_samples(w, h)
-    } else {
-        ref_samples(recon, stride, x, y, w, h, has_above, has_left)
-    };
-    predict_paeth_from_refs(&above, &left, tl, w, h)
+    let refs = prepare_intra_refs(
+        recon,
+        stride,
+        x,
+        y,
+        w,
+        h,
+        PredictionMode::PaethPred,
+        availability,
+    );
+    predict_paeth_from_refs(&refs.above, &refs.left, refs.top_left, w, h)
 }
 
-#[rustfmt::skip]
-const SM_WEIGHT_ARRAYS: [u8; 128] = [
-    // offset 0: unused (2 bytes)
-    0, 0,
-    // offset 2: bs=2
-    255, 128,
-    // offset 4: bs=4
-    255, 149, 85, 64,
-    // offset 8: bs=8
-    255, 197, 146, 105, 73, 50, 37, 32,
-    // offset 16: bs=16
-    255, 225, 196, 170, 145, 123, 102, 84, 68, 54, 43, 33, 26, 20, 17, 16,
-    // offset 32: bs=32
-    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74,
-    66, 59, 52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
-    // offset 64: bs=64
-    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150,
-    144, 138, 133, 127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69,
-    65, 61, 57, 54, 50, 47, 44, 41, 38, 35, 32, 29, 27, 25, 22, 20,
-    18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
-];
+fn round_power_of_two(value: i32, bits: u32) -> i32 {
+    (value + (1 << (bits - 1))) >> bits
+}
 
-fn smooth_weight_row(size: usize) -> &'static [u8] {
-    &SM_WEIGHT_ARRAYS[size..size * 2]
+fn divide_round(value: i32, bits: u32) -> i32 {
+    (value + (1 << (bits - 1))) >> bits
+}
+
+fn blk_size_log2(size: usize) -> u32 {
+    size.ilog2()
 }
 
 fn predict_smooth(
@@ -958,109 +1334,80 @@ fn predict_smooth(
     y: usize,
     w: usize,
     h: usize,
-    has_above: bool,
-    has_left: bool,
+    mode: PredictionMode,
+    availability: Option<&[bool]>,
+) -> Vec<u8> {
+    let refs = prepare_intra_refs(recon, stride, x, y, w, h, mode, availability);
+    predict_smooth_from_refs(&refs.above, &refs.left, w, h, mode)
+}
+
+fn predict_smooth_from_refs(
+    above: &[u8],
+    left: &[u8],
+    w: usize,
+    h: usize,
     mode: PredictionMode,
 ) -> Vec<u8> {
-    let (above, left, _tl) = if !has_above && !has_left {
-        default_ref_samples(w, h)
-    } else {
-        ref_samples(recon, stride, x, y, w, h, has_above, has_left)
-    };
-
-    let below_pred = left[h - 1] as u32;
-    let right_pred = above[w - 1] as u32;
-    let sm_weights_h = smooth_weight_row(h);
-    let sm_weights_w = smooth_weight_row(w);
+    let scale = round_power_of_two((blk_size_log2(h) as i32 - 2 + blk_size_log2(w) as i32 - 2), 2);
+    let blend_max_log2 = blk_size_log2(32);
     let mut pred = vec![0u8; w * h];
 
     match mode {
         PredictionMode::SmoothVPred => {
+            let below_pred = left[h] as i32;
             for row in 0..h {
-                let wt = sm_weights_h[row] as u32;
+                let s_top = 32 >> blk_size_log2(64).min(((row << 1) >> scale as usize) as u32);
                 for col in 0..w {
-                    let top = above[col] as u32;
-                    let val = wt * top + (256 - wt) * below_pred;
-                    pred[row * w + col] = ((val + 128) >> 8) as u8;
+                    let top = above[col] as i32;
+                    let mut predv =
+                        below_pred + divide_round((top - below_pred) * (h - 1 - row) as i32, blk_size_log2(h));
+                    predv += divide_round((top - predv) * s_top, blend_max_log2 + 1);
+                    pred[row * w + col] = predv.clamp(0, 255) as u8;
                 }
             }
         }
         PredictionMode::SmoothHPred => {
+            let right_pred = above[w] as i32;
             for row in 0..h {
+                let left_value = left[row] as i32;
                 for col in 0..w {
-                    let wl = sm_weights_w[col] as u32;
-                    let lft = left[row] as u32;
-                    let val = wl * lft + (256 - wl) * right_pred;
-                    pred[row * w + col] = ((val + 128) >> 8) as u8;
+                    let s_left =
+                        32 >> blk_size_log2(64).min(((col << 1) >> scale as usize) as u32);
+                    let mut predh = right_pred
+                        + divide_round(
+                            (left_value - right_pred) * (w - 1 - col) as i32,
+                            blk_size_log2(w),
+                        );
+                    predh += divide_round((left_value - predh) * s_left, blend_max_log2 + 1);
+                    pred[row * w + col] = predh.clamp(0, 255) as u8;
                 }
             }
         }
         _ => {
+            let below_pred = left[h] as i32;
+            let right_pred = above[w] as i32;
             for row in 0..h {
-                let wt = sm_weights_h[row] as u32;
+                let s_top = 32 >> blk_size_log2(64).min(((row << 1) >> scale as usize) as u32);
+                let left_value = left[row] as i32;
                 for col in 0..w {
-                    let top = above[col] as u32;
-                    let lft = left[row] as u32;
-                    let wl = sm_weights_w[col] as u32;
-                    let vert = wt * top + (256 - wt) * below_pred;
-                    let horz = wl * lft + (256 - wl) * right_pred;
-                    pred[row * w + col] = ((vert + horz + 256) >> 9) as u8;
+                    let s_left =
+                        32 >> blk_size_log2(64).min(((col << 1) >> scale as usize) as u32);
+                    let top = above[col] as i32;
+                    let mut predv =
+                        below_pred + divide_round((top - below_pred) * (h - 1 - row) as i32, blk_size_log2(h));
+                    let mut predh = right_pred
+                        + divide_round(
+                            (left_value - right_pred) * (w - 1 - col) as i32,
+                            blk_size_log2(w),
+                        );
+                    predv += divide_round((top - predv) * s_top, blend_max_log2 + 1);
+                    predh += divide_round((left_value - predh) * s_left, blend_max_log2 + 1);
+                    pred[row * w + col] = divide_round(predv + predh, 1).clamp(0, 255) as u8;
                 }
             }
         }
     }
     pred
-}
-
-fn default_ref_samples(w: usize, h: usize) -> (Vec<u8>, Vec<u8>, u8) {
-    (vec![DEFAULT_ABOVE; w], vec![DEFAULT_LEFT; h], DEFAULT_TOP_LEFT)
-}
-
-fn ref_samples(
-    recon: &[u8],
-    stride: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    has_above: bool,
-    has_left: bool,
-) -> (Vec<u8>, Vec<u8>, u8) {
-    match (has_above, has_left) {
-        (true, true) => {
-            let mut above = vec![0u8; w];
-            let mut left = vec![0u8; h];
-            for i in 0..w {
-                above[i] = recon[(y - 1) * stride + x + i];
-            }
-            for j in 0..h {
-                left[j] = recon[(y + j) * stride + x - 1];
-            }
-            let tl = recon[(y - 1) * stride + x - 1];
-            (above, left, tl)
-        }
-        (true, false) => {
-            let mut above = vec![0u8; w];
-            for i in 0..w {
-                above[i] = recon[(y - 1) * stride + x + i];
-            }
-            let fill = above[0];
-            let left = vec![fill; h];
-            (above, left, fill)
-        }
-        (false, true) => {
-            let mut left = vec![0u8; h];
-            for j in 0..h {
-                left[j] = recon[(y + j) * stride + x - 1];
-            }
-            let fill = left[0];
-            let above = vec![fill; w];
-            (above, left, fill)
-        }
-        (false, false) => {
-            (vec![DEFAULT_ABOVE; w], vec![DEFAULT_LEFT; h], DEFAULT_TOP_LEFT)
-        }
-    }
 }
 
 fn predict_paeth_from_refs(above: &[u8], left: &[u8], tl: u8, w: usize, h: usize) -> Vec<u8> {

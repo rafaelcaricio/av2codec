@@ -154,6 +154,7 @@ impl Decoder {
                                         dequant,
                                         uv_dequant,
                                         fp.tcq_mode,
+                                        seq.cfl_ds_filter_index,
                                         seq.sb_size as usize,
                                         seq.enable_ibp,
                                     )
@@ -177,6 +178,7 @@ impl Decoder {
                         dequant,
                         uv_dequant,
                         fp.tcq_mode,
+                        seq.cfl_ds_filter_index,
                         seq.sb_size as usize,
                         seq.enable_ibp,
                     )
@@ -222,83 +224,332 @@ fn predict_dc_rect(recon: &[u8], stride: usize, x: usize, y: usize, w: usize, h:
     )
 }
 
-fn subsampled_luma_q3(
-    y_plane: &[u8],
-    y_w: usize,
-    y_h: usize,
-    uv_x: usize,
-    uv_y: usize,
-) -> Option<i64> {
-    let lx = uv_x * 2;
-    let ly = uv_y * 2;
-    if lx + 1 >= y_w || ly + 1 >= y_h {
-        return None;
-    }
-    let sum = y_plane[ly * y_w + lx] as i64
-        + y_plane[ly * y_w + lx + 1] as i64
-        + y_plane[(ly + 1) * y_w + lx] as i64
-        + y_plane[(ly + 1) * y_w + lx + 1] as i64;
-    Some(sum * 2)
+const NUM_REF_SAM_CFL: usize = 8;
+const DIV_LUT_BITS: i32 = 7;
+const DIV_LUT_PREC_BITS: i32 = 9;
+const DIV_LUT: [u16; 129] = [
+    512, 508, 504, 500, 496, 493, 489, 485, 482, 478, 475, 471, 468, 465, 462, 458, 455, 452,
+    449, 446, 443, 440, 437, 434, 431, 428, 426, 423, 420, 417, 415, 412, 410, 407, 405, 402,
+    400, 397, 395, 392, 390, 388, 386, 383, 381, 379, 377, 374, 372, 370, 368, 366, 364, 362,
+    360, 358, 356, 354, 352, 350, 349, 347, 345, 343, 341, 340, 338, 336, 334, 333, 331, 329,
+    328, 326, 324, 323, 321, 320, 318, 317, 315, 314, 312, 311, 309, 308, 306, 305, 303, 302,
+    301, 299, 298, 297, 295, 294, 293, 291, 290, 289, 287, 286, 285, 284, 282, 281, 280, 279,
+    278, 277, 275, 274, 273, 272, 271, 270, 269, 267, 266, 265, 264, 263, 262, 261, 260, 259,
+    258, 257, 256,
+];
+
+#[derive(Clone, Debug)]
+struct CflImplicitRefs {
+    have_top: bool,
+    have_left: bool,
+    luma_top_q3: Vec<i32>,
+    luma_left_q3: Vec<i32>,
 }
 
-fn cfl_neighbor_avg_q3(
-    y_plane: &[u8],
-    y_w: usize,
-    y_h: usize,
-    uv_w: usize,
-    uv_h: usize,
-    uv_bx: usize,
-    uv_by: usize,
-    uv_bw: usize,
-    uv_bh: usize,
-) -> i32 {
-    let mut sum = 0i64;
-    let mut count = 0i64;
+#[derive(Clone, Debug)]
+struct CflImplicitSample {
+    side: &'static str,
+    idx: usize,
+    x_q3: i32,
+    y: u8,
+}
 
-    if uv_by > 0 {
-        let sy = uv_by - 1;
-        for dx in 0..uv_bw {
-            let sx = (uv_bx + dx).min(uv_w.saturating_sub(1));
-            if let Some(v) = subsampled_luma_q3(y_plane, y_w, y_h, sx, sy) {
-                sum += v;
-                count += 1;
-            }
-        }
-    }
+#[derive(Clone, Debug)]
+struct CflImplicitAlpha {
+    alpha_q3: i32,
+    numb_up: usize,
+    numb_left: usize,
+    samples: Vec<CflImplicitSample>,
+}
 
-    if uv_bx > 0 {
-        let sx = uv_bx - 1;
-        for dy in 0..uv_bh {
-            let sy = (uv_by + dy).min(uv_h.saturating_sub(1));
-            if let Some(v) = subsampled_luma_q3(y_plane, y_w, y_h, sx, sy) {
-                sum += v;
-                count += 1;
-            }
-        }
-    }
+fn get_msb_u32(value: u32) -> i32 {
+    31 - value.leading_zeros() as i32
+}
 
-    if count == 0 {
-        128 * 8
+fn round_power_of_two_unsigned(value: i32, shift: i32) -> i32 {
+    if shift <= 0 {
+        value
     } else {
-        ((sum + (count >> 1)) / count) as i32
+        (value + (1 << (shift - 1))) >> shift
     }
 }
 
-fn div_round_signed(num: i64, den: i64) -> i64 {
-    if den == 0 {
+fn resolve_divisor_32(value: u32) -> (u16, i16) {
+    let mut shift = get_msb_u32(value);
+    let e = value as i32 - (1 << shift);
+    let f = if shift > DIV_LUT_BITS {
+        round_power_of_two_unsigned(e, shift - DIV_LUT_BITS)
+    } else {
+        e << (DIV_LUT_BITS - shift)
+    };
+    shift += DIV_LUT_PREC_BITS;
+    (DIV_LUT[f as usize], shift as i16)
+}
+
+fn resolve_divisor_32_cfl(numerator: i32, denominator: i32, shift: i16) -> i16 {
+    if numerator == 0 || denominator == 0 {
         return 0;
     }
-    let sign = if (num < 0) ^ (den < 0) { -1 } else { 1 };
-    let a = num.abs();
-    let b = den.abs();
-    let q = (a + (b >> 1)) / b;
-    sign * q
+
+    let sign = numerator < 0;
+    let n = numerator.abs();
+    let shift_n = get_msb_u32(n as u32);
+    let shift_d = get_msb_u32(denominator as u32);
+    let e_d = denominator - (1 << shift_d);
+    let f_d = if shift_d > DIV_LUT_BITS {
+        round_power_of_two_unsigned(e_d, shift_d - DIV_LUT_BITS)
+    } else {
+        e_d << (DIV_LUT_BITS - shift_d)
+    };
+    let f_n = if shift_n > DIV_LUT_BITS {
+        round_power_of_two_unsigned(n, shift_n - DIV_LUT_BITS)
+    } else {
+        n << (DIV_LUT_BITS - shift_n)
+    };
+
+    let shift_add = shift_d - shift_n - shift as i32;
+    let max_value = (2 << shift as i32) - 1;
+    let mut result = if shift_add <= 1 {
+        let shift0 = DIV_LUT_PREC_BITS + DIV_LUT_BITS + shift_add;
+        if shift0 >= 0 {
+            ((DIV_LUT[f_d as usize] as i32) * f_n) >> shift0
+        } else {
+            max_value
+        }
+    } else {
+        0
+    };
+    if result >= max_value {
+        result = max_value;
+    }
+    if sign {
+        result = -result;
+    }
+    result as i16
 }
 
-fn derive_cfl_alpha_q3_neighbors(
+fn derive_linear_parameters_alpha_cfl(
+    sum_x: i32,
+    sum_y: i32,
+    sum_xx: i32,
+    sum_xy: i32,
+    count: i32,
+    shift: i16,
+) -> i32 {
+    if count == 0 {
+        return 0;
+    }
+    let denominator = sum_xx - ((sum_x as i64 * sum_x as i64) / count as i64) as i32;
+    let numerator = sum_xy - ((sum_x as i64 * sum_y as i64) / count as i64) as i32;
+    if denominator == 0 || numerator == 0 {
+        return 0;
+    }
+    resolve_divisor_32_cfl(numerator, denominator, shift) as i32
+}
+
+fn clamp_index(index: isize, limit: usize) -> usize {
+    if limit == 0 {
+        0
+    } else {
+        index.clamp(0, limit.saturating_sub(1) as isize) as usize
+    }
+}
+
+fn sample_plane(plane: &[u8], stride: usize, width: usize, height: usize, x: isize, y: isize) -> u8 {
+    plane[clamp_index(y, height) * stride + clamp_index(x, width)]
+}
+
+fn cfl_top_bottom_offsets(is_top_sb_boundary: bool) -> (isize, isize) {
+    if is_top_sb_boundary {
+        (1, 0)
+    } else {
+        (2, 1)
+    }
+}
+
+fn cfl_store_luma_q3_420(
     y_plane: &[u8],
     y_w: usize,
     y_h: usize,
+    chroma_x: usize,
+    chroma_y: usize,
+    chroma_width: usize,
+    chroma_height: usize,
+    filter_type: u8,
+) -> Vec<i32> {
+    let uv_bw = chroma_width / 2;
+    let uv_bh = chroma_height / 2;
+    let mut recon_q3 = vec![0i32; uv_bw * uv_bh];
+
+    for j in (0..chroma_height).step_by(2) {
+        for i in (0..chroma_width).step_by(2) {
+            let x = chroma_x as isize + i as isize;
+            let y = chroma_y as isize + j as isize;
+            let left = chroma_x as isize + if i == 0 { 0 } else { i - 1 } as isize;
+            let value = match filter_type {
+                1 => {
+                    sample_plane(y_plane, y_w, y_w, y_h, left, y) as i32
+                        + 2 * sample_plane(y_plane, y_w, y_w, y_h, x, y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, left, y + 1) as i32
+                        + 2 * sample_plane(y_plane, y_w, y_w, y_h, x, y + 1) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, y + 1) as i32
+                }
+                2 => {
+                    let top_y = if j == 0 { y } else { y - 1 };
+                    sample_plane(y_plane, y_w, y_w, y_h, left, y) as i32
+                        + 4 * sample_plane(y_plane, y_w, y_w, y_h, x, y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x, top_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x, y + 1) as i32
+                }
+                _ => {
+                    (sample_plane(y_plane, y_w, y_w, y_h, x, y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x, y + 1) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, y + 1) as i32)
+                        << 1
+                }
+            };
+            recon_q3[(j / 2) * uv_bw + (i / 2)] = value;
+        }
+    }
+
+    recon_q3
+}
+
+fn cfl_fetch_neighbor_luma_refs_420(
+    y_plane: &[u8],
+    y_w: usize,
+    y_h: usize,
+    chroma_x: usize,
+    chroma_y: usize,
+    chroma_width: usize,
+    chroma_height: usize,
+    sb_size: usize,
+    filter_type: u8,
+) -> CflImplicitRefs {
+    let uv_bw = chroma_width / 2;
+    let uv_bh = chroma_height / 2;
+    let have_top = chroma_y > 0;
+    let have_left = chroma_x > 0;
+    let is_top_sb_boundary = chroma_y % sb_size == 0;
+    let trace = trace_block_match("WAV2C_TRACE_CFL", chroma_x / 2, chroma_y / 2);
+    let mut luma_top_q3 = vec![0i32; uv_bw];
+    let mut luma_left_q3 = vec![0i32; uv_bh];
+
+    if have_top {
+        let (top_offset, bottom_offset) = cfl_top_bottom_offsets(is_top_sb_boundary);
+        if trace {
+            let input_y = chroma_y as isize - top_offset;
+            let bot_y = input_y + bottom_offset;
+            let mut src_top = Vec::with_capacity(chroma_width);
+            let mut src_bot = Vec::with_capacity(chroma_width);
+            for i in 0..chroma_width {
+                let x = chroma_x as isize + i as isize;
+                src_top.push(sample_plane(y_plane, y_w, y_w, y_h, x, input_y));
+                src_bot.push(sample_plane(y_plane, y_w, y_w, y_h, x, bot_y));
+            }
+            eprintln!("[WAV2C_CFL_FETCH_LUMA_SRC_TOP] {:?}", src_top);
+            eprintln!("[WAV2C_CFL_FETCH_LUMA_SRC_BOT] {:?}", src_bot);
+        }
+        for i in (0..chroma_width).step_by(2) {
+            let x = chroma_x as isize + i as isize;
+            let left = chroma_x as isize + if i == 0 { 0 } else { i - 1 } as isize;
+            let input_y = chroma_y as isize - top_offset;
+            let bot_y = input_y + bottom_offset;
+            let value = match filter_type {
+                1 => {
+                    sample_plane(y_plane, y_w, y_w, y_h, left, input_y) as i32
+                        + 2 * sample_plane(y_plane, y_w, y_w, y_h, x, input_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, input_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, left, bot_y) as i32
+                        + 2 * sample_plane(y_plane, y_w, y_w, y_h, x, bot_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, bot_y) as i32
+                }
+                2 => {
+                    let top_y = if is_top_sb_boundary { input_y } else { input_y - 1 };
+                    sample_plane(y_plane, y_w, y_w, y_h, left, input_y) as i32
+                        + 4 * sample_plane(y_plane, y_w, y_w, y_h, x, input_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, input_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x, top_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x, bot_y) as i32
+                }
+                _ => {
+                    (sample_plane(y_plane, y_w, y_w, y_h, x, input_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, input_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x, bot_y) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x + 1, bot_y) as i32)
+                        << 1
+                }
+            };
+            luma_top_q3[i / 2] = value;
+        }
+
+        if chroma_x >= y_w {
+            luma_top_q3.fill(128);
+        } else if chroma_x + chroma_width > y_w {
+            let temp = chroma_width - ((chroma_x + chroma_width) - y_w);
+            for idx in (temp / 2)..uv_bw {
+                luma_top_q3[idx] = luma_top_q3[idx.saturating_sub(1)];
+            }
+        }
+    }
+
+    if have_left {
+        for j in (0..chroma_height).step_by(2) {
+            let row = chroma_y as isize + j as isize;
+            let next_row = row + 1;
+            let x_m3 = chroma_x as isize - 3;
+            let x_m2 = chroma_x as isize - 2;
+            let x_m1 = chroma_x as isize - 1;
+            let value = match filter_type {
+                1 => {
+                    sample_plane(y_plane, y_w, y_w, y_h, x_m3, row) as i32
+                        + 2 * sample_plane(y_plane, y_w, y_w, y_h, x_m2, row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m1, row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m3, next_row) as i32
+                        + 2 * sample_plane(y_plane, y_w, y_w, y_h, x_m2, next_row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m1, next_row) as i32
+                }
+                2 => {
+                    let top_row = if j == 0 { row } else { row - 1 };
+                    sample_plane(y_plane, y_w, y_w, y_h, x_m3, row) as i32
+                        + 4 * sample_plane(y_plane, y_w, y_w, y_h, x_m2, row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m1, row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m2, top_row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m2, next_row) as i32
+                }
+                _ => {
+                    (sample_plane(y_plane, y_w, y_w, y_h, x_m2, row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m1, row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m2, next_row) as i32
+                        + sample_plane(y_plane, y_w, y_w, y_h, x_m1, next_row) as i32)
+                        << 1
+                }
+            };
+            luma_left_q3[j / 2] = value;
+        }
+
+        if chroma_y >= y_h {
+            luma_left_q3.fill(128);
+        } else if chroma_y + chroma_height > y_h {
+            let temp = chroma_height - ((chroma_y + chroma_height) - y_h);
+            for idx in (temp / 2)..uv_bh {
+                luma_left_q3[idx] = luma_left_q3[idx.saturating_sub(1)];
+            }
+        }
+    }
+
+    CflImplicitRefs {
+        have_top,
+        have_left,
+        luma_top_q3,
+        luma_left_q3,
+    }
+}
+
+fn cfl_fetch_neighbor_chroma_refs(
     chroma_plane: &[u8],
     uv_w: usize,
     uv_h: usize,
@@ -306,81 +557,184 @@ fn derive_cfl_alpha_q3_neighbors(
     uv_by: usize,
     uv_bw: usize,
     uv_bh: usize,
-) -> i32 {
-    let mut n = 0i64;
-    let mut sum_x = 0i64;
-    let mut sum_y = 0i64;
-    let mut sum_xx = 0i64;
-    let mut sum_xy = 0i64;
+) -> (Vec<u8>, Vec<u8>) {
+    let mut top = vec![0u8; uv_bw];
+    let mut left = vec![0u8; uv_bh];
     let trace = trace_block_match("WAV2C_TRACE_CFL", uv_bx, uv_by);
-    let mut samples: Vec<(usize, usize, i64, i64)> = Vec::new();
-
-    let mut add_sample = |sx: usize, sy: usize| {
-        if sx >= uv_w || sy >= uv_h {
-            return;
-        }
-        if let Some(x_q3) = subsampled_luma_q3(y_plane, y_w, y_h, sx, sy) {
-            let yv = chroma_plane[sy * uv_w + sx] as i64;
-            if trace {
-                samples.push((sx, sy, x_q3, yv));
-            }
-            n += 1;
-            sum_x += x_q3;
-            sum_y += yv;
-            sum_xx += x_q3 * x_q3;
-            sum_xy += x_q3 * yv;
-        }
-    };
 
     if uv_by > 0 {
-        let sy = uv_by - 1;
-        for dx in 0..uv_bw {
-            add_sample(uv_bx + dx, sy);
-        }
-    }
-    if uv_bx > 0 {
-        let sx = uv_bx - 1;
-        for dy in 0..uv_bh {
-            add_sample(sx, uv_by + dy);
-        }
-    }
-
-    if n < 2 {
-        return 0;
-    }
-
-    let cov_num = n * sum_xy - sum_x * sum_y;
-    let var_num = n * sum_xx - sum_x * sum_x;
-    if var_num == 0 {
         if trace {
-            eprintln!(
-                "[WAV2C_CFL_DERIVE] uv=({}, {}) size={}x{} n={} sum_x={} sum_y={} sum_xx={} sum_xy={} cov={} var={} alpha=0",
-                uv_bx, uv_by, uv_bw, uv_bh, n, sum_x, sum_y, sum_xx, sum_xy, cov_num, var_num
+            let mut src_top = Vec::with_capacity(uv_bw);
+            for x in 0..uv_bw {
+                src_top.push(sample_plane(
+                    chroma_plane,
+                    uv_w,
+                    uv_w,
+                    uv_h,
+                    (uv_bx + x) as isize,
+                    (uv_by - 1) as isize,
+                ));
+            }
+            eprintln!("[WAV2C_CFL_FETCH_CHROMA_SRC_TOP] {:?}", src_top);
+        }
+        for x in 0..uv_bw {
+            top[x] = sample_plane(
+                chroma_plane,
+                uv_w,
+                uv_w,
+                uv_h,
+                (uv_bx + x) as isize,
+                (uv_by - 1) as isize,
             );
-            for (sx, sy, x_q3, yv) in samples.iter() {
-                eprintln!(
-                    "[WAV2C_CFL_SAMPLE] s=({}, {}) x_q3={} y={}",
-                    sx, sy, x_q3, yv
-                );
+        }
+        if uv_bx >= uv_w {
+            top.fill(128);
+        } else if uv_bx + uv_bw > uv_w {
+            let temp = uv_bw - ((uv_bx + uv_bw) - uv_w);
+            for idx in temp..uv_bw {
+                top[idx] = top[idx.saturating_sub(1)];
             }
         }
-        return 0;
     }
 
-    let alpha_q3 = div_round_signed(cov_num << 11, var_num).clamp(-1024, 1024);
-    if trace {
-        eprintln!(
-            "[WAV2C_CFL_DERIVE] uv=({}, {}) size={}x{} n={} sum_x={} sum_y={} sum_xx={} sum_xy={} cov={} var={} alpha={}",
-            uv_bx, uv_by, uv_bw, uv_bh, n, sum_x, sum_y, sum_xx, sum_xy, cov_num, var_num, alpha_q3
-        );
-        for (sx, sy, x_q3, yv) in samples.iter() {
-            eprintln!(
-                "[WAV2C_CFL_SAMPLE] s=({}, {}) x_q3={} y={}",
-                sx, sy, x_q3, yv
+    if uv_bx > 0 {
+        for y in 0..uv_bh {
+            left[y] = sample_plane(
+                chroma_plane,
+                uv_w,
+                uv_w,
+                uv_h,
+                (uv_bx - 1) as isize,
+                (uv_by + y) as isize,
             );
         }
+        if uv_by >= uv_h {
+            left.fill(128);
+        } else if uv_by + uv_bh > uv_h {
+            let temp = uv_bh - ((uv_by + uv_bh) - uv_h);
+            for idx in temp..uv_bh {
+                left[idx] = left[idx.saturating_sub(1)];
+            }
+        }
     }
-    alpha_q3 as i32
+
+    (top, left)
+}
+
+fn cfl_calc_luma_dc_q3(refs: &CflImplicitRefs, width: usize, height: usize) -> i32 {
+    let ss_hor = if width > 32 { 2 } else { 1 };
+    let ss_ver = if height > 32 { 2 } else { 1 };
+    let mut sum_x = 0i32;
+    let mut count = 0usize;
+
+    if refs.have_top {
+        for idx in (0..width).step_by(ss_hor) {
+            sum_x += refs.luma_top_q3[idx];
+            count += 1;
+        }
+    }
+
+    if refs.have_left {
+        for idx in (0..height).step_by(ss_ver) {
+            sum_x += refs.luma_left_q3[idx];
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        128 * 8
+    } else {
+        let (scale, shift) = resolve_divisor_32(count as u32);
+        let rounding = (1i32 << shift) >> 1;
+        let value = ((sum_x * scale as i32) + rounding) >> shift;
+        value.min((1 << 11) - 1)
+    }
+}
+
+fn cfl_sample_counts(width: usize, height: usize, have_top: bool, have_left: bool) -> (usize, usize) {
+    let (mut numb_up, mut numb_left) = if have_top && have_left {
+        if width > height * 2 {
+            (NUM_REF_SAM_CFL, 0)
+        } else if height > width * 2 {
+            (0, NUM_REF_SAM_CFL)
+        } else {
+            (NUM_REF_SAM_CFL >> 1, NUM_REF_SAM_CFL >> 1)
+        }
+    } else {
+        (
+            if have_top { NUM_REF_SAM_CFL } else { 0 },
+            if have_left { NUM_REF_SAM_CFL } else { 0 },
+        )
+    };
+
+    numb_up = numb_up.min(width);
+    numb_left = numb_left.min(height);
+    (numb_up, numb_left)
+}
+
+fn cfl_derive_implicit_alpha_q3(
+    refs: &CflImplicitRefs,
+    chroma_top: &[u8],
+    chroma_left: &[u8],
+    width: usize,
+    height: usize,
+) -> CflImplicitAlpha {
+    let (numb_up, numb_left) = cfl_sample_counts(width, height, refs.have_top, refs.have_left);
+    let mut count = 0i32;
+    let mut sum_x = 0i32;
+    let mut sum_y = 0i32;
+    let mut sum_xx = 0i32;
+    let mut sum_xy = 0i32;
+    let mut samples = Vec::with_capacity(numb_up + numb_left);
+
+    if numb_up > 0 {
+        let step_up = (width / numb_up).max(1);
+        let start_up = if step_up == 1 { 0 } else { step_up >> 1 };
+        for idx in (start_up..width).step_by(step_up) {
+            let x_q3 = refs.luma_top_q3[idx];
+            let y = chroma_top[idx];
+            let x_q0 = x_q3 >> 3;
+            sum_x += x_q0;
+            sum_y += y as i32;
+            sum_xy += x_q0 * y as i32;
+            sum_xx += x_q0 * x_q0;
+            count += 1;
+            samples.push(CflImplicitSample {
+                side: "top",
+                idx,
+                x_q3,
+                y,
+            });
+        }
+    }
+
+    if numb_left > 0 {
+        let step_left = (height / numb_left).max(1);
+        let start_left = if step_left == 1 { 0 } else { step_left >> 1 };
+        for idx in (start_left..height).step_by(step_left) {
+            let x_q3 = refs.luma_left_q3[idx];
+            let y = chroma_left[idx];
+            let x_q0 = x_q3 >> 3;
+            sum_x += x_q0;
+            sum_y += y as i32;
+            sum_xy += x_q0 * y as i32;
+            sum_xx += x_q0 * x_q0;
+            count += 1;
+            samples.push(CflImplicitSample {
+                side: "left",
+                idx,
+                x_q3,
+                y,
+            });
+        }
+    }
+
+    CflImplicitAlpha {
+        alpha_q3: derive_linear_parameters_alpha_cfl(sum_x, sum_y, sum_xx, sum_xy, count, 8),
+        numb_up,
+        numb_left,
+        samples,
+    }
 }
 
 fn luma_center_q0(y_plane: &[u8], y_w: usize, y_h: usize, uv_x: usize, uv_y: usize) -> Option<f64> {
@@ -623,6 +977,20 @@ fn reconstruct_tu(
     }
 }
 
+fn mark_region_ready(
+    ready: &mut [bool],
+    stride: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) {
+    for row in 0..height {
+        let row_start = (y + row) * stride + x;
+        ready[row_start..row_start + width].fill(true);
+    }
+}
+
 const BLK_SIZE_LOG2_BAWP: [usize; 17] = [0, 0, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4];
 const LOG_TO_BLK_SIZE_BAWP: [usize; 5] = [0, 2, 4, 8, 16];
 
@@ -819,6 +1187,7 @@ fn reconstruct_partitioned_frame(
     dequant: i32,
     uv_dequant: i32,
     tcq_mode: bool,
+    cfl_ds_filter_index: u8,
     sb_size: usize,
     enable_ibp: bool,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -829,6 +1198,9 @@ fn reconstruct_partitioned_frame(
     let mut y_plane = vec![128u8; w * h];
     let mut u_plane = vec![128u8; uv_w * uv_h];
     let mut v_plane = vec![128u8; uv_w * uv_h];
+    let mut y_ready = vec![false; w * h];
+    let mut u_ready = vec![false; uv_w * uv_h];
+    let mut v_ready = vec![false; uv_w * uv_h];
 
     let mi_cols = (w + 3) / 4;
     let mi_rows = (h + 3) / 4;
@@ -889,6 +1261,7 @@ fn reconstruct_partitioned_frame(
                         let src = r * bw;
                         y_plane[dst..dst + bw].copy_from_slice(&y_pred[src..src + bw]);
                     }
+                    mark_region_ready(&mut y_ready, w, bx, by, bw, bh);
                 } else {
                     for tu in block.y_tu.iter() {
                         let tu_w = tu.tx_size.width();
@@ -911,6 +1284,7 @@ fn reconstruct_partitioned_frame(
                             tu.row_offset,
                             &residuals,
                         );
+                        mark_region_ready(&mut y_ready, w, tx, ty, tu_w, tu_h);
                     }
                 }
             } else if !block.palette_y_map.is_empty() {
@@ -942,6 +1316,7 @@ fn reconstruct_partitioned_frame(
                         tu.row_offset,
                         &residuals,
                     );
+                    mark_region_ready(&mut y_ready, w, tx, ty, tu_w, tu_h);
                 }
             } else {
                 let sb_y = (by / sb_size) * sb_size;
@@ -950,7 +1325,7 @@ fn reconstruct_partitioned_frame(
                     let tu_h = tu.tx_size.height();
                     let tx = bx + tu.col_offset;
                     let ty = by + tu.row_offset;
-                    let y_pred = predict::predict_intra_with_control(
+                    let y_pred = predict::predict_intra_with_control_and_availability(
                         &y_plane,
                         w,
                         tx,
@@ -966,6 +1341,7 @@ fn reconstruct_partitioned_frame(
                             enable_ibp,
                             is_cfl: false,
                         },
+                        Some(&y_ready),
                     );
                     let residuals = transform::dequantize_and_inverse_tcq(
                         &tu.levels, tu.eob, dequant, tu.tx_size, tu.tx_type, tcq_mode,
@@ -983,6 +1359,7 @@ fn reconstruct_partitioned_frame(
                         0,
                         &residuals,
                     );
+                    mark_region_ready(&mut y_ready, w, tx, ty, tu_w, tu_h);
                 }
             }
         }
@@ -1079,7 +1456,7 @@ fn reconstruct_partitioned_frame(
                     );
                     (u_pred, v_pred)
                 } else {
-                    let u_dc_pred = predict::predict_intra_with_control(
+                    let u_dc_pred = predict::predict_intra_with_control_and_availability(
                         &u_plane,
                         uv_w,
                         uv_bx,
@@ -1095,8 +1472,9 @@ fn reconstruct_partitioned_frame(
                             enable_ibp,
                             is_cfl: true,
                         },
+                        Some(&u_ready),
                     );
-                    let v_dc_pred = predict::predict_intra_with_control(
+                    let v_dc_pred = predict::predict_intra_with_control_and_availability(
                         &v_plane,
                         uv_w,
                         uv_bx,
@@ -1112,35 +1490,52 @@ fn reconstruct_partitioned_frame(
                             enable_ibp,
                             is_cfl: true,
                         },
+                        Some(&v_ready),
                     );
 
-                    let mut recon_q3 = vec![0i16; uv_bw * uv_bh];
-                    for r in 0..uv_bh {
-                        for c in 0..uv_bw {
-                            let ly = chroma_y + r * 2;
-                            let lx = chroma_x + c * 2;
-                            let sum = y_plane[ly * w + lx] as i32
-                                + y_plane[ly * w + lx + 1] as i32
-                                + y_plane[(ly + 1) * w + lx] as i32
-                                + y_plane[(ly + 1) * w + lx + 1] as i32;
-                            recon_q3[r * uv_bw + c] = (sum * 2) as i16;
-                        }
-                    }
-
-                    let avg_q3 =
-                        cfl_neighbor_avg_q3(&y_plane, w, h, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh);
-
+                    let recon_q3 = cfl_store_luma_q3_420(
+                        &y_plane,
+                        w,
+                        h,
+                        chroma_x,
+                        chroma_y,
+                        chroma_width,
+                        chroma_height,
+                        cfl_ds_filter_index,
+                    );
+                    let luma_refs = cfl_fetch_neighbor_luma_refs_420(
+                        &y_plane,
+                        w,
+                        h,
+                        chroma_x,
+                        chroma_y,
+                        chroma_width,
+                        chroma_height,
+                        sb_size,
+                        cfl_ds_filter_index,
+                    );
+                    let avg_q3 = cfl_calc_luma_dc_q3(&luma_refs, uv_bw, uv_bh);
                     let trace_cfl = trace_block_match("WAV2C_TRACE_CFL", uv_bx, uv_by);
+                    let (u_top_refs, u_left_refs, u_alpha_info, v_top_refs, v_left_refs, v_alpha_info) =
+                        if block.cfl_idx == 0 {
+                            (Vec::new(), Vec::new(), None, Vec::new(), Vec::new(), None)
+                        } else {
+                            let (u_top, u_left) =
+                                cfl_fetch_neighbor_chroma_refs(&u_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh);
+                            let (v_top, v_left) =
+                                cfl_fetch_neighbor_chroma_refs(&v_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh);
+                            let u_alpha =
+                                cfl_derive_implicit_alpha_q3(&luma_refs, &u_top, &u_left, uv_bw, uv_bh);
+                            let v_alpha =
+                                cfl_derive_implicit_alpha_q3(&luma_refs, &v_top, &v_left, uv_bw, uv_bh);
+                            (u_top, u_left, Some(u_alpha), v_top, v_left, Some(v_alpha))
+                        };
                     let (alpha_u_q3, alpha_v_q3) = if block.cfl_idx == 0 {
                         (block.cfl_alpha_u as i32 * 32, block.cfl_alpha_v as i32 * 32)
                     } else {
                         (
-                            derive_cfl_alpha_q3_neighbors(
-                                &y_plane, w, h, &u_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh,
-                            ),
-                            -derive_cfl_alpha_q3_neighbors(
-                                &y_plane, w, h, &v_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh,
-                            ),
+                            u_alpha_info.as_ref().map(|info| info.alpha_q3).unwrap_or(0),
+                            v_alpha_info.as_ref().map(|info| info.alpha_q3).unwrap_or(0),
                         )
                     };
                     if trace_cfl {
@@ -1148,6 +1543,40 @@ fn reconstruct_partitioned_frame(
                             "[WAV2C_CFL_BLOCK] uv=({}, {}) size={}x{} cfl_idx={} avg_q3={} alpha_u={} alpha_v={}",
                             uv_bx, uv_by, uv_bw, uv_bh, block.cfl_idx, avg_q3, alpha_u_q3, alpha_v_q3
                         );
+                        eprintln!(
+                            "[WAV2C_CFL_REFS] have_top={} have_left={}",
+                            luma_refs.have_top, luma_refs.have_left
+                        );
+                        eprintln!("[WAV2C_CFL_REFS] luma_top_q3={:?}", luma_refs.luma_top_q3);
+                        eprintln!("[WAV2C_CFL_REFS] luma_left_q3={:?}", luma_refs.luma_left_q3);
+                        if let Some(alpha) = &u_alpha_info {
+                            eprintln!("[WAV2C_CFL_REFS] plane=U top={:?}", u_top_refs);
+                            eprintln!("[WAV2C_CFL_REFS] plane=U left={:?}", u_left_refs);
+                            eprintln!(
+                                "[WAV2C_CFL_DERIVE] plane=U numb_up={} numb_left={} alpha={}",
+                                alpha.numb_up, alpha.numb_left, alpha.alpha_q3
+                            );
+                            for sample in &alpha.samples {
+                                eprintln!(
+                                    "[WAV2C_CFL_SAMPLE] plane=U side={} idx={} x_q3={} y={}",
+                                    sample.side, sample.idx, sample.x_q3, sample.y
+                                );
+                            }
+                        }
+                        if let Some(alpha) = &v_alpha_info {
+                            eprintln!("[WAV2C_CFL_REFS] plane=V top={:?}", v_top_refs);
+                            eprintln!("[WAV2C_CFL_REFS] plane=V left={:?}", v_left_refs);
+                            eprintln!(
+                                "[WAV2C_CFL_DERIVE] plane=V numb_up={} numb_left={} alpha={}",
+                                alpha.numb_up, alpha.numb_left, alpha.alpha_q3
+                            );
+                            for sample in &alpha.samples {
+                                eprintln!(
+                                    "[WAV2C_CFL_SAMPLE] plane=V side={} idx={} x_q3={} y={}",
+                                    sample.side, sample.idx, sample.x_q3, sample.y
+                                );
+                            }
+                        }
                         eprintln!("[WAV2C_CFL_DC] u_dc={:?}", u_dc_pred);
                         eprintln!("[WAV2C_CFL_DC] v_dc={:?}", v_dc_pred);
                         eprintln!("[WAV2C_CFL_AC] recon_q3={:?}", recon_q3);
@@ -1157,7 +1586,7 @@ fn reconstruct_partitioned_frame(
                     let mut v_cfl = vec![0u8; uv_bw * uv_bh];
                     for r in 0..uv_bh {
                         for c in 0..uv_bw {
-                            let ac = recon_q3[r * uv_bw + c] as i32 - avg_q3;
+                            let ac = recon_q3[r * uv_bw + c] - avg_q3;
                             let u_dc = u_dc_pred[r * uv_bw + c] as i32;
                             let u_scaled = round_power_of_two_signed(alpha_u_q3 * ac, 11);
                             u_cfl[r * uv_bw + c] = (u_dc + u_scaled).clamp(0, 255) as u8;
@@ -1184,7 +1613,7 @@ fn reconstruct_partitioned_frame(
                     };
                 let tu_count = block.u_tu.len().min(block.v_tu.len());
                 if tu_count == 0 {
-                    let u_p = predict::predict_intra_with_control(
+                    let u_p = predict::predict_intra_with_control_and_availability(
                         &u_plane,
                         uv_w,
                         uv_bx,
@@ -1200,8 +1629,9 @@ fn reconstruct_partitioned_frame(
                             enable_ibp,
                             is_cfl: false,
                         },
+                        Some(&u_ready),
                     );
-                    let v_p = predict::predict_intra_with_control(
+                    let v_p = predict::predict_intra_with_control_and_availability(
                         &v_plane,
                         uv_w,
                         uv_bx,
@@ -1217,6 +1647,7 @@ fn reconstruct_partitioned_frame(
                             enable_ibp,
                             is_cfl: false,
                         },
+                        Some(&v_ready),
                     );
                     (u_p, v_p)
                 } else {
@@ -1254,7 +1685,7 @@ fn reconstruct_partitioned_frame(
                         let u_tu_h = u_tu.tx_size.height();
                         let u_tx = uv_bx + u_tu.col_offset;
                         let u_ty = uv_by + u_tu.row_offset;
-                        let u_pred = predict::predict_intra_with_control(
+                        let u_pred = predict::predict_intra_with_control_and_availability(
                             &u_plane,
                             uv_w,
                             u_tx,
@@ -1270,6 +1701,7 @@ fn reconstruct_partitioned_frame(
                                 enable_ibp,
                                 is_cfl: false,
                             },
+                            Some(&u_ready),
                         );
                         reconstruct_tu(
                             &mut u_plane,
@@ -1284,12 +1716,13 @@ fn reconstruct_partitioned_frame(
                             0,
                             &u_res,
                         );
+                        mark_region_ready(&mut u_ready, uv_w, u_tx, u_ty, u_tu_w, u_tu_h);
 
                         let v_tu_w = v_tu.tx_size.width();
                         let v_tu_h = v_tu.tx_size.height();
                         let v_tx = uv_bx + v_tu.col_offset;
                         let v_ty = uv_by + v_tu.row_offset;
-                        let v_pred = predict::predict_intra_with_control(
+                        let v_pred = predict::predict_intra_with_control_and_availability(
                             &v_plane,
                             uv_w,
                             v_tx,
@@ -1305,6 +1738,7 @@ fn reconstruct_partitioned_frame(
                                 enable_ibp,
                                 is_cfl: false,
                             },
+                            Some(&v_ready),
                         );
                         reconstruct_tu(
                             &mut v_plane,
@@ -1319,6 +1753,7 @@ fn reconstruct_partitioned_frame(
                             0,
                             &v_res,
                         );
+                        mark_region_ready(&mut v_ready, uv_w, v_tx, v_ty, v_tu_w, v_tu_h);
                     }
                     continue;
                 }
@@ -1332,6 +1767,8 @@ fn reconstruct_partitioned_frame(
                     u_plane[dst..dst + uv_bw].copy_from_slice(&u_pred[src..src + uv_bw]);
                     v_plane[dst..dst + uv_bw].copy_from_slice(&v_pred[src..src + uv_bw]);
                 }
+                mark_region_ready(&mut u_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
+                mark_region_ready(&mut v_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
             } else {
                 for i in 0..tu_count {
                     let u_tu = &block.u_tu[i];
@@ -1378,6 +1815,14 @@ fn reconstruct_partitioned_frame(
                         u_tu.row_offset,
                         &u_res,
                     );
+                    mark_region_ready(
+                        &mut u_ready,
+                        uv_w,
+                        uv_bx + u_tu.col_offset,
+                        uv_by + u_tu.row_offset,
+                        u_tu_w,
+                        u_tu_h,
+                    );
 
                     let v_tu_w = v_tu.tx_size.width();
                     let v_tu_h = v_tu.tx_size.height();
@@ -1393,6 +1838,14 @@ fn reconstruct_partitioned_frame(
                         v_tu.col_offset,
                         v_tu.row_offset,
                         &v_res,
+                    );
+                    mark_region_ready(
+                        &mut v_ready,
+                        uv_w,
+                        uv_bx + v_tu.col_offset,
+                        uv_by + v_tu.row_offset,
+                        v_tu_w,
+                        v_tu_h,
                     );
                 }
             }
@@ -1850,6 +2303,7 @@ mod tests {
             dequant,
             uv_dequant,
             fp.tcq_mode,
+            seq.cfl_ds_filter_index,
             seq.sb_size as usize,
             seq.enable_ibp,
         );
@@ -2080,6 +2534,7 @@ mod tests {
             dequant,
             uv_dequant_128,
             fp.tcq_mode,
+            seq.cfl_ds_filter_index,
             seq.sb_size as usize,
             seq.enable_ibp,
         );
