@@ -60,12 +60,48 @@ pub struct FrameParams<'a> {
     pub nb_cdef_strengths: u32,
     pub ccso_frame_enable: bool,
     pub ccso_enable: [bool; 3],
+    pub ccso_params: CcsoParams,
     pub delta_q_present: bool,
     pub delta_q_res: u32,
     pub tcq_mode: bool,
     pub allow_parity_hiding: bool,
     pub u_ac_delta_q: i32,
     pub v_ac_delta_q: i32,
+}
+
+pub const CCSO_BAND_NUM: usize = 64;
+
+#[derive(Clone, Debug)]
+pub struct CcsoPlaneParams {
+    pub enabled: bool,
+    pub bo_only: bool,
+    pub scale_idx: u8,
+    pub quant_idx: u8,
+    pub ext_filter_support: u8,
+    pub edge_clf: u8,
+    pub max_band_log2: u8,
+    pub filter_offset: [i8; CCSO_BAND_NUM * 16],
+}
+
+impl Default for CcsoPlaneParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bo_only: false,
+            scale_idx: 0,
+            quant_idx: 0,
+            ext_filter_support: 0,
+            edge_clf: 0,
+            max_band_log2: 0,
+            filter_offset: [0; CCSO_BAND_NUM * 16],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CcsoParams {
+    pub frame_enabled: bool,
+    pub planes: [CcsoPlaneParams; 3],
 }
 
 pub fn parse_frame_header<'a>(
@@ -233,43 +269,60 @@ fn read_ccso_offset_idx(r: &mut BitReader) -> usize {
     idx
 }
 
-fn parse_ccso_params(r: &mut BitReader) -> [bool; 3] {
-    let mut ccso_enable_planes = [false; 3];
+fn parse_ccso_params(r: &mut BitReader) -> CcsoParams {
+    let ccso_offset = [0i8, 1, -1, 3, -3, 7, -7, -10];
+    let ccso_scale = [1i8, 2, 3, 4];
+    let mut ccso = CcsoParams {
+        frame_enabled: true,
+        ..CcsoParams::default()
+    };
     for plane in 0..3 {
         let ccso_enable = r.read_bit();
-        ccso_enable_planes[plane] = ccso_enable;
+        ccso.planes[plane].enabled = ccso_enable;
         if ccso_enable {
             let ccso_bo_only = r.read_bit();
+            ccso.planes[plane].bo_only = ccso_bo_only;
             let scale_idx = r.read_literal(2) as usize;
+            ccso.planes[plane].scale_idx = scale_idx as u8;
 
             let (max_band_log2, num_edge_intervals) = if ccso_bo_only {
                 let mbl = r.read_literal(3);
+                ccso.planes[plane].quant_idx = 0;
+                ccso.planes[plane].ext_filter_support = 0;
+                ccso.planes[plane].edge_clf = 0;
                 (mbl, 1usize)
             } else {
                 let quant_idx = r.read_literal(2) as usize;
-                let _ext_filter_support = r.read_literal(3);
+                ccso.planes[plane].quant_idx = quant_idx as u8;
+                let ext_filter_support = r.read_literal(3) as u8;
+                ccso.planes[plane].ext_filter_support = ext_filter_support;
                 let edge_clf = if CCSO_QUANT_SZ[scale_idx][quant_idx] != 0 {
                     r.read_bit() as usize
                 } else {
                     0
                 };
+                ccso.planes[plane].edge_clf = edge_clf as u8;
                 let mbl = r.read_literal(2);
                 let max_edge_interval = if edge_clf == 0 { 3 } else { 2 };
                 (mbl, max_edge_interval)
             };
 
+            ccso.planes[plane].max_band_log2 = max_band_log2 as u8;
             let max_band = 1u32 << max_band_log2;
 
-            for _d0 in 0..num_edge_intervals {
-                for _d1 in 0..num_edge_intervals {
-                    for _band in 0..max_band {
-                        let _offset_idx = read_ccso_offset_idx(r);
+            for d0 in 0..num_edge_intervals {
+                for d1 in 0..num_edge_intervals {
+                    for band in 0..max_band {
+                        let offset_idx = read_ccso_offset_idx(r);
+                        let lut_idx = ((band as usize) << 4) + (d0 << 2) + d1;
+                        ccso.planes[plane].filter_offset[lut_idx] =
+                            ccso_offset[offset_idx] * ccso_scale[scale_idx];
                     }
                 }
             }
         }
     }
-    ccso_enable_planes
+    ccso
 }
 
 fn parse_frame_header_sph0<'a>(
@@ -498,10 +551,12 @@ fn parse_frame_header_sph0<'a>(
 
     let mut ccso_frame_enable = false;
     let mut ccso_enable = [false; 3];
+    let mut ccso_params = CcsoParams::default();
     if !coded_lossless && seq.enable_ccso {
         ccso_frame_enable = r.read_bit();
         if ccso_frame_enable {
-            ccso_enable = parse_ccso_params(&mut r);
+            ccso_params = parse_ccso_params(&mut r);
+            ccso_enable = std::array::from_fn(|plane| ccso_params.planes[plane].enabled);
         }
     }
 
@@ -547,6 +602,7 @@ fn parse_frame_header_sph0<'a>(
         nb_cdef_strengths,
         ccso_frame_enable,
         ccso_enable,
+        ccso_params,
         delta_q_present,
         delta_q_res,
         tcq_mode,
@@ -779,9 +835,11 @@ fn parse_frame_header_sph1<'a>(
 
     let mut ccso_frame_enable = false;
     let mut ccso_enable = [false; 3];
+    let mut ccso_params = CcsoParams::default();
     if !coded_lossless && seq.enable_ccso {
         ccso_frame_enable = true;
-        ccso_enable = parse_ccso_params(&mut r);
+        ccso_params = parse_ccso_params(&mut r);
+        ccso_enable = std::array::from_fn(|plane| ccso_params.planes[plane].enabled);
     }
     eprintln!(
         "[FH_BITS] after ccso (enable={}): pos={}",
@@ -861,6 +919,7 @@ fn parse_frame_header_sph1<'a>(
         nb_cdef_strengths,
         ccso_frame_enable,
         ccso_enable,
+        ccso_params,
         delta_q_present,
         delta_q_res,
         tcq_mode,

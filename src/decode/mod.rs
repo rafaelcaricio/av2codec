@@ -44,6 +44,37 @@ fn trace_block_match(tag: &str, x: usize, y: usize) -> bool {
     }
 }
 
+fn trace_point_in_region(tag: &str, x: usize, y: usize, w: usize, h: usize) -> bool {
+    match std::env::var(tag) {
+        Ok(spec) => {
+            let mut parts = spec.split(',');
+            let px = parts
+                .next()
+                .and_then(|value| value.trim().parse::<usize>().ok());
+            let py = parts
+                .next()
+                .and_then(|value| value.trim().parse::<usize>().ok());
+            match (px, py) {
+                (Some(px), Some(py)) => px >= x && px < x + w && py >= y && py < y + h,
+                _ => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn trace_point(tag: &str) -> Option<(usize, usize)> {
+    let spec = std::env::var(tag).ok()?;
+    let mut parts = spec.split(',');
+    let x = parts
+        .next()
+        .and_then(|value| value.trim().parse::<usize>().ok())?;
+    let y = parts
+        .next()
+        .and_then(|value| value.trim().parse::<usize>().ok())?;
+    Some((x, y))
+}
+
 pub struct DecodedFrame {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
@@ -157,6 +188,7 @@ impl Decoder {
                                         seq.cfl_ds_filter_index,
                                         seq.sb_size as usize,
                                         seq.enable_ibp,
+                                        &fp.ccso_params,
                                     )
                                 }));
                             partitioned_result.unwrap_or_else(|_| gray_frame(seq.width, seq.height))
@@ -181,6 +213,7 @@ impl Decoder {
                         seq.cfl_ds_filter_index,
                         seq.sb_size as usize,
                         seq.enable_ibp,
+                        &fp.ccso_params,
                     )
                 }
             } else {
@@ -228,14 +261,13 @@ const NUM_REF_SAM_CFL: usize = 8;
 const DIV_LUT_BITS: i32 = 7;
 const DIV_LUT_PREC_BITS: i32 = 9;
 const DIV_LUT: [u16; 129] = [
-    512, 508, 504, 500, 496, 493, 489, 485, 482, 478, 475, 471, 468, 465, 462, 458, 455, 452,
-    449, 446, 443, 440, 437, 434, 431, 428, 426, 423, 420, 417, 415, 412, 410, 407, 405, 402,
-    400, 397, 395, 392, 390, 388, 386, 383, 381, 379, 377, 374, 372, 370, 368, 366, 364, 362,
-    360, 358, 356, 354, 352, 350, 349, 347, 345, 343, 341, 340, 338, 336, 334, 333, 331, 329,
-    328, 326, 324, 323, 321, 320, 318, 317, 315, 314, 312, 311, 309, 308, 306, 305, 303, 302,
-    301, 299, 298, 297, 295, 294, 293, 291, 290, 289, 287, 286, 285, 284, 282, 281, 280, 279,
-    278, 277, 275, 274, 273, 272, 271, 270, 269, 267, 266, 265, 264, 263, 262, 261, 260, 259,
-    258, 257, 256,
+    512, 508, 504, 500, 496, 493, 489, 485, 482, 478, 475, 471, 468, 465, 462, 458, 455, 452, 449,
+    446, 443, 440, 437, 434, 431, 428, 426, 423, 420, 417, 415, 412, 410, 407, 405, 402, 400, 397,
+    395, 392, 390, 388, 386, 383, 381, 379, 377, 374, 372, 370, 368, 366, 364, 362, 360, 358, 356,
+    354, 352, 350, 349, 347, 345, 343, 341, 340, 338, 336, 334, 333, 331, 329, 328, 326, 324, 323,
+    321, 320, 318, 317, 315, 314, 312, 311, 309, 308, 306, 305, 303, 302, 301, 299, 298, 297, 295,
+    294, 293, 291, 290, 289, 287, 286, 285, 284, 282, 281, 280, 279, 278, 277, 275, 274, 273, 272,
+    271, 270, 269, 267, 266, 265, 264, 263, 262, 261, 260, 259, 258, 257, 256,
 ];
 
 #[derive(Clone, Debug)]
@@ -355,16 +387,19 @@ fn clamp_index(index: isize, limit: usize) -> usize {
     }
 }
 
-fn sample_plane(plane: &[u8], stride: usize, width: usize, height: usize, x: isize, y: isize) -> u8 {
+fn sample_plane(
+    plane: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    x: isize,
+    y: isize,
+) -> u8 {
     plane[clamp_index(y, height) * stride + clamp_index(x, width)]
 }
 
 fn cfl_top_bottom_offsets(is_top_sb_boundary: bool) -> (isize, isize) {
-    if is_top_sb_boundary {
-        (1, 0)
-    } else {
-        (2, 1)
-    }
+    if is_top_sb_boundary { (1, 0) } else { (2, 1) }
 }
 
 fn cfl_store_luma_q3_420(
@@ -468,7 +503,11 @@ fn cfl_fetch_neighbor_luma_refs_420(
                         + sample_plane(y_plane, y_w, y_w, y_h, x + 1, bot_y) as i32
                 }
                 2 => {
-                    let top_y = if is_top_sb_boundary { input_y } else { input_y - 1 };
+                    let top_y = if is_top_sb_boundary {
+                        input_y
+                    } else {
+                        input_y - 1
+                    };
                     sample_plane(y_plane, y_w, y_w, y_h, left, input_y) as i32
                         + 4 * sample_plane(y_plane, y_w, y_w, y_h, x, input_y) as i32
                         + sample_plane(y_plane, y_w, y_w, y_h, x + 1, input_y) as i32
@@ -651,7 +690,12 @@ fn cfl_calc_luma_dc_q3(refs: &CflImplicitRefs, width: usize, height: usize) -> i
     }
 }
 
-fn cfl_sample_counts(width: usize, height: usize, have_top: bool, have_left: bool) -> (usize, usize) {
+fn cfl_sample_counts(
+    width: usize,
+    height: usize,
+    have_top: bool,
+    have_left: bool,
+) -> (usize, usize) {
     let (mut numb_up, mut numb_left) = if have_top && have_left {
         if width > height * 2 {
             (NUM_REF_SAM_CFL, 0)
@@ -737,220 +781,748 @@ fn cfl_derive_implicit_alpha_q3(
     }
 }
 
-fn luma_center_q0(y_plane: &[u8], y_w: usize, y_h: usize, uv_x: usize, uv_y: usize) -> Option<f64> {
-    let lx = uv_x * 2;
-    let ly = uv_y * 2;
-    if lx + 1 >= y_w || ly + 1 >= y_h {
-        return None;
-    }
-    let sum = y_plane[ly * y_w + lx] as f64
-        + y_plane[ly * y_w + lx + 1] as f64
-        + y_plane[(ly + 1) * y_w + lx] as f64
-        + y_plane[(ly + 1) * y_w + lx + 1] as f64;
-    Some(sum * 0.25)
+const MHCCP_LINE_NUM: usize = 1;
+const MHCCP_NUM_PARAMS: usize = 3;
+const MHCCP_DECIM_BITS: i32 = 16;
+const MHCCP_BUF_STRIDE: usize = 256;
+const MHCCP_BUF_SQUARE: usize = MHCCP_BUF_STRIDE * MHCCP_BUF_STRIDE;
+
+#[derive(Clone, Debug)]
+struct MhccpRefWindow {
+    have_top: bool,
+    have_left: bool,
+    above_lines: usize,
+    left_lines: usize,
+    ref_width: usize,
+    ref_height: usize,
+    stride: usize,
+    luma_q3: Vec<u16>,
+    chroma: Vec<u16>,
 }
 
-fn solve_3x3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
-    for i in 0..3 {
-        let mut pivot = i;
-        let mut best = a[i][i].abs();
-        for r in (i + 1)..3 {
-            if a[r][i].abs() > best {
-                best = a[r][i].abs();
-                pivot = r;
-            }
-        }
-        if best < 1e-9 {
-            return None;
-        }
-        if pivot != i {
-            a.swap(i, pivot);
-            b.swap(i, pivot);
-        }
-        let diag = a[i][i];
-        for c in i..3 {
-            a[i][c] /= diag;
-        }
-        b[i] /= diag;
-        for r in 0..3 {
-            if r == i {
-                continue;
-            }
-            let f = a[r][i];
-            if f.abs() < 1e-12 {
-                continue;
-            }
-            for c in i..3 {
-                a[r][c] -= f * a[i][c];
-            }
-            b[r] -= f * b[i];
-        }
+fn ceil_log2_usize(value: usize) -> i32 {
+    if value <= 1 {
+        0
+    } else {
+        usize::BITS as i32 - (value - 1).leading_zeros() as i32
     }
-    Some(b)
 }
 
-fn derive_mhccp_params_neighbors(
-    y_plane: &[u8],
-    y_w: usize,
-    y_h: usize,
+fn mhccp_pixel_is_ready(
+    ready: Option<&[bool]>,
+    stride: usize,
+    frame_h: usize,
+    x: usize,
+    y: usize,
+) -> bool {
+    x < stride && y < frame_h && ready.map_or(true, |mask| mask[y * stride + x])
+}
+
+fn mhccp_count_available_horizontal(
+    ready: Option<&[bool]>,
+    stride: usize,
+    frame_h: usize,
+    x: usize,
+    y: usize,
+    len: usize,
+) -> usize {
+    if y >= frame_h || x >= stride {
+        return 0;
+    }
+    let limit = len.min(stride - x);
+    let mut count = 0usize;
+    while count < limit && mhccp_pixel_is_ready(ready, stride, frame_h, x + count, y) {
+        count += 1;
+    }
+    count
+}
+
+fn mhccp_count_available_vertical(
+    ready: Option<&[bool]>,
+    stride: usize,
+    frame_h: usize,
+    x: usize,
+    y: usize,
+    len: usize,
+) -> usize {
+    if y >= frame_h || x >= stride {
+        return 0;
+    }
+    let limit = len.min(frame_h - y);
+    let mut count = 0usize;
+    while count < limit && mhccp_pixel_is_ready(ready, stride, frame_h, x, y + count) {
+        count += 1;
+    }
+    count
+}
+
+fn mhccp_should_fill(
+    row: usize,
+    col: usize,
+    above_lines: usize,
+    left_lines: usize,
+    width: usize,
+    height: usize,
+) -> bool {
+    !((row >= above_lines && col >= left_lines + width)
+        || (row >= above_lines + height && col >= left_lines))
+}
+
+fn mhccp_sample_region(
+    plane: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    origin_x: usize,
+    origin_y: usize,
+    region_w: usize,
+    region_h: usize,
+    local_x: isize,
+    local_y: isize,
+) -> u8 {
+    let x = local_x.clamp(0, region_w.saturating_sub(1) as isize) as usize;
+    let y = local_y.clamp(0, region_h.saturating_sub(1) as isize) as usize;
+    sample_plane(
+        plane,
+        stride,
+        width,
+        height,
+        (origin_x + x) as isize,
+        (origin_y + y) as isize,
+    )
+}
+
+fn mhccp_sample_chroma_input(
     chroma_plane: &[u8],
     uv_w: usize,
     uv_h: usize,
+    origin_uv_x: usize,
+    origin_uv_y: usize,
+    sample_x: isize,
+    sample_y: isize,
     uv_bx: usize,
     uv_by: usize,
     uv_bw: usize,
     uv_bh: usize,
-    mh_dir: u8,
-    plane_name: char,
-) -> Option<[f64; 3]> {
-    let mut ata = [[0.0f64; 3]; 3];
-    let mut aty = [0.0f64; 3];
-    let mut count = 0usize;
-    let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
-    let mut samples: Vec<(usize, usize, f64, f64, f64, f64, f64)> = Vec::new();
-
-    let mut add_sample = |sx: usize, sy: usize| {
-        if sx >= uv_w || sy >= uv_h {
-            return;
-        }
-        let center = match luma_center_q0(y_plane, y_w, y_h, sx, sy) {
-            Some(v) => v,
-            None => return,
-        };
-        let top = if sy > 0 {
-            luma_center_q0(y_plane, y_w, y_h, sx, sy - 1).unwrap_or(center)
-        } else {
-            center
-        };
-        let left = if sx > 0 {
-            luma_center_q0(y_plane, y_w, y_h, sx - 1, sy).unwrap_or(center)
-        } else {
-            center
-        };
-
-        let base = match mh_dir {
-            1 => top,
-            2 => left,
-            _ => center,
-        };
-        let feats = [base, (center * center + 128.0) / 256.0, 128.0];
-        let yv = chroma_plane[sy * uv_w + sx] as f64;
-        if trace {
-            samples.push((sx, sy, center, top, left, feats[1], yv));
-        }
-
-        for i in 0..3 {
-            aty[i] += feats[i] * yv;
-            for j in i..3 {
-                ata[i][j] += feats[i] * feats[j];
-            }
-        }
-        count += 1;
-    };
-
-    if uv_by > 0 {
-        let sy = uv_by - 1;
-        for dx in 0..uv_bw {
-            add_sample(uv_bx + dx, sy);
-        }
+    dc_pred: &[u8],
+) -> u16 {
+    let abs_x = origin_uv_x as isize + sample_x;
+    let abs_y = origin_uv_y as isize + sample_y;
+    if abs_x >= uv_bx as isize
+        && abs_x < (uv_bx + uv_bw) as isize
+        && abs_y >= uv_by as isize
+        && abs_y < (uv_by + uv_bh) as isize
+    {
+        let local_x = (abs_x as usize) - uv_bx;
+        let local_y = (abs_y as usize) - uv_by;
+        dc_pred[local_y * uv_bw + local_x] as u16
+    } else {
+        sample_plane(chroma_plane, uv_w, uv_w, uv_h, abs_x, abs_y) as u16
     }
-    if uv_bx > 0 {
-        let sx = uv_bx - 1;
-        for dy in 0..uv_bh {
-            add_sample(sx, uv_by + dy);
-        }
-    }
-
-    if count < 3 {
-        return None;
-    }
-
-    for i in 0..3 {
-        for j in 0..i {
-            ata[i][j] = ata[j][i];
-        }
-    }
-    let ridge = 1024.0;
-    ata[0][0] += ridge;
-    ata[1][1] += ridge;
-    ata[2][2] += ridge;
-
-    let mut params = solve_3x3(ata, aty)?;
-    params[0] = params[0].clamp(-2.0, 2.0);
-    params[1] = params[1].clamp(-2.0, 2.0);
-    params[2] = params[2].clamp(-1.0, 2.0);
-    if trace {
-        eprintln!(
-            "[WAV2C_MHCCP_DERIVE] plane={} uv=({}, {}) size={}x{} dir={} count={} params={:?}",
-            plane_name, uv_bx, uv_by, uv_bw, uv_bh, mh_dir, count, params
-        );
-        eprintln!(
-            "[WAV2C_MHCCP_DERIVE] ata={:?} aty={:?}",
-            ata, aty
-        );
-        for (sx, sy, center, top, left, nonlinear, yv) in samples.iter() {
-            eprintln!(
-                "[WAV2C_MHCCP_SAMPLE] plane={} s=({}, {}) c={:.3} t={:.3} l={:.3} nl={:.3} y={:.3}",
-                plane_name, sx, sy, center, top, left, nonlinear, yv
-            );
-        }
-    }
-    Some(params)
 }
 
-fn mhccp_predict_block(
+fn mhccp_non_linear(value: u16, mid: u16, bit_depth: usize) -> u16 {
+    (((value as u32 * value as u32) + mid as u32) >> bit_depth) as u16
+}
+
+fn mul_fixed32_adapt(a: i32, b: i32, shift: i32) -> i32 {
+    let ua = a.unsigned_abs();
+    let ub = b.unsigned_abs();
+    let bits_a = 31 - (ua | 1).leading_zeros() as i32 + 1;
+    let bits_b = 31 - (ub | 1).leading_zeros() as i32 + 1;
+    let bits_limit = 29;
+
+    let mut need = bits_a + bits_b - bits_limit;
+    if need < 0 {
+        need = 0;
+    }
+
+    let s1 = need >> 1;
+    let s2 = need - s1;
+    let adj = shift - (s1 + s2);
+    let a_sh = if s1 > 0 { a >> s1 } else { a };
+    let b_sh = if s2 > 0 { b >> s2 } else { b };
+    let prod = a_sh.saturating_mul(b_sh);
+
+    if adj <= 0 {
+        return prod;
+    }
+
+    let bias = if adj <= bits_limit {
+        1u32 << (adj - 1)
+    } else {
+        0
+    };
+    if prod >= 0 {
+        if adj <= bits_limit {
+            ((prod as u32 + bias) >> adj) as i32
+        } else {
+            0
+        }
+    } else if adj <= bits_limit {
+        -(((prod.unsigned_abs() + bias) >> adj) as i32)
+    } else {
+        0
+    }
+}
+
+fn floor_log2_u64(mut value: u64) -> i32 {
+    if value == 0 {
+        return 0;
+    }
+    let mut result = 0i32;
+    if value & 0xffffffff00000000 != 0 {
+        value >>= 32;
+        result += 32;
+    }
+    if value & 0xffff0000 != 0 {
+        value >>= 16;
+        result += 16;
+    }
+    if value & 0xff00 != 0 {
+        value >>= 8;
+        result += 8;
+    }
+    if value & 0xf0 != 0 {
+        value >>= 4;
+        result += 4;
+    }
+    if value & 0xc != 0 {
+        value >>= 2;
+        result += 2;
+    }
+    if value & 0x2 != 0 {
+        result += 1;
+    }
+    result
+}
+
+fn mhccp_get_division_scale_shift(denom: u32) -> (i32, i32, i32) {
+    const DIV_PREC_BITS: i32 = 14;
+    const DIV_PREC_BITS_POW2: usize = 8;
+    const DIV_SLOT_BITS: i32 = 3;
+    const DIV_INTR_BITS: i32 = DIV_PREC_BITS - DIV_SLOT_BITS;
+    const POW2_W: [i32; DIV_PREC_BITS_POW2] = [214, 153, 113, 86, 67, 53, 43, 35];
+    const POW2_O: [i32; DIV_PREC_BITS_POW2] = [4822, 5952, 6624, 6792, 6408, 5424, 3792, 1466];
+    const POW2_B: [i32; DIV_PREC_BITS_POW2] =
+        [12784, 12054, 11670, 11583, 11764, 12195, 12870, 13782];
+
+    let shift = floor_log2_u64(denom as u64);
+    let round = if shift == 0 {
+        0
+    } else {
+        (1u32 << shift >> 1) as i32
+    };
+    let delta = shift - DIV_PREC_BITS;
+    let norm_diff_tmp = if delta >= 0 {
+        let bias = if delta > 0 {
+            (1u32 << (delta - 1)) as i32
+        } else {
+            0
+        };
+        ((denom as i32) + bias) >> delta
+    } else {
+        (denom as i32) << -delta
+    };
+    let norm_diff_clip = norm_diff_tmp.clamp(1, (1 << (DIV_PREC_BITS + 1)) - 1);
+    let norm_diff = norm_diff_clip & ((1 << DIV_PREC_BITS) - 1);
+    let index = (norm_diff >> DIV_INTR_BITS) as usize;
+    let norm_diff2 = norm_diff - POW2_O[index];
+    let mut scale = ((POW2_W[index] * ((norm_diff2 * norm_diff2) >> DIV_PREC_BITS))
+        >> DIV_PREC_BITS_POW2 as i32)
+        - (norm_diff2 >> 1)
+        + POW2_B[index];
+    scale <<= MHCCP_DECIM_BITS - DIV_PREC_BITS;
+    (scale, round, shift)
+}
+
+fn mhccp_gauss_back_substitute(
+    x: &mut [i32; MHCCP_NUM_PARAMS],
+    c: &[[i32; MHCCP_NUM_PARAMS + 1]; MHCCP_NUM_PARAMS],
+    num_eq: usize,
+    col: usize,
+    bits: i32,
+) {
+    x[num_eq - 1] = c[num_eq - 1][col];
+    for i in (0..(num_eq - 1)).rev() {
+        let mut value = c[i][col];
+        for j in (i + 1)..num_eq {
+            value -= mul_fixed32_adapt(c[i][j], x[j], bits);
+        }
+        x[i] = value;
+    }
+}
+
+fn mhccp_gauss_elimination(
+    a: &[[i32; MHCCP_NUM_PARAMS]; MHCCP_NUM_PARAMS],
+    y: &[i32; MHCCP_NUM_PARAMS],
+    bit_depth: usize,
+) -> [i32; MHCCP_NUM_PARAMS] {
+    let num_eq = MHCCP_NUM_PARAMS;
+    let col = num_eq;
+    let reg = 2 << (bit_depth.saturating_sub(8));
+    let mut c = [[0i32; MHCCP_NUM_PARAMS + 1]; MHCCP_NUM_PARAMS];
+
+    for i in 0..num_eq {
+        for j in 0..num_eq {
+            c[i][j] = if j >= i { a[i][j] } else { a[j][i] };
+        }
+        c[i][i] += reg as i32;
+        c[i][col] = y[i];
+    }
+
+    for i in 0..num_eq {
+        let diag = c[i][i].abs().max(1) as u32;
+        let (scale, _, shift) = mhccp_get_division_scale_shift(diag);
+        for j in (i + 1)..=num_eq {
+            c[i][j] = mul_fixed32_adapt(c[i][j], scale, shift);
+        }
+        for j in (i + 1)..num_eq {
+            let scale_factor = c[j][i];
+            for k in (i + 1)..=num_eq {
+                let delta = mul_fixed32_adapt(scale_factor, c[i][k], MHCCP_DECIM_BITS);
+                c[j][k] -= delta;
+            }
+        }
+    }
+
+    let mut x = [0i32; MHCCP_NUM_PARAMS];
+    mhccp_gauss_back_substitute(&mut x, &c, num_eq, col, MHCCP_DECIM_BITS);
+    x
+}
+
+fn mhccp_convolve(params: &[i32; MHCCP_NUM_PARAMS], vector: &[u16; MHCCP_NUM_PARAMS]) -> i16 {
+    let mut sum = 0i32;
+    for i in 0..MHCCP_NUM_PARAMS {
+        sum += mul_fixed32_adapt(params[i], vector[i] as i32, MHCCP_DECIM_BITS);
+    }
+    sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn mhccp_build_ref_window(
     y_plane: &[u8],
+    _y_ready: &[bool],
     y_w: usize,
     y_h: usize,
+    chroma_plane: &[u8],
+    chroma_ready: &[bool],
     uv_w: usize,
     uv_h: usize,
     uv_bx: usize,
     uv_by: usize,
     uv_bw: usize,
     uv_bh: usize,
-    mh_dir: u8,
-    params: [f64; 3],
+    dc_pred: &[u8],
+    cfl_ds_filter_index: u8,
+    sb_size: usize,
     plane_name: char,
-) -> Vec<u8> {
-    let mut pred = vec![128u8; uv_bw * uv_bh];
+    luma_scratch: &mut [u16],
+    chroma_scratch: &mut [u16],
+) -> MhccpRefWindow {
+    let have_top = uv_by > 0
+        && mhccp_count_available_horizontal(Some(chroma_ready), uv_w, uv_h, uv_bx, uv_by - 1, 1)
+            > 0;
+    let have_left = uv_bx > 0
+        && mhccp_count_available_vertical(Some(chroma_ready), uv_w, uv_h, uv_bx - 1, uv_by, 1) > 0;
+    let above_lines = if have_top {
+        (MHCCP_LINE_NUM + 1).min(uv_by)
+    } else {
+        0
+    };
+    let left_lines = if have_left {
+        (MHCCP_LINE_NUM + 1).min(uv_bx)
+    } else {
+        0
+    };
+    let top_right = if have_top && uv_bw > 2 && uv_bx + uv_bw < uv_w {
+        mhccp_count_available_horizontal(
+            Some(chroma_ready),
+            uv_w,
+            uv_h,
+            uv_bx + uv_bw,
+            uv_by - 1,
+            uv_bw,
+        )
+        .min(uv_bw)
+    } else {
+        0
+    };
+    let bottom_left = if have_left && uv_bh > 2 && uv_by + uv_bh < uv_h {
+        mhccp_count_available_vertical(
+            Some(chroma_ready),
+            uv_w,
+            uv_h,
+            uv_bx - 1,
+            uv_by + uv_bh,
+            uv_bh,
+        )
+        .min(uv_bh)
+    } else {
+        0
+    };
+
+    let origin_uv_x = uv_bx.saturating_sub(left_lines);
+    let origin_uv_y = uv_by.saturating_sub(above_lines);
+    let ref_width = (left_lines + uv_bw + top_right)
+        .min(64)
+        .min(uv_w.saturating_sub(origin_uv_x));
+    let ref_height = (above_lines + uv_bh + bottom_left)
+        .min(64)
+        .min(uv_h.saturating_sub(origin_uv_y));
     let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
-    for r in 0..uv_bh {
-        for c in 0..uv_bw {
-            let sx = uv_bx + c;
-            let sy = uv_by + r;
-            if sx >= uv_w || sy >= uv_h {
+    let is_top_sb_boundary = (uv_by * 2) % sb_size == 0;
+
+    let origin_lx = origin_uv_x * 2;
+    let origin_ly = origin_uv_y * 2;
+    let luma_above_lines = above_lines * 2;
+    let luma_left_lines = left_lines * 2;
+    let luma_ref_width = ref_width * 2;
+    let luma_ref_height = ref_height * 2;
+    let luma_width = uv_bw * 2;
+    let luma_height = uv_bh * 2;
+
+    for row in 0..ref_height {
+        for col in 0..ref_width {
+            if !mhccp_should_fill(row, col, above_lines, left_lines, uv_bw, uv_bh) {
                 continue;
             }
-            let center = match luma_center_q0(y_plane, y_w, y_h, sx, sy) {
-                Some(v) => v,
-                None => continue,
+
+            let h = row * 2;
+            let w = col * 2;
+            let mut ref_h_t_off = 0isize;
+            let mut ref_h_c_off = 0isize;
+            let mut ref_h_b_off = 0isize;
+            let ref_w_off = 0isize;
+            if luma_above_lines == ((MHCCP_LINE_NUM + 1) << 1)
+                && is_top_sb_boundary
+                && h < luma_above_lines
+            {
+                ref_h_t_off = if h != 0 {
+                    (((MHCCP_LINE_NUM + 1) << 1) - h) as isize
+                } else {
+                    (((MHCCP_LINE_NUM + 1) << 1) - (h + 1)) as isize
+                };
+                ref_h_c_off = (((MHCCP_LINE_NUM + 1) << 1) - (h + 1)) as isize;
+                ref_h_b_off = (((MHCCP_LINE_NUM + 1) << 1) - (h + 2)) as isize;
+            }
+            let center_x = w as isize + ref_w_off;
+            let center_y = h as isize + ref_h_c_off;
+            let left_x = w.saturating_sub(1) as isize + ref_w_off;
+            let right_x = w as isize + 1 + ref_w_off;
+            let top_y = if h != 0 { h as isize - 1 } else { h as isize } + ref_h_t_off;
+            let bottom_y = h as isize + 1 + ref_h_b_off;
+            let center = sample_plane(
+                y_plane,
+                y_w,
+                y_w,
+                y_h,
+                origin_lx as isize + center_x,
+                origin_ly as isize + center_y,
+            ) as u16;
+            let right = sample_plane(
+                y_plane,
+                y_w,
+                y_w,
+                y_h,
+                origin_lx as isize + right_x,
+                origin_ly as isize + center_y,
+            ) as u16;
+            let down = sample_plane(
+                y_plane,
+                y_w,
+                y_w,
+                y_h,
+                origin_lx as isize + center_x,
+                origin_ly as isize + bottom_y,
+            ) as u16;
+            let down_right = sample_plane(
+                y_plane,
+                y_w,
+                y_w,
+                y_h,
+                origin_lx as isize + right_x,
+                origin_ly as isize + bottom_y,
+            ) as u16;
+            let left = sample_plane(
+                y_plane,
+                y_w,
+                y_w,
+                y_h,
+                origin_lx as isize + left_x,
+                origin_ly as isize + center_y,
+            ) as u16;
+            let down_left = sample_plane(
+                y_plane,
+                y_w,
+                y_w,
+                y_h,
+                origin_lx as isize + left_x,
+                origin_ly as isize + bottom_y,
+            ) as u16;
+            let top = sample_plane(
+                y_plane,
+                y_w,
+                y_w,
+                y_h,
+                origin_lx as isize + center_x,
+                origin_ly as isize + top_y,
+            ) as u16;
+
+            let value = match cfl_ds_filter_index {
+                1 => left + 2 * center + right + down_left + 2 * down + down_right,
+                2 => {
+                    left + 4 * center + right + top + down
+                }
+                _ => (center + right + down + down_right) << 1,
             };
-            let top = if sy > 0 {
-                luma_center_q0(y_plane, y_w, y_h, sx, sy - 1).unwrap_or(center)
-            } else {
-                center
-            };
-            let left = if sx > 0 {
-                luma_center_q0(y_plane, y_w, y_h, sx - 1, sy).unwrap_or(center)
-            } else {
-                center
-            };
-            let base = match mh_dir {
-                1 => top,
-                2 => left,
-                _ => center,
-            };
-            let feat1 = (center * center + 128.0) / 256.0;
-            let value = params[0] * base + params[1] * feat1 + params[2] * 128.0;
-            pred[r * uv_bw + c] = value.round().clamp(0.0, 255.0) as u8;
+            luma_scratch[row * MHCCP_BUF_STRIDE + col] = value;
+            let mut ref_h_offset = 0isize;
+            let mut ref_w_offset = 0isize;
+            if above_lines == (MHCCP_LINE_NUM + 1) {
+                if is_top_sb_boundary && row < above_lines {
+                    ref_h_offset = (MHCCP_LINE_NUM + 1 - (row + 1)) as isize;
+                } else if row == 0 {
+                    ref_h_offset = 1;
+                }
+            }
+            if left_lines == (MHCCP_LINE_NUM + 1) && col == 0 {
+                ref_w_offset = 1;
+            }
+            chroma_scratch[row * MHCCP_BUF_STRIDE + col] = mhccp_sample_chroma_input(
+                chroma_plane,
+                uv_w,
+                uv_h,
+                origin_uv_x,
+                origin_uv_y,
+                col as isize + ref_w_offset,
+                row as isize + ref_h_offset,
+                uv_bx,
+                uv_by,
+                uv_bw,
+                uv_bh,
+                dc_pred,
+            );
         }
     }
+
+    let stride = ref_width;
+    let mut luma_q3 = vec![0u16; stride * ref_height];
+    let mut chroma = vec![0u16; stride * ref_height];
+    for row in 0..ref_height {
+        let src = row * MHCCP_BUF_STRIDE;
+        let dst = row * stride;
+        luma_q3[dst..dst + ref_width].copy_from_slice(&luma_scratch[src..src + ref_width]);
+        chroma[dst..dst + ref_width].copy_from_slice(&chroma_scratch[src..src + ref_width]);
+    }
+
     if trace {
         eprintln!(
-            "[WAV2C_MHCCP_PRED] plane={} uv=({}, {}) size={}x{} dir={} params={:?} pred={:?}",
-            plane_name, uv_bx, uv_by, uv_bw, uv_bh, mh_dir, params, pred
+            "[WAV2C_MHCCP_SETUP] plane={} uv=({}, {}) size={}x{} above={} left={} ref={}x{} top_sb={}",
+            plane_name,
+            uv_bx,
+            uv_by,
+            uv_bw,
+            uv_bh,
+            above_lines,
+            left_lines,
+            ref_width,
+            ref_height,
+            is_top_sb_boundary
+        );
+        for row in 0..ref_height {
+            let start = row * stride;
+            let end = start + ref_width;
+            eprintln!(
+                "[WAV2C_MHCCP_LUMA_BUF_ROW] plane={} y={} {:?}",
+                plane_name,
+                row,
+                &luma_q3[start..end]
+            );
+            eprintln!(
+                "[WAV2C_MHCCP_CHROMA_BUF_ROW] plane={} y={} {:?}",
+                plane_name,
+                row,
+                &chroma[start..end]
+            );
+        }
+        let _ = (luma_ref_width, luma_ref_height, luma_width, luma_height, _y_ready);
+    }
+
+    MhccpRefWindow {
+        have_top,
+        have_left,
+        above_lines,
+        left_lines,
+        ref_width,
+        ref_height,
+        stride,
+        luma_q3,
+        chroma,
+    }
+}
+
+fn mhccp_derive_params(
+    window: &MhccpRefWindow,
+    mh_dir: u8,
+    plane_name: char,
+    uv_bx: usize,
+    uv_by: usize,
+) -> [i32; MHCCP_NUM_PARAMS] {
+    let mut ata = [[0i32; MHCCP_NUM_PARAMS]; MHCCP_NUM_PARAMS];
+    let mut ty = [0i32; MHCCP_NUM_PARAMS];
+    let mid = 1u16 << 7;
+    let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
+    let mut count = 0usize;
+
+    if window.ref_width > 0 && window.ref_height > 0 {
+        for row in 1..window.ref_height.saturating_sub(1) {
+            for col in 1..window.ref_width.saturating_sub(1) {
+                if col >= window.left_lines && row >= window.above_lines {
+                    continue;
+                }
+                let idx = row * window.stride + col;
+                let center = window.luma_q3[idx] >> 3;
+                let base = match mh_dir {
+                    1 => window.luma_q3[(row - 1) * window.stride + col] >> 3,
+                    2 => window.luma_q3[idx - 1] >> 3,
+                    _ => center,
+                };
+                let vector = [
+                    base as i32,
+                    mhccp_non_linear(center, mid, 8) as i32,
+                    mid as i32,
+                ];
+                let y_value = window.chroma[idx] as i32;
+                if trace {
+                    eprintln!(
+                        "[WAV2C_MHCCP_SAMPLE] plane={} idx={} ij=({}, {}) a=({},{},{}) y={}",
+                        plane_name, count, col, row, vector[0], vector[1], vector[2], y_value
+                    );
+                }
+                for i in 0..MHCCP_NUM_PARAMS {
+                    ty[i] += vector[i] * y_value;
+                    for j in i..MHCCP_NUM_PARAMS {
+                        ata[i][j] += vector[i] * vector[j];
+                    }
+                }
+                count += 1;
+            }
+        }
+    }
+
+    if count == 0 {
+        let params = [0, 0, 1 << MHCCP_DECIM_BITS];
+        if trace {
+            eprintln!(
+                "[WAV2C_MHCCP_PARAMS] plane={} uv=({}, {}) count=0 params={:?}",
+                plane_name, uv_bx, uv_by, params
+            );
+        }
+        return params;
+    }
+
+    let matrix_shift = (MHCCP_DECIM_BITS + 6) - 16 - ceil_log2_usize(count);
+    if matrix_shift > 0 {
+        for i in 0..MHCCP_NUM_PARAMS {
+            ty[i] <<= matrix_shift;
+            for j in i..MHCCP_NUM_PARAMS {
+                ata[i][j] <<= matrix_shift;
+            }
+        }
+    } else if matrix_shift < 0 {
+        let shift = -matrix_shift;
+        for i in 0..MHCCP_NUM_PARAMS {
+            ty[i] >>= shift;
+            for j in i..MHCCP_NUM_PARAMS {
+                ata[i][j] >>= shift;
+            }
+        }
+    }
+
+    let params = mhccp_gauss_elimination(&ata, &ty, 8);
+    if trace {
+        eprintln!(
+            "[WAV2C_MHCCP_NORMALS] plane={} ATA=(({}, {}, {}), ({}, {}, {}), ({}, {}, {})) Ty=({}, {}, {})",
+            plane_name,
+            ata[0][0],
+            ata[0][1],
+            ata[0][2],
+            ata[1][0],
+            ata[1][1],
+            ata[1][2],
+            ata[2][0],
+            ata[2][1],
+            ata[2][2],
+            ty[0],
+            ty[1],
+            ty[2]
+        );
+        eprintln!(
+            "[WAV2C_MHCCP_PARAMS] plane={} uv=({}, {}) count={} params={:?}",
+            plane_name, uv_bx, uv_by, count, params
         );
     }
+    params
+}
+
+fn mhccp_predict_plane(
+    window: &MhccpRefWindow,
+    uv_bw: usize,
+    uv_bh: usize,
+    mh_dir: u8,
+    params: [i32; MHCCP_NUM_PARAMS],
+    plane_name: char,
+    uv_bx: usize,
+    uv_by: usize,
+) -> Vec<u8> {
+    let mut pred = vec![128u8; uv_bw * uv_bh];
+    let mid = 1u16 << 7;
+    let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
+
+    for row in 0..uv_bh {
+        let src_row = window.above_lines + row;
+        for col in 0..uv_bw {
+            let src_col = window.left_lines + col;
+            let idx = src_row * window.stride + src_col;
+            let center = window.luma_q3[idx] >> 3;
+            let above = if row == 0 && !window.have_top {
+                center
+            } else {
+                window.luma_q3[idx - window.stride] >> 3
+            };
+            let left = if col == 0 && !window.have_left {
+                center
+            } else {
+                window.luma_q3[idx - 1] >> 3
+            };
+            let mut vector = [center, mhccp_non_linear(center, mid, 8), mid];
+            if mh_dir == 1 {
+                vector[0] = above;
+            } else if mh_dir == 2 {
+                vector[0] = left;
+            }
+            let value = mhccp_convolve(&params, &vector).clamp(0, 255) as u8;
+            pred[row * uv_bw + col] = value;
+            if trace {
+                eprintln!(
+                    "[WAV2C_MHCCP_PRED] plane={} uv=({}, {}) ij=({}, {}) vec=({}, {}, {}) pred={} params=({}, {}, {})",
+                    plane_name,
+                    uv_bx,
+                    uv_by,
+                    col,
+                    row,
+                    vector[0],
+                    vector[1],
+                    vector[2],
+                    value,
+                    params[0],
+                    params[1],
+                    params[2]
+                );
+            }
+        }
+    }
+
     pred
 }
 
@@ -977,6 +1549,58 @@ fn reconstruct_tu(
     }
 }
 
+fn trace_uv_recon_tu(
+    plane: usize,
+    tu_x: usize,
+    tu_y: usize,
+    tu_w: usize,
+    tu_h: usize,
+    tx_size: crate::block::TxSize,
+    tx_type: usize,
+    eob: u16,
+    levels: &[i32],
+    dqcoeffs: &[i32],
+    residuals: &[i32],
+    pred: &[u8],
+    pred_w: usize,
+    pred_x_offset: usize,
+    pred_y_offset: usize,
+    recon: &[u8],
+    recon_stride: usize,
+) {
+    if !trace_block_match("WAV2C_TRACE_UV_RECON", tu_x, tu_y) {
+        return;
+    }
+
+    let scan_len = usize::from(eob).min(levels.len());
+    eprintln!(
+        "[WAV2C_UV_RECON] plane={} uv=({}, {}) size={}x{} tx={:?} tx_type={} eob={} levels={:?}",
+        plane,
+        tu_x,
+        tu_y,
+        tu_w,
+        tu_h,
+        tx_size,
+        tx_type,
+        eob,
+        &levels[..scan_len]
+    );
+    eprintln!("[WAV2C_UV_RECON] plane={} dq={:?}", plane, dqcoeffs);
+    for row in 0..tu_h {
+        let pred_row: Vec<u8> = (0..tu_w)
+            .map(|col| pred[(pred_y_offset + row) * pred_w + pred_x_offset + col])
+            .collect();
+        let res_row: Vec<i32> = (0..tu_w).map(|col| residuals[row * tu_w + col]).collect();
+        let recon_row: Vec<u8> = (0..tu_w)
+            .map(|col| recon[(tu_y + row) * recon_stride + tu_x + col])
+            .collect();
+        eprintln!(
+            "[WAV2C_UV_RECON] plane={} row={} pred={:?} res={:?} recon={:?}",
+            plane, row, pred_row, res_row, recon_row
+        );
+    }
+}
+
 fn mark_region_ready(
     ready: &mut [bool],
     stride: usize,
@@ -989,6 +1613,40 @@ fn mark_region_ready(
         let row_start = (y + row) * stride + x;
         ready[row_start..row_start + width].fill(true);
     }
+}
+
+fn mark_region_filter(
+    filter_map: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    filter_type: u8,
+) {
+    for row in 0..height {
+        let row_start = (y + row) * stride + x;
+        filter_map[row_start..row_start + width].fill(filter_type);
+    }
+}
+
+fn neighbor_filter_types(filter_map: &[u8], stride: usize, x: usize, y: usize) -> (usize, usize) {
+    let above = if y > 0 { filter_map[(y - 1) * stride + x] as usize } else { 0 };
+    let left = if x > 0 { filter_map[y * stride + x - 1] as usize } else { 0 };
+    (above, left)
+}
+
+fn intra_filter_type(mode: predict::PredictionMode) -> u8 {
+    matches!(
+        mode,
+        predict::PredictionMode::SmoothPred
+            | predict::PredictionMode::SmoothVPred
+            | predict::PredictionMode::SmoothHPred
+    ) as u8
+}
+
+fn uv_mode_filter_type(mode: u8) -> u8 {
+    matches!(mode, 9 | 10 | 11) as u8
 }
 
 const BLK_SIZE_LOG2_BAWP: [usize; 17] = [0, 0, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4];
@@ -1180,6 +1838,43 @@ fn apply_intrabc_morph_pred_luma(
     }
 }
 
+fn trace_uv_write(
+    block_idx: usize,
+    plane: usize,
+    stage: &str,
+    x: usize,
+    y: usize,
+    value: u8,
+    block: &tile::DecodedBlock,
+) {
+    if trace_block_match("WAV2C_TRACE_UV_WRITE", x, y) {
+        eprintln!(
+            "[WAV2C_UV_WRITE] idx={} plane={} stage={} uv=({}, {}) value={} tree={:?} is_chroma_ref={} luma=({}, {}) {}x{} chroma=({}, {}) {}x{} uv_mode={} cfl_idx={} mh_dir={} u_tu={} v_tu={}",
+            block_idx,
+            plane,
+            stage,
+            x,
+            y,
+            value,
+            block.tree_type,
+            block.is_chroma_ref,
+            block.x,
+            block.y,
+            block.width,
+            block.height,
+            block.chroma_x,
+            block.chroma_y,
+            block.chroma_width,
+            block.chroma_height,
+            block.uv_mode,
+            block.cfl_idx,
+            block.mhccp_dir,
+            block.u_tu.len(),
+            block.v_tu.len()
+        );
+    }
+}
+
 fn reconstruct_partitioned_frame(
     blocks: &[tile::DecodedBlock],
     width: u32,
@@ -1190,6 +1885,7 @@ fn reconstruct_partitioned_frame(
     cfl_ds_filter_index: u8,
     sb_size: usize,
     enable_ibp: bool,
+    ccso_params: &frame::CcsoParams,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let w = width as usize;
     let h = height as usize;
@@ -1201,16 +1897,62 @@ fn reconstruct_partitioned_frame(
     let mut y_ready = vec![false; w * h];
     let mut u_ready = vec![false; uv_w * uv_h];
     let mut v_ready = vec![false; uv_w * uv_h];
+    let mut uv_filter = vec![0u8; uv_w * uv_h];
+    let mut mhccp_luma_scratch = vec![0u16; MHCCP_BUF_SQUARE];
+    let mut mhccp_u_scratch = vec![0u16; MHCCP_BUF_SQUARE];
+    let mut mhccp_v_scratch = vec![0u16; MHCCP_BUF_SQUARE];
 
     let mi_cols = (w + 3) / 4;
     let mi_rows = (h + 3) / 4;
     let mut joint_grid = vec![0u8; mi_cols * mi_rows];
 
-    for block in blocks {
+    for (block_idx, block) in blocks.iter().enumerate() {
         let bx = block.x;
         let by = block.y;
         let bw = block.width;
         let bh = block.height;
+        let block_uv_x = bx / 2;
+        let block_uv_y = by / 2;
+        let block_uv_w = bw / 2;
+        let block_uv_h = bh / 2;
+        let chroma_uv_x = block.chroma_x / 2;
+        let chroma_uv_y = block.chroma_y / 2;
+        let chroma_uv_w = block.chroma_width / 2;
+        let chroma_uv_h = block.chroma_height / 2;
+        if trace_point_in_region("WAV2C_TRACE_UV_BLOCK", block_uv_x, block_uv_y, block_uv_w, block_uv_h)
+            || (block.is_chroma_ref
+                && trace_point_in_region(
+                    "WAV2C_TRACE_UV_BLOCK",
+                    chroma_uv_x,
+                    chroma_uv_y,
+                    chroma_uv_w,
+                    chroma_uv_h,
+                ))
+        {
+            eprintln!(
+                "[WAV2C_UV_BLOCK] idx={} tree={:?} is_chroma_ref={} luma=({}, {}) {}x{} block_uv=({}, {}) {}x{} chroma_uv=({}, {}) {}x{} uv_mode={} cfl_idx={} mh_dir={} u_tu={} v_tu={}",
+                block_idx,
+                block.tree_type,
+                block.is_chroma_ref,
+                bx,
+                by,
+                bw,
+                bh,
+                block_uv_x,
+                block_uv_y,
+                block_uv_w,
+                block_uv_h,
+                chroma_uv_x,
+                chroma_uv_y,
+                chroma_uv_w,
+                chroma_uv_h,
+                block.uv_mode,
+                block.cfl_idx,
+                block.mhccp_dir,
+                block.u_tu.len(),
+                block.v_tu.len()
+            );
+        }
 
         if block.tree_type != tile::TreeType::Chroma {
             let mi_x = bx / 4;
@@ -1340,6 +2082,8 @@ fn reconstruct_partitioned_frame(
                             plane: 0,
                             enable_ibp,
                             is_cfl: false,
+                            above_filter_type: 0,
+                            left_filter_type: 0,
                         },
                         Some(&y_ready),
                     );
@@ -1376,6 +2120,7 @@ fn reconstruct_partitioned_frame(
         let uv_by = chroma_y / 2;
         let uv_bw = chroma_width / 2;
         let uv_bh = chroma_height / 2;
+        let block_uv_filter_type = uv_mode_filter_type(block.uv_mode);
 
         if uv_bw >= 4 && uv_bh >= 4 {
             let (u_pred, v_pred) = if block.is_intrabc {
@@ -1396,66 +2141,8 @@ fn reconstruct_partitioned_frame(
                 (u_pred, v_pred)
             } else if block.uv_mode == 13 {
                 if block.cfl_idx == 2 {
-                    let u_params = derive_mhccp_params_neighbors(
-                        &y_plane,
-                        w,
-                        h,
-                        &u_plane,
-                        uv_w,
-                        uv_h,
-                        uv_bx,
-                        uv_by,
-                        uv_bw,
-                        uv_bh,
-                        block.mhccp_dir,
-                        'U',
-                    )
-                    .unwrap_or([0.0, 0.0, 1.0]);
-                    let v_params = derive_mhccp_params_neighbors(
-                        &y_plane,
-                        w,
-                        h,
-                        &v_plane,
-                        uv_w,
-                        uv_h,
-                        uv_bx,
-                        uv_by,
-                        uv_bw,
-                        uv_bh,
-                        block.mhccp_dir,
-                        'V',
-                    )
-                    .unwrap_or([0.0, 0.0, 1.0]);
-                    let u_pred = mhccp_predict_block(
-                        &y_plane,
-                        w,
-                        h,
-                        uv_w,
-                        uv_h,
-                        uv_bx,
-                        uv_by,
-                        uv_bw,
-                        uv_bh,
-                        block.mhccp_dir,
-                        u_params,
-                        'U',
-                    );
-                    let v_pred = mhccp_predict_block(
-                        &y_plane,
-                        w,
-                        h,
-                        uv_w,
-                        uv_h,
-                        uv_bx,
-                        uv_by,
-                        uv_bw,
-                        uv_bh,
-                        block.mhccp_dir,
-                        v_params,
-                        'V',
-                    );
-                    (u_pred, v_pred)
-                } else {
+                    let (uv_above_filter_type, uv_left_filter_type) =
+                        neighbor_filter_types(&uv_filter, uv_w, uv_bx, uv_by);
                     let u_dc_pred = predict::predict_intra_with_control_and_availability(
                         &u_plane,
                         uv_w,
@@ -1471,6 +2158,8 @@ fn reconstruct_partitioned_frame(
                             plane: 1,
                             enable_ibp,
                             is_cfl: true,
+                            above_filter_type: uv_above_filter_type,
+                            left_filter_type: uv_left_filter_type,
                         },
                         Some(&u_ready),
                     );
@@ -1489,6 +2178,116 @@ fn reconstruct_partitioned_frame(
                             plane: 2,
                             enable_ibp,
                             is_cfl: true,
+                            above_filter_type: uv_above_filter_type,
+                            left_filter_type: uv_left_filter_type,
+                        },
+                        Some(&v_ready),
+                    );
+                    let u_window = mhccp_build_ref_window(
+                        &y_plane,
+                        &y_ready,
+                        w,
+                        h,
+                        &u_plane,
+                        &u_ready,
+                        uv_w,
+                        uv_h,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        &u_dc_pred,
+                        cfl_ds_filter_index,
+                        sb_size,
+                        'U',
+                        &mut mhccp_luma_scratch,
+                        &mut mhccp_u_scratch,
+                    );
+                    let u_params =
+                        mhccp_derive_params(&u_window, block.mhccp_dir, 'U', uv_bx, uv_by);
+                    let v_window = mhccp_build_ref_window(
+                        &y_plane,
+                        &y_ready,
+                        w,
+                        h,
+                        &v_plane,
+                        &v_ready,
+                        uv_w,
+                        uv_h,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        &v_dc_pred,
+                        cfl_ds_filter_index,
+                        sb_size,
+                        'V',
+                        &mut mhccp_luma_scratch,
+                        &mut mhccp_v_scratch,
+                    );
+                    let v_params =
+                        mhccp_derive_params(&v_window, block.mhccp_dir, 'V', uv_bx, uv_by);
+                    let u_pred = mhccp_predict_plane(
+                        &u_window,
+                        uv_bw,
+                        uv_bh,
+                        block.mhccp_dir,
+                        u_params,
+                        'U',
+                        uv_bx,
+                        uv_by,
+                    );
+                    let v_pred = mhccp_predict_plane(
+                        &v_window,
+                        uv_bw,
+                        uv_bh,
+                        block.mhccp_dir,
+                        v_params,
+                        'V',
+                        uv_bx,
+                        uv_by,
+                    );
+                    (u_pred, v_pred)
+                } else {
+                    let (uv_above_filter_type, uv_left_filter_type) =
+                        neighbor_filter_types(&uv_filter, uv_w, uv_bx, uv_by);
+                    let u_dc_pred = predict::predict_intra_with_control_and_availability(
+                        &u_plane,
+                        uv_w,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        predict::PredictionMode::DcPred,
+                        0,
+                        0,
+                        0,
+                        predict::IntraPredictControl {
+                            plane: 1,
+                            enable_ibp,
+                            is_cfl: true,
+                            above_filter_type: uv_above_filter_type,
+                            left_filter_type: uv_left_filter_type,
+                        },
+                        Some(&u_ready),
+                    );
+                    let v_dc_pred = predict::predict_intra_with_control_and_availability(
+                        &v_plane,
+                        uv_w,
+                        uv_bx,
+                        uv_by,
+                        uv_bw,
+                        uv_bh,
+                        predict::PredictionMode::DcPred,
+                        0,
+                        0,
+                        0,
+                        predict::IntraPredictControl {
+                            plane: 2,
+                            enable_ibp,
+                            is_cfl: true,
+                            above_filter_type: uv_above_filter_type,
+                            left_filter_type: uv_left_filter_type,
                         },
                         Some(&v_ready),
                     );
@@ -1516,20 +2315,28 @@ fn reconstruct_partitioned_frame(
                     );
                     let avg_q3 = cfl_calc_luma_dc_q3(&luma_refs, uv_bw, uv_bh);
                     let trace_cfl = trace_block_match("WAV2C_TRACE_CFL", uv_bx, uv_by);
-                    let (u_top_refs, u_left_refs, u_alpha_info, v_top_refs, v_left_refs, v_alpha_info) =
-                        if block.cfl_idx == 0 {
-                            (Vec::new(), Vec::new(), None, Vec::new(), Vec::new(), None)
-                        } else {
-                            let (u_top, u_left) =
-                                cfl_fetch_neighbor_chroma_refs(&u_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh);
-                            let (v_top, v_left) =
-                                cfl_fetch_neighbor_chroma_refs(&v_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh);
-                            let u_alpha =
-                                cfl_derive_implicit_alpha_q3(&luma_refs, &u_top, &u_left, uv_bw, uv_bh);
-                            let v_alpha =
-                                cfl_derive_implicit_alpha_q3(&luma_refs, &v_top, &v_left, uv_bw, uv_bh);
-                            (u_top, u_left, Some(u_alpha), v_top, v_left, Some(v_alpha))
-                        };
+                    let (
+                        u_top_refs,
+                        u_left_refs,
+                        u_alpha_info,
+                        v_top_refs,
+                        v_left_refs,
+                        v_alpha_info,
+                    ) = if block.cfl_idx == 0 {
+                        (Vec::new(), Vec::new(), None, Vec::new(), Vec::new(), None)
+                    } else {
+                        let (u_top, u_left) = cfl_fetch_neighbor_chroma_refs(
+                            &u_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh,
+                        );
+                        let (v_top, v_left) = cfl_fetch_neighbor_chroma_refs(
+                            &v_plane, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh,
+                        );
+                        let u_alpha =
+                            cfl_derive_implicit_alpha_q3(&luma_refs, &u_top, &u_left, uv_bw, uv_bh);
+                        let v_alpha =
+                            cfl_derive_implicit_alpha_q3(&luma_refs, &v_top, &v_left, uv_bw, uv_bh);
+                        (u_top, u_left, Some(u_alpha), v_top, v_left, Some(v_alpha))
+                    };
                     let (alpha_u_q3, alpha_v_q3) = if block.cfl_idx == 0 {
                         (block.cfl_alpha_u as i32 * 32, block.cfl_alpha_v as i32 * 32)
                     } else {
@@ -1541,7 +2348,14 @@ fn reconstruct_partitioned_frame(
                     if trace_cfl {
                         eprintln!(
                             "[WAV2C_CFL_BLOCK] uv=({}, {}) size={}x{} cfl_idx={} avg_q3={} alpha_u={} alpha_v={}",
-                            uv_bx, uv_by, uv_bw, uv_bh, block.cfl_idx, avg_q3, alpha_u_q3, alpha_v_q3
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_bh,
+                            block.cfl_idx,
+                            avg_q3,
+                            alpha_u_q3,
+                            alpha_v_q3
                         );
                         eprintln!(
                             "[WAV2C_CFL_REFS] have_top={} have_left={}",
@@ -1613,6 +2427,8 @@ fn reconstruct_partitioned_frame(
                     };
                 let tu_count = block.u_tu.len().min(block.v_tu.len());
                 if tu_count == 0 {
+                    let (uv_above_filter_type, uv_left_filter_type) =
+                        neighbor_filter_types(&uv_filter, uv_w, uv_bx, uv_by);
                     let u_p = predict::predict_intra_with_control_and_availability(
                         &u_plane,
                         uv_w,
@@ -1628,6 +2444,8 @@ fn reconstruct_partitioned_frame(
                             plane: 1,
                             enable_ibp,
                             is_cfl: false,
+                            above_filter_type: uv_above_filter_type,
+                            left_filter_type: uv_left_filter_type,
                         },
                         Some(&u_ready),
                     );
@@ -1646,6 +2464,8 @@ fn reconstruct_partitioned_frame(
                             plane: 2,
                             enable_ibp,
                             is_cfl: false,
+                            above_filter_type: uv_above_filter_type,
+                            left_filter_type: uv_left_filter_type,
                         },
                         Some(&v_ready),
                     );
@@ -1685,6 +2505,8 @@ fn reconstruct_partitioned_frame(
                         let u_tu_h = u_tu.tx_size.height();
                         let u_tx = uv_bx + u_tu.col_offset;
                         let u_ty = uv_by + u_tu.row_offset;
+                        let (uv_above_filter_type, uv_left_filter_type) =
+                            neighbor_filter_types(&uv_filter, uv_w, u_tx, u_ty);
                         let u_pred = predict::predict_intra_with_control_and_availability(
                             &u_plane,
                             uv_w,
@@ -1700,6 +2522,8 @@ fn reconstruct_partitioned_frame(
                                 plane: 1,
                                 enable_ibp,
                                 is_cfl: false,
+                                above_filter_type: uv_above_filter_type,
+                                left_filter_type: uv_left_filter_type,
                             },
                             Some(&u_ready),
                         );
@@ -1716,12 +2540,47 @@ fn reconstruct_partitioned_frame(
                             0,
                             &u_res,
                         );
+                        trace_uv_recon_tu(
+                            1,
+                            u_tx,
+                            u_ty,
+                            u_tu_w,
+                            u_tu_h,
+                            u_tu.tx_size,
+                            u_tu.tx_type,
+                            u_tu.eob,
+                            &u_tu.levels,
+                            &u_dq,
+                            &u_res,
+                            &u_pred,
+                            u_tu_w,
+                            0,
+                            0,
+                            &u_plane,
+                            uv_w,
+                        );
+                        if trace_point_in_region("WAV2C_TRACE_UV_WRITE", u_tx, u_ty, u_tu_w, u_tu_h) {
+                            if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                                trace_uv_write(block_idx, 1, "reconstruct_tu", px, py, u_plane[py * uv_w + px], block);
+                            }
+                        }
                         mark_region_ready(&mut u_ready, uv_w, u_tx, u_ty, u_tu_w, u_tu_h);
+                        mark_region_filter(
+                            &mut uv_filter,
+                            uv_w,
+                            u_tx,
+                            u_ty,
+                            u_tu_w,
+                            u_tu_h,
+                            block_uv_filter_type,
+                        );
 
                         let v_tu_w = v_tu.tx_size.width();
                         let v_tu_h = v_tu.tx_size.height();
                         let v_tx = uv_bx + v_tu.col_offset;
                         let v_ty = uv_by + v_tu.row_offset;
+                        let (uv_above_filter_type, uv_left_filter_type) =
+                            neighbor_filter_types(&uv_filter, uv_w, v_tx, v_ty);
                         let v_pred = predict::predict_intra_with_control_and_availability(
                             &v_plane,
                             uv_w,
@@ -1737,6 +2596,8 @@ fn reconstruct_partitioned_frame(
                                 plane: 2,
                                 enable_ibp,
                                 is_cfl: false,
+                                above_filter_type: uv_above_filter_type,
+                                left_filter_type: uv_left_filter_type,
                             },
                             Some(&v_ready),
                         );
@@ -1753,7 +2614,40 @@ fn reconstruct_partitioned_frame(
                             0,
                             &v_res,
                         );
+                        trace_uv_recon_tu(
+                            2,
+                            v_tx,
+                            v_ty,
+                            v_tu_w,
+                            v_tu_h,
+                            v_tu.tx_size,
+                            v_tu.tx_type,
+                            v_tu.eob,
+                            &v_tu.levels,
+                            &v_dq,
+                            &v_res,
+                            &v_pred,
+                            v_tu_w,
+                            0,
+                            0,
+                            &v_plane,
+                            uv_w,
+                        );
+                        if trace_point_in_region("WAV2C_TRACE_UV_WRITE", v_tx, v_ty, v_tu_w, v_tu_h) {
+                            if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                                trace_uv_write(block_idx, 2, "reconstruct_tu", px, py, v_plane[py * uv_w + px], block);
+                            }
+                        }
                         mark_region_ready(&mut v_ready, uv_w, v_tx, v_ty, v_tu_w, v_tu_h);
+                        mark_region_filter(
+                            &mut uv_filter,
+                            uv_w,
+                            v_tx,
+                            v_ty,
+                            v_tu_w,
+                            v_tu_h,
+                            block_uv_filter_type,
+                        );
                     }
                     continue;
                 }
@@ -1767,8 +2661,23 @@ fn reconstruct_partitioned_frame(
                     u_plane[dst..dst + uv_bw].copy_from_slice(&u_pred[src..src + uv_bw]);
                     v_plane[dst..dst + uv_bw].copy_from_slice(&v_pred[src..src + uv_bw]);
                 }
+                if trace_point_in_region("WAV2C_TRACE_UV_WRITE", uv_bx, uv_by, uv_bw, uv_bh) {
+                    if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                        trace_uv_write(block_idx, 1, "copy_pred", px, py, u_plane[py * uv_w + px], block);
+                        trace_uv_write(block_idx, 2, "copy_pred", px, py, v_plane[py * uv_w + px], block);
+                    }
+                }
                 mark_region_ready(&mut u_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
                 mark_region_ready(&mut v_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
+                mark_region_filter(
+                    &mut uv_filter,
+                    uv_w,
+                    uv_bx,
+                    uv_by,
+                    uv_bw,
+                    uv_bh,
+                    block_uv_filter_type,
+                );
             } else {
                 for i in 0..tu_count {
                     let u_tu = &block.u_tu[i];
@@ -1815,6 +2724,36 @@ fn reconstruct_partitioned_frame(
                         u_tu.row_offset,
                         &u_res,
                     );
+                    trace_uv_recon_tu(
+                        1,
+                        uv_bx + u_tu.col_offset,
+                        uv_by + u_tu.row_offset,
+                        u_tu_w,
+                        u_tu_h,
+                        u_tu.tx_size,
+                        u_tu.tx_type,
+                        u_tu.eob,
+                        &u_tu.levels,
+                        &u_dq,
+                        &u_res,
+                        &u_pred,
+                        uv_bw,
+                        u_tu.col_offset,
+                        u_tu.row_offset,
+                        &u_plane,
+                        uv_w,
+                    );
+                    if trace_point_in_region(
+                        "WAV2C_TRACE_UV_WRITE",
+                        uv_bx + u_tu.col_offset,
+                        uv_by + u_tu.row_offset,
+                        u_tu_w,
+                        u_tu_h,
+                    ) {
+                        if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                            trace_uv_write(block_idx, 1, "reconstruct_tu", px, py, u_plane[py * uv_w + px], block);
+                        }
+                    }
                     mark_region_ready(
                         &mut u_ready,
                         uv_w,
@@ -1822,6 +2761,15 @@ fn reconstruct_partitioned_frame(
                         uv_by + u_tu.row_offset,
                         u_tu_w,
                         u_tu_h,
+                    );
+                    mark_region_filter(
+                        &mut uv_filter,
+                        uv_w,
+                        uv_bx + u_tu.col_offset,
+                        uv_by + u_tu.row_offset,
+                        u_tu_w,
+                        u_tu_h,
+                        block_uv_filter_type,
                     );
 
                     let v_tu_w = v_tu.tx_size.width();
@@ -1839,6 +2787,36 @@ fn reconstruct_partitioned_frame(
                         v_tu.row_offset,
                         &v_res,
                     );
+                    trace_uv_recon_tu(
+                        2,
+                        uv_bx + v_tu.col_offset,
+                        uv_by + v_tu.row_offset,
+                        v_tu_w,
+                        v_tu_h,
+                        v_tu.tx_size,
+                        v_tu.tx_type,
+                        v_tu.eob,
+                        &v_tu.levels,
+                        &v_dq,
+                        &v_res,
+                        &v_pred,
+                        uv_bw,
+                        v_tu.col_offset,
+                        v_tu.row_offset,
+                        &v_plane,
+                        uv_w,
+                    );
+                    if trace_point_in_region(
+                        "WAV2C_TRACE_UV_WRITE",
+                        uv_bx + v_tu.col_offset,
+                        uv_by + v_tu.row_offset,
+                        v_tu_w,
+                        v_tu_h,
+                    ) {
+                        if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                            trace_uv_write(block_idx, 2, "reconstruct_tu", px, py, v_plane[py * uv_w + px], block);
+                        }
+                    }
                     mark_region_ready(
                         &mut v_ready,
                         uv_w,
@@ -1847,12 +2825,182 @@ fn reconstruct_partitioned_frame(
                         v_tu_w,
                         v_tu_h,
                     );
+                    mark_region_filter(
+                        &mut uv_filter,
+                        uv_w,
+                        uv_bx + v_tu.col_offset,
+                        uv_by + v_tu.row_offset,
+                        v_tu_w,
+                        v_tu_h,
+                        block_uv_filter_type,
+                    );
                 }
             }
         }
     }
 
+    apply_ccso_frame(&y_plane, &mut u_plane, &mut v_plane, w, h, ccso_params);
+
     (y_plane, u_plane, v_plane)
+}
+
+const CCSO_PADDING_SIZE: usize = 5;
+const CCSO_QUANT_SZ_LOCAL: [[i32; 4]; 4] = [
+    [16, 8, 32, 0],
+    [56, 40, 64, 128],
+    [48, 24, 96, 192],
+    [80, 112, 160, 256],
+];
+
+fn build_ccso_extended_luma(y_plane: &[u8], width: usize, height: usize) -> (Vec<u16>, usize) {
+    let stride = width + (CCSO_PADDING_SIZE << 1);
+    let mut ext = vec![0u16; (height + (CCSO_PADDING_SIZE << 1)) * stride];
+    for y in 0..height {
+        let dst = (y + CCSO_PADDING_SIZE) * stride + CCSO_PADDING_SIZE;
+        for x in 0..width {
+            ext[dst + x] = y_plane[y * width + x] as u16;
+        }
+    }
+
+    for y in 0..height {
+        let row = (y + CCSO_PADDING_SIZE) * stride + CCSO_PADDING_SIZE;
+        let left = ext[row];
+        let right = ext[row + width - 1];
+        for x in 0..CCSO_PADDING_SIZE {
+            ext[row - CCSO_PADDING_SIZE + x] = left;
+            ext[row + width + x] = right;
+        }
+    }
+
+    let full_row = width + (CCSO_PADDING_SIZE << 1);
+    let top = CCSO_PADDING_SIZE * stride;
+    let bottom = (CCSO_PADDING_SIZE + height - 1) * stride;
+    for y in 0..CCSO_PADDING_SIZE {
+        let dst_top = y * stride;
+        let dst_bottom = (CCSO_PADDING_SIZE + height + y) * stride;
+        ext.copy_within(top..top + full_row, dst_top);
+        ext.copy_within(bottom..bottom + full_row, dst_bottom);
+    }
+
+    (ext, stride)
+}
+
+fn derive_ccso_sample_offsets(stride: isize, ext_filter_support: u8) -> [isize; 2] {
+    match ext_filter_support {
+        0 => [-stride, stride],
+        1 => [-1, 1],
+        2 => [-stride - 1, stride + 1],
+        3 => [-stride + 1, stride - 1],
+        4 => [-stride - 2, stride + 2],
+        5 => [stride - 2, -stride + 2],
+        6 => [2, -2],
+        _ => [0, 0],
+    }
+}
+
+fn ccso_filter_class(
+    ext_y: &[u16],
+    center_idx: usize,
+    offsets: [isize; 2],
+    thr: i32,
+    edge_clf: u8,
+) -> [usize; 2] {
+    let center = ext_y[center_idx] as i32;
+    let neg_thr = -thr;
+    let mut out = [0usize; 2];
+    for (i, offset) in offsets.into_iter().enumerate() {
+        let sample = ext_y[(center_idx as isize + offset) as usize] as i32;
+        let diff = sample - center;
+        out[i] = if edge_clf == 0 {
+            if diff > thr {
+                2
+            } else if diff < neg_thr {
+                0
+            } else {
+                1
+            }
+        } else if diff < neg_thr {
+            0
+        } else {
+            1
+        };
+    }
+    out
+}
+
+fn apply_ccso_plane(
+    ext_y: &[u16],
+    ext_stride: usize,
+    dst: &mut [u8],
+    dst_width: usize,
+    dst_height: usize,
+    plane: usize,
+    params: &frame::CcsoPlaneParams,
+) {
+    if !params.enabled {
+        return;
+    }
+
+    let hscale = usize::from(plane != 0);
+    let vscale = usize::from(plane != 0);
+    let thr = CCSO_QUANT_SZ_LOCAL[params.scale_idx as usize][params.quant_idx as usize];
+    let shift_bits = 8usize.saturating_sub(params.max_band_log2 as usize);
+    let is_single_band = params.max_band_log2 == 0;
+    let offsets = derive_ccso_sample_offsets(ext_stride as isize, params.ext_filter_support);
+
+    for y in 0..dst_height {
+        for x in 0..dst_width {
+            let center_y = CCSO_PADDING_SIZE + (y << vscale);
+            let center_x = CCSO_PADDING_SIZE + (x << hscale);
+            let center_idx = center_y * ext_stride + center_x;
+            let [cls0, cls1] = if params.bo_only {
+                [0, 0]
+            } else {
+                ccso_filter_class(ext_y, center_idx, offsets, thr, params.edge_clf)
+            };
+            let band = if is_single_band {
+                0usize
+            } else {
+                (ext_y[center_idx] as usize) >> shift_bits
+            };
+            let lut_idx = (band << 4) + (cls0 << 2) + cls1;
+            let filtered = dst[y * dst_width + x] as i32 + params.filter_offset[lut_idx] as i32;
+            dst[y * dst_width + x] = filtered.clamp(0, 255) as u8;
+        }
+    }
+}
+
+fn apply_ccso_frame(
+    y_plane: &[u8],
+    u_plane: &mut [u8],
+    v_plane: &mut [u8],
+    width: usize,
+    height: usize,
+    ccso_params: &frame::CcsoParams,
+) {
+    if !ccso_params.frame_enabled {
+        return;
+    }
+
+    let (ext_y, ext_stride) = build_ccso_extended_luma(y_plane, width, height);
+    apply_ccso_plane(
+        &ext_y,
+        ext_stride,
+        u_plane,
+        width / 2,
+        height / 2,
+        1,
+        &ccso_params.planes[1],
+    );
+    apply_ccso_plane(
+        &ext_y,
+        ext_stride,
+        v_plane,
+        width / 2,
+        height / 2,
+        2,
+        &ccso_params.planes[2],
+    );
 }
 
 fn gray_frame(width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -2306,6 +3454,7 @@ mod tests {
             seq.cfl_ds_filter_index,
             seq.sb_size as usize,
             seq.enable_ibp,
+            &fp.ccso_params,
         );
 
         let w = seq.width as usize;
@@ -2537,6 +3686,7 @@ mod tests {
             seq.cfl_ds_filter_index,
             seq.sb_size as usize,
             seq.enable_ibp,
+            &fp.ccso_params,
         );
 
         let avmdec = "/Users/rafaelcaricio/development/avm_build/avmdec";

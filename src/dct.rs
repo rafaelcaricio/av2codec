@@ -232,44 +232,44 @@ pub enum TxType1D {
 
 pub fn get_hor_tx_type_1d(tx_type: usize) -> TxType1D {
     match tx_type {
-        0 => TxType1D::DCT2,    // DCT_DCT
-        1 => TxType1D::DCT2,    // ADST_DCT
-        2 => TxType1D::DST7,    // DCT_ADST
-        3 => TxType1D::DST7,    // ADST_ADST
-        4 => TxType1D::DCT2,    // FLIPADST_DCT
-        5 => TxType1D::DCT8,    // DCT_FLIPADST
-        6 => TxType1D::DCT8,    // FLIPADST_FLIPADST
-        7 => TxType1D::DCT8,    // ADST_FLIPADST
-        8 => TxType1D::DST7,    // FLIPADST_ADST
-        9 => TxType1D::IDT,     // IDTX
-        10 => TxType1D::IDT,    // V_DCT
-        11 => TxType1D::DCT2,   // H_DCT
-        12 => TxType1D::IDT,    // V_ADST
-        13 => TxType1D::DST7,   // H_ADST
-        14 => TxType1D::IDT,    // V_FLIPADST
-        15 => TxType1D::DCT8,   // H_FLIPADST
+        0 => TxType1D::DCT2,  // DCT_DCT
+        1 => TxType1D::DCT2,  // ADST_DCT
+        2 => TxType1D::DST7,  // DCT_ADST
+        3 => TxType1D::DST7,  // ADST_ADST
+        4 => TxType1D::DCT2,  // FLIPADST_DCT
+        5 => TxType1D::DCT8,  // DCT_FLIPADST
+        6 => TxType1D::DCT8,  // FLIPADST_FLIPADST
+        7 => TxType1D::DCT8,  // ADST_FLIPADST
+        8 => TxType1D::DST7,  // FLIPADST_ADST
+        9 => TxType1D::IDT,   // IDTX
+        10 => TxType1D::IDT,  // V_DCT
+        11 => TxType1D::DCT2, // H_DCT
+        12 => TxType1D::IDT,  // V_ADST
+        13 => TxType1D::DST7, // H_ADST
+        14 => TxType1D::IDT,  // V_FLIPADST
+        15 => TxType1D::DCT8, // H_FLIPADST
         _ => TxType1D::DCT2,
     }
 }
 
 pub fn get_ver_tx_type_1d(tx_type: usize) -> TxType1D {
     match tx_type {
-        0 => TxType1D::DCT2,    // DCT_DCT
-        1 => TxType1D::DST7,    // ADST_DCT
-        2 => TxType1D::DCT2,    // DCT_ADST
-        3 => TxType1D::DST7,    // ADST_ADST
-        4 => TxType1D::DCT8,    // FLIPADST_DCT
-        5 => TxType1D::DCT2,    // DCT_FLIPADST
-        6 => TxType1D::DCT8,    // FLIPADST_FLIPADST
-        7 => TxType1D::DST7,    // ADST_FLIPADST
-        8 => TxType1D::DCT8,    // FLIPADST_ADST
-        9 => TxType1D::IDT,     // IDTX
-        10 => TxType1D::DCT2,   // V_DCT
-        11 => TxType1D::IDT,    // H_DCT
-        12 => TxType1D::DST7,   // V_ADST
-        13 => TxType1D::IDT,    // H_ADST
-        14 => TxType1D::DCT8,   // V_FLIPADST
-        15 => TxType1D::IDT,    // H_FLIPADST
+        0 => TxType1D::DCT2,  // DCT_DCT
+        1 => TxType1D::DST7,  // ADST_DCT
+        2 => TxType1D::DCT2,  // DCT_ADST
+        3 => TxType1D::DST7,  // ADST_ADST
+        4 => TxType1D::DCT8,  // FLIPADST_DCT
+        5 => TxType1D::DCT2,  // DCT_FLIPADST
+        6 => TxType1D::DCT8,  // FLIPADST_FLIPADST
+        7 => TxType1D::DST7,  // ADST_FLIPADST
+        8 => TxType1D::DCT8,  // FLIPADST_ADST
+        9 => TxType1D::IDT,   // IDTX
+        10 => TxType1D::DCT2, // V_DCT
+        11 => TxType1D::IDT,  // H_DCT
+        12 => TxType1D::DST7, // V_ADST
+        13 => TxType1D::IDT,  // H_ADST
+        14 => TxType1D::DCT8, // V_FLIPADST
+        15 => TxType1D::IDT,  // H_FLIPADST
         _ => TxType1D::DCT2,
     }
 }
@@ -306,7 +306,11 @@ fn kernel_value(tx_1d: TxType1D, size: usize, freq: usize, spatial: usize) -> i6
             _ => unreachable!(),
         },
         TxType1D::IDT => {
-            if freq == spatial { identity_scale(size) } else { 0 }
+            if freq == spatial {
+                identity_scale(size)
+            } else {
+                0
+            }
         }
     }
 }
@@ -708,8 +712,8 @@ pub fn forward_dct2_16x16(residual: &[i32; 256]) -> [i32; 256] {
         for freq_col in 0..16 {
             let mut sum = 0i64;
             for spatial_col in 0..16 {
-                sum += FWD_DCT2_16[freq_col][spatial_col] as i64
-                    * temp[freq_row][spatial_col] as i64;
+                sum +=
+                    FWD_DCT2_16[freq_col][spatial_col] as i64 * temp[freq_row][spatial_col] as i64;
             }
             output[freq_row * 16 + freq_col] = round_shift(sum, 11);
         }
@@ -725,8 +729,7 @@ pub fn inverse_dct2_4x4(coeffs: &[i32; 16]) -> [i32; 16] {
         for spatial_row in 0..4 {
             let mut sum = 0i64;
             for freq_row in 0..4 {
-                sum +=
-                    FWD_DCT2_4[freq_row][spatial_row] as i64 * coeffs[freq_row * 4 + col] as i64;
+                sum += FWD_DCT2_4[freq_row][spatial_row] as i64 * coeffs[freq_row * 4 + col] as i64;
             }
             temp[spatial_row][col] = round_shift(sum, 7);
         }
@@ -754,8 +757,7 @@ pub fn inverse_dct2_8x8(coeffs: &[i32; 64]) -> [i32; 64] {
         for spatial_row in 0..8 {
             let mut sum = 0i64;
             for freq_row in 0..8 {
-                sum +=
-                    FWD_DCT2_8[freq_row][spatial_row] as i64 * coeffs[freq_row * 8 + col] as i64;
+                sum += FWD_DCT2_8[freq_row][spatial_row] as i64 * coeffs[freq_row * 8 + col] as i64;
             }
             temp[spatial_row][col] = round_shift(sum, 7);
         }
@@ -783,8 +785,8 @@ pub fn inverse_dct2_16x16(coeffs: &[i32; 256]) -> [i32; 256] {
         for spatial_row in 0..16 {
             let mut sum = 0i64;
             for freq_row in 0..16 {
-                sum += FWD_DCT2_16[freq_row][spatial_row] as i64
-                    * coeffs[freq_row * 16 + col] as i64;
+                sum +=
+                    FWD_DCT2_16[freq_row][spatial_row] as i64 * coeffs[freq_row * 16 + col] as i64;
             }
             temp[spatial_row][col] = round_shift(sum, 6);
         }
@@ -795,8 +797,8 @@ pub fn inverse_dct2_16x16(coeffs: &[i32; 256]) -> [i32; 256] {
         for spatial_col in 0..16 {
             let mut sum = 0i64;
             for freq_col in 0..16 {
-                sum += FWD_DCT2_16[freq_col][spatial_col] as i64
-                    * temp[spatial_row][freq_col] as i64;
+                sum +=
+                    FWD_DCT2_16[freq_col][spatial_col] as i64 * temp[spatial_row][freq_col] as i64;
             }
             output[spatial_row * 16 + spatial_col] = round_shift(sum, 13);
         }

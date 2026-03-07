@@ -342,11 +342,13 @@ fn encode_plane_full(
         let txb_skip_cdf = match plane {
             0 => &mut cdf.txb_skip_y[txs_ctx_idx][ctx.entropy_ctx],
             1 => &mut cdf.txb_skip_u[ctx.entropy_ctx],
-            _ => if ctx.u_has_coeffs {
-                &mut cdf.txb_skip_v_u_nz[ctx.entropy_ctx]
-            } else {
-                &mut cdf.txb_skip_v[ctx.entropy_ctx]
-            },
+            _ => {
+                if ctx.u_has_coeffs {
+                    &mut cdf.txb_skip_v_u_nz[ctx.entropy_ctx]
+                } else {
+                    &mut cdf.txb_skip_v[ctx.entropy_ctx]
+                }
+            }
         };
         ec.encode_symbol_mut(skip_sym, txb_skip_cdf);
     } else {
@@ -465,7 +467,9 @@ fn encode_plane_full(
                             abs_level,
                             LF_NUM_BASE_LEVELS,
                             &COEFF_BR_LF_Y_ICDF[br_ctx],
-                            cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
+                            cdf_ctx
+                                .as_deref_mut()
+                                .map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
                         );
                     }
                 } else {
@@ -560,7 +564,9 @@ fn encode_plane_full(
                         dc_abs_level,
                         LF_NUM_BASE_LEVELS,
                         &COEFF_BR_LF_Y_ICDF[br_ctx],
-                        cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
+                        cdf_ctx
+                            .as_deref_mut()
+                            .map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
                     );
                 }
             } else {
@@ -649,10 +655,7 @@ fn encode_plane_full(
                         &mut cdf.dc_sign_y[dc_sign_ctx],
                     );
                 } else {
-                    ec.encode_symbol(
-                        if level < 0 { 1 } else { 0 },
-                        &DC_SIGN_Y_ICDF[dc_sign_ctx],
-                    );
+                    ec.encode_symbol(if level < 0 { 1 } else { 0 }, &DC_SIGN_Y_ICDF[dc_sign_ctx]);
                 }
             } else {
                 ec.encode_literal(if level < 0 { 1 } else { 0 }, 1);
@@ -1007,7 +1010,8 @@ mod tests {
         levels[0] = 100;
         levels[1] = -20;
         levels[2] = 10;
-        let data = encode_tile_data_with_coeffs(&levels, 3, &[0i32; 1024], 0, &[0i32; 1024], 0, 0, 0);
+        let data =
+            encode_tile_data_with_coeffs(&levels, 3, &[0i32; 1024], 0, &[0i32; 1024], 0, 0, 0);
         assert!(!data.is_empty());
     }
 
@@ -1015,7 +1019,8 @@ mod tests {
     fn tile_data_eob_1_produces_data() {
         let mut levels = [0i32; 1024];
         levels[0] = 50;
-        let data = encode_tile_data_with_coeffs(&levels, 1, &[0i32; 1024], 0, &[0i32; 1024], 0, 0, 0);
+        let data =
+            encode_tile_data_with_coeffs(&levels, 1, &[0i32; 1024], 0, &[0i32; 1024], 0, 0, 0);
         assert!(!data.is_empty());
     }
 

@@ -125,7 +125,13 @@ impl Encoder {
             });
         }
 
-        let padded_y = pad_plane(y, self.width, self.height, self.padded_width, self.padded_height);
+        let padded_y = pad_plane(
+            y,
+            self.width,
+            self.height,
+            self.padded_width,
+            self.padded_height,
+        );
         let padded_u = pad_plane(
             u,
             self.width / 2,
@@ -241,15 +247,14 @@ impl IntraMode {
 }
 
 const SMOOTH_WEIGHTS_32: [u16; 32] = [
-    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74,
-    66, 59, 52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
+    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74, 66, 59, 52, 45,
+    39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
 ];
 
 const SMOOTH_WEIGHTS_64: [u16; 64] = [
-    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150,
-    144, 138, 133, 127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69,
-    65, 61, 57, 54, 50, 47, 44, 41, 38, 35, 32, 29, 27, 25, 22, 20,
-    18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
+    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150, 144, 138, 133,
+    127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69, 65, 61, 57, 54, 50, 47, 44, 41, 38,
+    35, 32, 29, 27, 25, 22, 20, 18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
 ];
 
 fn smooth_weights(bsize: usize) -> &'static [u16] {
@@ -380,8 +385,8 @@ fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
             let w_w = weights[c] as u32;
             let above = refs.above[c] as u32;
             let left = refs.left[r] as u32;
-            let val = w_h * above + (256 - w_h) * below_pred
-                + w_w * left + (256 - w_w) * right_pred;
+            let val =
+                w_h * above + (256 - w_h) * below_pred + w_w * left + (256 - w_w) * right_pred;
             pred[r * bsize + c] = ((val + 256) >> 9) as u8;
         }
     }
@@ -634,12 +639,7 @@ fn encode_frame_yuv(
 pub fn encode_still_image(width: u32, height: u32, base_qindex: u8) -> Vec<u8> {
     let pw = round_up_to_64(width);
     let ph = round_up_to_64(height);
-    encode_video(
-        width,
-        height,
-        base_qindex,
-        &[vec![128; (pw * ph) as usize]],
-    )
+    encode_video(width, height, base_qindex, &[vec![128; (pw * ph) as usize]])
 }
 
 pub fn encode_video(width: u32, height: u32, base_qindex: u8, y_planes: &[Vec<u8>]) -> Vec<u8> {
@@ -849,8 +849,7 @@ pub fn reconstruct_block(
 ) {
     for row in 0..bsize {
         for col in 0..bsize {
-            let pixel = (pred_block[row * bsize + col] as i32
-                + inv_residual[row * bsize + col])
+            let pixel = (pred_block[row * bsize + col] as i32 + inv_residual[row * bsize + col])
                 .clamp(0, 255) as u8;
             recon[(y + row) * stride + x + col] = pixel;
         }
@@ -1449,7 +1448,11 @@ mod tests {
         };
         let pred = predict_smooth_block(&refs, 32);
         for &v in &pred {
-            assert!((v as i32 - 128).abs() <= 1, "smooth pred {} too far from 128", v);
+            assert!(
+                (v as i32 - 128).abs() <= 1,
+                "smooth pred {} too far from 128",
+                v
+            );
         }
     }
 
@@ -1464,7 +1467,11 @@ mod tests {
         };
         let pred = predict_smooth_v_block(&refs, 32);
         assert!(pred[0] > pred[31 * 32], "should decrease top to bottom");
-        assert!(pred[0] >= 254, "top row should be near 255, got {}", pred[0]);
+        assert!(
+            pred[0] >= 254,
+            "top row should be near 255, got {}",
+            pred[0]
+        );
     }
 
     #[test]
@@ -1478,7 +1485,11 @@ mod tests {
         };
         let pred = predict_smooth_h_block(&refs, 32);
         assert!(pred[0] > pred[31], "should decrease left to right");
-        assert!(pred[0] >= 254, "left col should be near 255, got {}", pred[0]);
+        assert!(
+            pred[0] >= 254,
+            "left col should be near 255, got {}",
+            pred[0]
+        );
     }
 
     #[test]

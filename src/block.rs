@@ -172,11 +172,11 @@ impl TxSize {
     pub fn sqr_up(&self) -> usize {
         let max_dim = self.width().max(self.height());
         match max_dim {
-            4 => 0,   // TX_4X4
-            8 => 1,   // TX_8X8
-            16 => 2,  // TX_16X16
-            32 => 3,  // TX_32X32
-            64 => 4,  // TX_64X64
+            4 => 0,  // TX_4X4
+            8 => 1,  // TX_8X8
+            16 => 2, // TX_16X16
+            32 => 3, // TX_32X32
+            64 => 4, // TX_64X64
             _ => unreachable!(),
         }
     }
@@ -184,11 +184,11 @@ impl TxSize {
     pub fn sqr(&self) -> usize {
         let min_dim = self.width().min(self.height());
         match min_dim {
-            4 => 0,   // TX_4X4
-            8 => 1,   // TX_8X8
-            16 => 2,  // TX_16X16
-            32 => 3,  // TX_32X32
-            64 => 4,  // TX_64X64
+            4 => 0,  // TX_4X4
+            8 => 1,  // TX_8X8
+            16 => 2, // TX_16X16
+            32 => 3, // TX_32X32
+            64 => 4, // TX_64X64
             _ => unreachable!(),
         }
     }
@@ -196,8 +196,7 @@ impl TxSize {
     pub fn size_class(&self) -> usize {
         match self {
             TxSize::Tx4x4 | TxSize::Tx4x8 | TxSize::Tx8x4 => 0,
-            TxSize::Tx8x8 | TxSize::Tx8x16 | TxSize::Tx16x8
-            | TxSize::Tx4x16 | TxSize::Tx16x4 => 1,
+            TxSize::Tx8x8 | TxSize::Tx8x16 | TxSize::Tx16x8 | TxSize::Tx4x16 | TxSize::Tx16x4 => 1,
             TxSize::Tx16x16 => 2,
             _ => 3,
         }

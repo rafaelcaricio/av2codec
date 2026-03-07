@@ -79,12 +79,7 @@ fn main() {
         process::exit(1);
     });
 
-    eprintln!(
-        "Decoded {} frame(s) at {}x{}",
-        frames.len(),
-        width,
-        height
-    );
+    eprintln!("Decoded {} frame(s) at {}x{}", frames.len(), width, height);
 }
 
 fn write_y4m(
@@ -93,11 +88,7 @@ fn write_y4m(
     height: u32,
     frames: &[wav2c::DecodedFrame],
 ) -> io::Result<()> {
-    writeln!(
-        w,
-        "YUV4MPEG2 W{} H{} F30:1 Ip A1:1 C420",
-        width, height
-    )?;
+    writeln!(w, "YUV4MPEG2 W{} H{} F30:1 Ip A1:1 C420", width, height)?;
 
     let uv_width = (width / 2) as usize;
     let uv_height = (height / 2) as usize;

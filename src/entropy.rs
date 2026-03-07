@@ -85,7 +85,9 @@ pub fn update_cdf(cdf: &mut [u16], val: usize, nsymbs: usize) {
         0
     };
 
-    let rate = 3 + time_interval + NSYMBS2SPEED[nsymbs]
+    let rate = 3
+        + time_interval
+        + NSYMBS2SPEED[nsymbs]
         + PARA_ADJUSTMENT_LIST[para_idx][time_interval as usize];
 
     let mut tmp: i32 = CDF_PROB_TOP as i32;

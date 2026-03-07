@@ -171,9 +171,27 @@ fn avmdec_decodes_solid_red_all_planes() {
     let y_diff = (dy as i32 - y_val as i32).abs();
     let u_diff = (du as i32 - u_val as i32).abs();
     let v_diff = (dv as i32 - v_val as i32).abs();
-    assert!(y_diff <= 3, "Y pixel mismatch: expected {}, got {} (diff {})", y_val, dy, y_diff);
-    assert!(u_diff <= 3, "U pixel mismatch: expected {}, got {} (diff {})", u_val, du, u_diff);
-    assert!(v_diff <= 3, "V pixel mismatch: expected {}, got {} (diff {})", v_val, dv, v_diff);
+    assert!(
+        y_diff <= 3,
+        "Y pixel mismatch: expected {}, got {} (diff {})",
+        y_val,
+        dy,
+        y_diff
+    );
+    assert!(
+        u_diff <= 3,
+        "U pixel mismatch: expected {}, got {} (diff {})",
+        u_val,
+        du,
+        u_diff
+    );
+    assert!(
+        v_diff <= 3,
+        "V pixel mismatch: expected {}, got {} (diff {})",
+        v_val,
+        dv,
+        v_diff
+    );
 }
 
 #[test]
@@ -217,9 +235,30 @@ fn avmdec_decodes_multi_frame_yuv() {
         let y_diff = (dy as i32 - ey as i32).abs();
         let u_diff = (du as i32 - eu as i32).abs();
         let v_diff = (dv as i32 - ev as i32).abs();
-        assert!(y_diff <= 3, "Frame {} Y mismatch: expected {}, got {} (diff {})", f, ey, dy, y_diff);
-        assert!(u_diff <= 3, "Frame {} U mismatch: expected {}, got {} (diff {})", f, eu, du, u_diff);
-        assert!(v_diff <= 3, "Frame {} V mismatch: expected {}, got {} (diff {})", f, ev, dv, v_diff);
+        assert!(
+            y_diff <= 3,
+            "Frame {} Y mismatch: expected {}, got {} (diff {})",
+            f,
+            ey,
+            dy,
+            y_diff
+        );
+        assert!(
+            u_diff <= 3,
+            "Frame {} U mismatch: expected {}, got {} (diff {})",
+            f,
+            eu,
+            du,
+            u_diff
+        );
+        assert!(
+            v_diff <= 3,
+            "Frame {} V mismatch: expected {}, got {} (diff {})",
+            f,
+            ev,
+            dv,
+            v_diff
+        );
     }
 }
 
@@ -488,9 +527,24 @@ fn avmdec_decodes_256x128_solid_red() {
     let y_diff = (dy as i32 - 81).abs();
     let u_diff = (du as i32 - 90).abs();
     let v_diff = (dv as i32 - 240).abs();
-    assert!(y_diff <= 3, "Y pixel mismatch: expected 81, got {} (diff {})", dy, y_diff);
-    assert!(u_diff <= 3, "U pixel mismatch: expected 90, got {} (diff {})", du, u_diff);
-    assert!(v_diff <= 3, "V pixel mismatch: expected 240, got {} (diff {})", dv, v_diff);
+    assert!(
+        y_diff <= 3,
+        "Y pixel mismatch: expected 81, got {} (diff {})",
+        dy,
+        y_diff
+    );
+    assert!(
+        u_diff <= 3,
+        "U pixel mismatch: expected 90, got {} (diff {})",
+        du,
+        u_diff
+    );
+    assert!(
+        v_diff <= 3,
+        "V pixel mismatch: expected 240, got {} (diff {})",
+        dv,
+        v_diff
+    );
 }
 
 #[test]
@@ -712,8 +766,7 @@ fn avmdec_wav2c_decoder_agreement_multi_sb() {
         "/tmp/wav2c_regression_testsrc2_avmdec.yuv",
     );
 
-    let wav2c_frames =
-        wav2c::Decoder::decode_all(&bs).expect("wav2c decoder failed");
+    let wav2c_frames = wav2c::Decoder::decode_all(&bs).expect("wav2c decoder failed");
     assert_eq!(wav2c_frames.len(), 1);
     let wav2c_y = &wav2c_frames[0].y;
     let wav2c_u = &wav2c_frames[0].u;
@@ -774,12 +827,7 @@ fn avmdec_wav2c_decoder_agreement_solid_colors() {
         let y_plane = vec![y_val; 128 * 128];
         let u_plane = vec![u_val; 64 * 64];
         let v_plane = vec![v_val; 64 * 64];
-        let bs = wav2c::encode::encode_video_yuv(
-            128,
-            128,
-            50,
-            &[(y_plane, u_plane, v_plane)],
-        );
+        let bs = wav2c::encode::encode_video_yuv(128, 128, 50, &[(y_plane, u_plane, v_plane)]);
 
         let obu_path = format!("/tmp/wav2c_regression_{}.obu", name);
         let yuv_path = format!("/tmp/wav2c_regression_{}_avmdec.yuv", name);
@@ -809,16 +857,29 @@ fn avmdec_wav2c_decoder_agreement_solid_colors() {
                 assert!(
                     avmdec_diff <= 3,
                     "{} {} pixel {} avmdec={} expected={} diff={}",
-                    name, plane_name, i, avmdec_plane[i], expected, avmdec_diff
+                    name,
+                    plane_name,
+                    i,
+                    avmdec_plane[i],
+                    expected,
+                    avmdec_diff
                 );
                 assert!(
                     wav2c_diff <= 1,
                     "{} {} pixel {} wav2c={} expected={} diff={}",
-                    name, plane_name, i, wav2c_plane[i], expected, wav2c_diff
+                    name,
+                    plane_name,
+                    i,
+                    wav2c_plane[i],
+                    expected,
+                    wav2c_diff
                 );
             }
         }
-        eprintln!("  {} 128x128: avmdec and wav2c agree within tolerance", name);
+        eprintln!(
+            "  {} 128x128: avmdec and wav2c agree within tolerance",
+            name
+        );
     }
 }
 

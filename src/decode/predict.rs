@@ -8,6 +8,11 @@ const IBP_WEIGHT_MAX: u32 = 1 << IBP_WEIGHT_SHIFT;
 const IBP_WEIGHT_REF: u32 = IBP_WEIGHT_MAX;
 const IBP_WEIGHT_SIZE_LOG2: usize = 4;
 const IBP_WEIGHT_SIZE: usize = 1 << IBP_WEIGHT_SIZE_LOG2;
+const POWER_DR_INTERP_FILTER: u32 = 7;
+const WAIP_WH_RATIO_2_THRES: i32 = 61;
+const WAIP_WH_RATIO_4_THRES: i32 = 73;
+const WAIP_WH_RATIO_8_THRES: i32 = 82;
+const WAIP_WH_RATIO_16_THRES: i32 = 86;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -90,6 +95,21 @@ const DR_INTRA_DERIVATIVE: [i32; 90] = [
     3, 2, 1,
 ];
 
+#[rustfmt::skip]
+const DR_INTERP_FILTER: [[i32; 4]; 32] = [
+    [0, 128, 0, 0],     [-2, 127, 4, -1],   [-3, 125, 8, -2],
+    [-5, 123, 13, -3],  [-6, 121, 17, -4],  [-7, 118, 22, -5],
+    [-9, 116, 27, -6],  [-9, 112, 32, -7],  [-10, 109, 37, -8],
+    [-11, 106, 41, -8], [-11, 102, 46, -9], [-12, 98, 52, -10],
+    [-12, 94, 56, -10], [-12, 90, 61, -11], [-12, 85, 66, -11],
+    [-12, 81, 71, -12], [-12, 76, 76, -12], [-12, 71, 81, -12],
+    [-11, 66, 85, -12], [-11, 61, 90, -12], [-10, 56, 94, -12],
+    [-10, 52, 98, -12], [-9, 46, 102, -11], [-8, 41, 106, -11],
+    [-8, 37, 109, -10], [-7, 32, 112, -9],  [-6, 27, 116, -9],
+    [-5, 22, 118, -7],  [-4, 17, 121, -6],  [-3, 13, 123, -5],
+    [-2, 8, 125, -3],   [-1, 4, 127, -2],
+];
+
 fn get_dx(angle: i32) -> i32 {
     if angle > 0 && angle < 90 {
         DR_INTRA_DERIVATIVE[angle as usize]
@@ -113,10 +133,9 @@ fn get_dy(angle: i32) -> i32 {
 const REORDERED_Y_MODE: [u8; 13] = [0, 9, 10, 11, 12, 3, 8, 1, 5, 4, 6, 2, 7];
 
 const DEFAULT_MODE_LIST_Y: [usize; 56] = [
-    17, 45, 3, 10, 24, 31, 38, 52,
-    15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
-    16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53,
-    14, 20, 42, 48, 0, 6, 7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
+    17, 45, 3, 10, 24, 31, 38, 52, 15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54, 16,
+    18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53, 14, 20, 42, 48, 0, 6, 7, 13, 21, 27,
+    28, 34, 35, 41, 49, 55,
 ];
 
 pub fn build_y_intra_mode_list(
@@ -164,12 +183,10 @@ pub fn build_y_intra_mode_list(
             for offset in 0..4usize {
                 for j_idx in 0..dir_cnt {
                     let nj = neighbor_joints[j_idx] as i64;
-                    let left_derived =
-                        ((nj - offset as i64 + 50).rem_euclid(56)) as usize
-                            + NON_DIRECTIONAL_MODES_COUNT;
-                    let right_derived =
-                        ((nj + offset as i64 - 4).rem_euclid(56)) as usize
-                            + NON_DIRECTIONAL_MODES_COUNT;
+                    let left_derived = ((nj - offset as i64 + 50).rem_euclid(56)) as usize
+                        + NON_DIRECTIONAL_MODES_COUNT;
+                    let right_derived = ((nj + offset as i64 - 4).rem_euclid(56)) as usize
+                        + NON_DIRECTIONAL_MODES_COUNT;
 
                     if !selected[left_derived] {
                         list[idx] = left_derived as u8;
@@ -206,11 +223,9 @@ pub fn decode_prediction_mode(joint: u8) -> (PredictionMode, i32) {
     if j < NON_DIRECTIONAL_MODES_COUNT {
         (PredictionMode::from_u8(REORDERED_Y_MODE[j]), 0)
     } else {
-        let dir_group =
-            (j - NON_DIRECTIONAL_MODES_COUNT) / TOTAL_ANGLE_DELTA_COUNT;
-        let angle_delta = ((j - NON_DIRECTIONAL_MODES_COUNT)
-            % TOTAL_ANGLE_DELTA_COUNT) as i32
-            - MAX_ANGLE_DELTA;
+        let dir_group = (j - NON_DIRECTIONAL_MODES_COUNT) / TOTAL_ANGLE_DELTA_COUNT;
+        let angle_delta =
+            ((j - NON_DIRECTIONAL_MODES_COUNT) % TOTAL_ANGLE_DELTA_COUNT) as i32 - MAX_ANGLE_DELTA;
         let canonical_idx = dir_group + NON_DIRECTIONAL_MODES_COUNT;
         (
             PredictionMode::from_u8(REORDERED_Y_MODE[canonical_idx]),
@@ -231,16 +246,18 @@ const IBP_WEIGHTS: [[u8; 16]; 5] = [
     [86, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     [77, 90, 102, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     [71, 78, 86, 92, 100, 107, 114, 121, 0, 0, 0, 0, 0, 0, 0, 0],
-    [68, 72, 76, 79, 83, 87, 90, 94, 98, 102, 106, 109, 113, 117, 121, 124],
+    [
+        68, 72, 76, 79, 83, 87, 90, 94, 98, 102, 106, 109, 113, 117, 121, 124,
+    ],
 ];
 
 const IBP_SIZE_TO_WEIGHTS_INDEX: [usize; 9] = [0, 1, 2, 0, 3, 0, 0, 0, 4];
 
 const ANGLE_TO_MODE_INDEX: [u8; 90] = [
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 0, 0, 15, 0, 0, 14, 0, 0, 13,
-    0, 0, 12, 0, 0, 11, 0, 0, 10, 0, 0, 0, 9, 0, 0, 8, 0, 0, 7, 0, 0, 6, 0, 0, 5, 0, 0, 4, 0,
-    0, 3, 0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 0,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 0, 0, 15, 0, 0, 14, 0, 0, 13, 0, 0, 12, 0,
+    0, 11, 0, 0, 10, 0, 0, 0, 9, 0, 0, 8, 0, 0, 7, 0, 0, 6, 0, 0, 5, 0, 0, 4, 0, 0, 3, 0, 0, 0, 0,
+    2, 0, 0, 1, 0, 0, 0, 0, 0,
 ];
 
 const IS_IBP_ENABLED: [bool; 16] = [
@@ -253,14 +270,20 @@ pub struct IntraPredictControl {
     pub plane: usize,
     pub enable_ibp: bool,
     pub is_cfl: bool,
+    pub above_filter_type: usize,
+    pub left_filter_type: usize,
 }
 
 fn trace_intra_block_match(x: usize, y: usize) -> bool {
     match std::env::var("WAV2C_TRACE_INTRA") {
         Ok(spec) => {
             let mut parts = spec.split(',');
-            let sx = parts.next().and_then(|value| value.trim().parse::<usize>().ok());
-            let sy = parts.next().and_then(|value| value.trim().parse::<usize>().ok());
+            let sx = parts
+                .next()
+                .and_then(|value| value.trim().parse::<usize>().ok());
+            let sy = parts
+                .next()
+                .and_then(|value| value.trim().parse::<usize>().ok());
             sx == Some(x) && sy == Some(y)
         }
         Err(_) => false,
@@ -271,6 +294,10 @@ struct PreparedRefs {
     above: Vec<u8>,
     left: Vec<u8>,
     top_left: u8,
+    n_top_px: usize,
+    n_topright_px: usize,
+    n_left_px: usize,
+    n_bottomleft_px: usize,
 }
 
 pub fn predict_intra(
@@ -353,7 +380,12 @@ pub fn predict_intra_with_control_and_availability(
 
     if mode.is_directional() {
         let mut p_angle = mode.base_angle() + angle_delta * ANGLE_STEP;
-        p_angle += MRL_INDEX_TO_DELTA[mrl_index as usize];
+        if control.plane == 0 {
+            p_angle += MRL_INDEX_TO_DELTA[mrl_index as usize];
+        }
+        p_angle = wide_angle_mapping(p_angle, w, h);
+        let apply_ibp_refs = control.enable_ibp && !(w == 4 && h == 4);
+        let apply_ibp_blend = apply_ibp_refs && control.plane == 0 && mrl_index == 0 && angle_delta % 2 == 0;
         return predict_directional(
             recon,
             stride,
@@ -366,7 +398,11 @@ pub fn predict_intra_with_control_and_availability(
             p_angle,
             mrl_index,
             sb_y,
-            apply_ibp && control.plane == 0 && mrl_index == 0 && angle_delta % 2 == 0,
+            apply_ibp_refs,
+            apply_ibp_blend,
+            control.above_filter_type,
+            control.left_filter_type,
+            control.plane == 0 && mrl_index == 0,
             availability,
         );
     }
@@ -374,10 +410,17 @@ pub fn predict_intra_with_control_and_availability(
     match mode {
         PredictionMode::DcPred => {
             let refs = prepare_intra_refs(recon, stride, x, y, w, h, mode, availability);
-            let mut pred =
-                predict_dc_from_refs(&refs.above, &refs.left, w, h, has_above, has_left);
+            let mut pred = predict_dc_from_refs(&refs.above, &refs.left, w, h, has_above, has_left);
             if apply_ibp && (control.plane == 0 || !control.is_cfl) && (has_above || has_left) {
-                apply_ibp_dc(&mut pred, w, h, &refs.above, &refs.left, has_above, has_left);
+                apply_ibp_dc(
+                    &mut pred,
+                    w,
+                    h,
+                    &refs.above,
+                    &refs.left,
+                    has_above,
+                    has_left,
+                );
             }
             pred
         }
@@ -386,6 +429,24 @@ pub fn predict_intra_with_control_and_availability(
             predict_smooth(recon, stride, x, y, w, h, mode, availability)
         }
         _ => vec![BASE_DC; w * h],
+    }
+}
+
+fn wide_angle_mapping(p_angle: i32, w: usize, h: usize) -> i32 {
+    if (h == 2 * w && p_angle < WAIP_WH_RATIO_2_THRES)
+        || (h == 4 * w && p_angle < WAIP_WH_RATIO_4_THRES)
+        || (h == 8 * w && p_angle < WAIP_WH_RATIO_8_THRES)
+        || (h == 16 * w && p_angle < WAIP_WH_RATIO_16_THRES)
+    {
+        p_angle + 180
+    } else if (w == 2 * h && p_angle > 270 - WAIP_WH_RATIO_2_THRES)
+        || (w == 4 * h && p_angle > 270 - WAIP_WH_RATIO_4_THRES)
+        || (w == 8 * h && p_angle > 270 - WAIP_WH_RATIO_8_THRES)
+        || (w == 16 * h && p_angle > 270 - WAIP_WH_RATIO_16_THRES)
+    {
+        p_angle - 180
+    } else {
+        p_angle
     }
 }
 
@@ -401,7 +462,11 @@ fn predict_directional(
     p_angle: i32,
     mrl_index: u8,
     sb_y: usize,
-    apply_ibp: bool,
+    apply_ibp_refs: bool,
+    apply_ibp_blend: bool,
+    above_filter_type: usize,
+    left_filter_type: usize,
+    use_idif: bool,
     availability: Option<&[bool]>,
 ) -> Vec<u8> {
     if p_angle == 90 && mrl_index == 0 {
@@ -411,9 +476,52 @@ fn predict_directional(
         return predict_h(recon, stride, x, y, w, h, availability);
     }
     if mrl_index == 0 {
-        let refs =
-            prepare_directional_refs(recon, stride, x, y, w, h, p_angle, apply_ibp, availability);
-        let mut pred = if p_angle > 0 && p_angle < 90 {
+        let mut refs =
+            prepare_directional_refs(recon, stride, x, y, w, h, p_angle, apply_ibp_refs, availability);
+        apply_directional_edge_filter(
+            &mut refs,
+            w,
+            h,
+            p_angle,
+            apply_ibp_refs,
+            above_filter_type,
+            left_filter_type,
+        );
+        let mut pred = if use_idif {
+            let refs_idif = expand_directional_idif_refs(&refs.above, &refs.left, refs.top_left);
+            if p_angle > 0 && p_angle < 90 {
+                predict_zone1_angle_idif(
+                    &refs_idif.above,
+                    refs_idif.prefix_len,
+                    w,
+                    h,
+                    get_dx(p_angle),
+                    0,
+                )
+            } else if p_angle > 90 && p_angle < 180 {
+                predict_zone2_angle_idif(
+                    &refs_idif.above,
+                    &refs_idif.left,
+                    refs_idif.prefix_len,
+                    w,
+                    h,
+                    get_dx(p_angle),
+                    get_dy(p_angle),
+                    0,
+                )
+            } else if p_angle > 180 && p_angle < 270 {
+                predict_zone3_angle_idif(
+                    &refs_idif.left,
+                    refs_idif.prefix_len,
+                    w,
+                    h,
+                    get_dy(p_angle),
+                    0,
+                )
+            } else {
+                vec![BASE_DC; w * h]
+            }
+        } else if p_angle > 0 && p_angle < 90 {
             predict_zone1_angle(&refs.above, w, h, get_dx(p_angle), 0)
         } else if p_angle > 90 && p_angle < 180 {
             predict_zone2_angle(
@@ -432,9 +540,40 @@ fn predict_directional(
             vec![BASE_DC; w * h]
         };
 
-        if apply_ibp {
+        if apply_ibp_blend {
             if let Some(mode_index) = ibp_mode_index(p_angle) {
-                if p_angle < 90 {
+                if use_idif && p_angle < 90 {
+                    let refs_idif =
+                        expand_directional_idif_refs(&refs.above, &refs.left, refs.top_left);
+                    let second = predict_zone3_angle_idif(
+                        &refs_idif.left,
+                        refs_idif.prefix_len,
+                        w,
+                        h,
+                        DR_INTRA_DERIVATIVE[(90 - p_angle) as usize],
+                        0,
+                    );
+                    apply_ibp_directional_zone1(&mut pred, &second, w, h, mode_index, p_angle);
+                } else if use_idif && p_angle > 180 {
+                    let refs_idif =
+                        expand_directional_idif_refs(&refs.above, &refs.left, refs.top_left);
+                    let second = predict_zone1_angle_idif(
+                        &refs_idif.above,
+                        refs_idif.prefix_len,
+                        w,
+                        h,
+                        DR_INTRA_DERIVATIVE[(p_angle - 180) as usize],
+                        0,
+                    );
+                    apply_ibp_directional_zone3(
+                        &mut pred,
+                        &second,
+                        w,
+                        h,
+                        mode_index,
+                        270 - p_angle,
+                    );
+                } else if p_angle < 90 {
                     let second = predict_zone3_angle(
                         &refs.left,
                         w,
@@ -451,8 +590,27 @@ fn predict_directional(
                         DR_INTRA_DERIVATIVE[(p_angle - 180) as usize],
                         0,
                     );
-                    apply_ibp_directional_zone3(&mut pred, &second, w, h, mode_index, 270 - p_angle);
+                    apply_ibp_directional_zone3(
+                        &mut pred,
+                        &second,
+                        w,
+                        h,
+                        mode_index,
+                        270 - p_angle,
+                    );
                 }
+            }
+        }
+
+        if trace_intra_block_match(x, y) {
+            for row in 0..h {
+                eprintln!(
+                    "[WAV2C_INTRA_PRED] xy=({}, {}) y={} row={:?}",
+                    x,
+                    y,
+                    row,
+                    &pred[row * w..(row + 1) * w]
+                );
             }
         }
 
@@ -460,8 +618,9 @@ fn predict_directional(
     }
 
     let above_mrl = if y == sb_y { 0 } else { mrl_index };
-    let (above_ext, left_ext, tl) =
-        extended_ref_samples_mrl(recon, stride, x, y, w, h, has_above, has_left, above_mrl, mrl_index);
+    let (above_ext, left_ext, tl) = extended_ref_samples_mrl(
+        recon, stride, x, y, w, h, has_above, has_left, above_mrl, mrl_index,
+    );
 
     let mrl = mrl_index as usize;
     let mut pred = if p_angle > 0 && p_angle < 90 {
@@ -469,7 +628,16 @@ fn predict_directional(
     } else if p_angle == 90 {
         predict_v_mrl(&above_ext, w, h)
     } else if p_angle > 90 && p_angle < 180 {
-        predict_zone2_angle(&above_ext, &left_ext, tl, w, h, get_dx(p_angle), get_dy(p_angle), mrl)
+        predict_zone2_angle(
+            &above_ext,
+            &left_ext,
+            tl,
+            w,
+            h,
+            get_dx(p_angle),
+            get_dy(p_angle),
+            mrl,
+        )
     } else if p_angle == 180 {
         predict_h_mrl(&left_ext, w, h)
     } else if p_angle > 180 && p_angle < 270 {
@@ -478,16 +646,39 @@ fn predict_directional(
         vec![BASE_DC; w * h]
     };
 
-    if apply_ibp {
+    if apply_ibp_blend {
         if let Some(mode_index) = ibp_mode_index(p_angle) {
             if p_angle < 90 {
-                let second = predict_zone3_angle(&left_ext, w, h, DR_INTRA_DERIVATIVE[(90 - p_angle) as usize], 0);
+                let second = predict_zone3_angle(
+                    &left_ext,
+                    w,
+                    h,
+                    DR_INTRA_DERIVATIVE[(90 - p_angle) as usize],
+                    0,
+                );
                 apply_ibp_directional_zone1(&mut pred, &second, w, h, mode_index, p_angle);
             } else if p_angle > 180 {
-                let second =
-                    predict_zone1_angle(&above_ext, w, h, DR_INTRA_DERIVATIVE[(p_angle - 180) as usize], 0);
+                let second = predict_zone1_angle(
+                    &above_ext,
+                    w,
+                    h,
+                    DR_INTRA_DERIVATIVE[(p_angle - 180) as usize],
+                    0,
+                );
                 apply_ibp_directional_zone3(&mut pred, &second, w, h, mode_index, 270 - p_angle);
             }
+        }
+    }
+
+    if trace_intra_block_match(x, y) {
+        for row in 0..h {
+            eprintln!(
+                "[WAV2C_INTRA_PRED] xy=({}, {}) y={} row={:?}",
+                x,
+                y,
+                row,
+                &pred[row * w..(row + 1) * w]
+            );
         }
     }
 
@@ -495,11 +686,17 @@ fn predict_directional(
 }
 
 fn mode_uses_top_extension(mode: PredictionMode) -> bool {
-    matches!(mode, PredictionMode::SmoothPred | PredictionMode::SmoothHPred)
+    matches!(
+        mode,
+        PredictionMode::SmoothPred | PredictionMode::SmoothHPred
+    )
 }
 
 fn mode_uses_left_extension(mode: PredictionMode) -> bool {
-    matches!(mode, PredictionMode::SmoothPred | PredictionMode::SmoothVPred)
+    matches!(
+        mode,
+        PredictionMode::SmoothPred | PredictionMode::SmoothVPred
+    )
 }
 
 fn pixel_is_available(
@@ -576,12 +773,12 @@ fn prepare_intra_refs(
         0
     };
     let n_topright_px = if needs_top_extension && n_top_px == w && y > 0 {
-        count_available_horizontal(availability, stride, frame_h, x + w, y - 1, h)
+        count_available_horizontal(availability, stride, frame_h, x + w, y - 1, w)
     } else {
         0
     };
     let n_bottomleft_px = if needs_left_extension && n_left_px == h && x > 0 {
-        count_available_vertical(availability, stride, frame_h, x - 1, y + h, w)
+        count_available_vertical(availability, stride, frame_h, x - 1, y + h, h)
     } else {
         0
     };
@@ -593,8 +790,9 @@ fn prepare_intra_refs(
         let mut filled = n_top_px;
         if needs_top_extension && n_topright_px > 0 {
             let ext_start = top_row + w;
-            above[w..w + n_topright_px].copy_from_slice(&recon[ext_start..ext_start + n_topright_px]);
-            filled += n_topright_px;
+            let copy_len = (above_len - w).min(n_topright_px);
+            above[w..w + copy_len].copy_from_slice(&recon[ext_start..ext_start + copy_len]);
+            filled += copy_len;
         }
         let pad = above[filled - 1];
         above[filled..].fill(pad);
@@ -609,10 +807,11 @@ fn prepare_intra_refs(
             left[row] = recon[(y + row) * stride + x - 1];
         }
         if needs_left_extension && n_bottomleft_px > 0 {
-            for row in 0..n_bottomleft_px {
+            let copy_len = (left_len - h).min(n_bottomleft_px);
+            for row in 0..copy_len {
                 left[h + row] = recon[(y + h + row) * stride + x - 1];
             }
-            filled += n_bottomleft_px;
+            filled += copy_len;
         }
         let pad = left[filled - 1];
         left[filled..].fill(pad);
@@ -657,6 +856,10 @@ fn prepare_intra_refs(
         above,
         left,
         top_left,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
     }
 }
 
@@ -687,12 +890,12 @@ fn prepare_directional_refs(
         0
     };
     let n_topright_px = if needs_top_extension && n_top_px == w && y > 0 {
-        count_available_horizontal(availability, stride, frame_h, x + w, y - 1, h)
+        count_available_horizontal(availability, stride, frame_h, x + w, y - 1, w)
     } else {
         0
     };
     let n_bottomleft_px = if needs_left_extension && n_left_px == h && x > 0 {
-        count_available_vertical(availability, stride, frame_h, x - 1, y + h, w)
+        count_available_vertical(availability, stride, frame_h, x - 1, y + h, h)
     } else {
         0
     };
@@ -704,8 +907,9 @@ fn prepare_directional_refs(
         let mut filled = n_top_px;
         if needs_top_extension && n_topright_px > 0 {
             let ext_start = top_row + w;
-            above[w..w + n_topright_px].copy_from_slice(&recon[ext_start..ext_start + n_topright_px]);
-            filled += n_topright_px;
+            let copy_len = (above_len - w).min(n_topright_px);
+            above[w..w + copy_len].copy_from_slice(&recon[ext_start..ext_start + copy_len]);
+            filled += copy_len;
         }
         let pad = above[filled - 1];
         above[filled..].fill(pad);
@@ -720,10 +924,11 @@ fn prepare_directional_refs(
             left[row] = recon[(y + row) * stride + x - 1];
         }
         if needs_left_extension && n_bottomleft_px > 0 {
-            for row in 0..n_bottomleft_px {
+            let copy_len = (left_len - h).min(n_bottomleft_px);
+            for row in 0..copy_len {
                 left[h + row] = recon[(y + h + row) * stride + x - 1];
             }
-            filled += n_bottomleft_px;
+            filled += copy_len;
         }
         let pad = left[filled - 1];
         left[filled..].fill(pad);
@@ -768,6 +973,181 @@ fn prepare_directional_refs(
         above,
         left,
         top_left,
+        n_top_px,
+        n_topright_px,
+        n_left_px,
+        n_bottomleft_px,
+    }
+}
+
+fn intra_edge_filter_strength(bs0: usize, bs1: usize, delta: i32, filter_type: usize) -> usize {
+    let d = delta.abs();
+    let blk_wh = bs0 + bs1;
+    let mut strength = 0;
+
+    if filter_type == 0 {
+        if blk_wh <= 8 {
+            if d >= 56 {
+                strength = 1;
+            }
+        } else if blk_wh <= 12 {
+            if d >= 40 {
+                strength = 1;
+            }
+        } else if blk_wh <= 16 {
+            if d >= 40 {
+                strength = 1;
+            }
+        } else if blk_wh <= 24 {
+            if d >= 8 {
+                strength = 1;
+            }
+            if d >= 16 {
+                strength = 2;
+            }
+            if d >= 32 {
+                strength = 3;
+            }
+        } else if blk_wh <= 32 {
+            if d >= 1 {
+                strength = 1;
+            }
+            if d >= 4 {
+                strength = 2;
+            }
+            if d >= 32 {
+                strength = 3;
+            }
+        } else if d >= 1 {
+            strength = 3;
+        }
+    } else if blk_wh <= 8 {
+        if d >= 40 {
+            strength = 1;
+        }
+        if d >= 64 {
+            strength = 2;
+        }
+    } else if blk_wh <= 16 {
+        if d >= 20 {
+            strength = 1;
+        }
+        if d >= 48 {
+            strength = 2;
+        }
+    } else if blk_wh <= 24 {
+        if d >= 4 {
+            strength = 3;
+        }
+    } else if d >= 1 {
+        strength = 3;
+    }
+
+    strength
+}
+
+fn filter_intra_edge(edge: &mut [u8], strength: usize) {
+    if strength == 0 {
+        return;
+    }
+
+    const KERNELS: [[u32; 5]; 3] = [[0, 4, 8, 4, 0], [0, 5, 6, 5, 0], [2, 4, 4, 4, 2]];
+    let kernel = KERNELS[strength - 1];
+    let src = edge.to_vec();
+
+    for i in 1..edge.len() {
+        let mut sum = 0u32;
+        for (j, coeff) in kernel.iter().enumerate() {
+            let idx = ((i as isize) - 2 + j as isize).clamp(0, edge.len() as isize - 1) as usize;
+            sum += src[idx] as u32 * coeff;
+        }
+        edge[i] = ((sum + 8) >> 4) as u8;
+    }
+}
+
+fn apply_directional_edge_filter(
+    refs: &mut PreparedRefs,
+    w: usize,
+    h: usize,
+    p_angle: i32,
+    apply_ibp: bool,
+    above_filter_type: usize,
+    left_filter_type: usize,
+) {
+    if p_angle == 90 || p_angle == 180 {
+        return;
+    }
+
+    let (mut need_above, mut need_left, mut need_above_left) = if p_angle < 90 {
+        (true, false, true)
+    } else if p_angle < 180 {
+        (true, true, true)
+    } else {
+        (false, true, true)
+    };
+    if apply_ibp {
+        need_above = true;
+        need_left = true;
+        need_above_left = true;
+    }
+
+    let mut need_right = p_angle < 90;
+    let mut need_bottom = p_angle > 180;
+    if apply_ibp {
+        need_right |= p_angle > 180;
+        need_bottom |= p_angle < 90;
+    }
+
+    if need_above && need_left && w + h >= 24 && !refs.above.is_empty() && !refs.left.is_empty() {
+        refs.top_left =
+            ((refs.left[0] as u32 * 5 + refs.top_left as u32 * 6 + refs.above[0] as u32 * 5 + 8)
+                >> 4) as u8;
+    }
+
+    let ab_le = usize::from(need_above_left);
+    let angle_above = if apply_ibp && p_angle > 180 {
+        p_angle - 270
+    } else {
+        p_angle - 90
+    };
+    let angle_left = if apply_ibp && p_angle < 90 {
+        p_angle
+    } else {
+        p_angle - 180
+    };
+    let filt_type_above = if apply_ibp { above_filter_type } else { 0 };
+    let filt_type_left = if apply_ibp { left_filter_type } else { 0 };
+
+    if need_above && refs.n_top_px > 0 {
+        let strength = intra_edge_filter_strength(w, h, angle_above, filt_type_above);
+        let len = refs.n_top_px + ab_le + if need_right { h } else { 0 };
+        let limit = len.min(refs.above.len() + ab_le);
+        let mut edge = Vec::with_capacity(limit);
+        if ab_le == 1 {
+            edge.push(refs.top_left);
+        }
+        edge.extend_from_slice(&refs.above[..limit - ab_le]);
+        filter_intra_edge(&mut edge, strength);
+        if ab_le == 1 {
+            refs.top_left = edge[0];
+        }
+        refs.above[..limit - ab_le].copy_from_slice(&edge[ab_le..]);
+    }
+
+    if need_left && refs.n_left_px > 0 {
+        let strength = intra_edge_filter_strength(h, w, angle_left, filt_type_left);
+        let len = refs.n_left_px + ab_le + if need_bottom { w } else { 0 };
+        let limit = len.min(refs.left.len() + ab_le);
+        let mut edge = Vec::with_capacity(limit);
+        if ab_le == 1 {
+            edge.push(refs.top_left);
+        }
+        edge.extend_from_slice(&refs.left[..limit - ab_le]);
+        filter_intra_edge(&mut edge, strength);
+        if ab_le == 1 {
+            refs.top_left = edge[0];
+        }
+        refs.left[..limit - ab_le].copy_from_slice(&edge[ab_le..]);
     }
 }
 
@@ -839,7 +1219,15 @@ fn apply_ibp_directional_zone3(
     }
 }
 
-fn apply_ibp_dc(pred: &mut [u8], w: usize, h: usize, above: &[u8], left: &[u8], has_above: bool, has_left: bool) {
+fn apply_ibp_dc(
+    pred: &mut [u8],
+    w: usize,
+    h: usize,
+    above: &[u8],
+    left: &[u8],
+    has_above: bool,
+    has_left: bool,
+) {
     match (has_above, has_left) {
         (true, true) => apply_ibp_dc_both(pred, w, h, above, left),
         (true, false) => apply_ibp_dc_top(pred, w, h, above),
@@ -974,9 +1362,11 @@ fn extended_ref_samples(
             let above = vec![fill; above_need];
             (above, left, fill)
         }
-        (false, false) => {
-            (vec![DEFAULT_ABOVE; above_need], vec![DEFAULT_LEFT; left_need], DEFAULT_TOP_LEFT)
-        }
+        (false, false) => (
+            vec![DEFAULT_ABOVE; above_need],
+            vec![DEFAULT_LEFT; left_need],
+            DEFAULT_TOP_LEFT,
+        ),
     }
 }
 
@@ -1065,9 +1455,11 @@ fn extended_ref_samples_mrl(
             let above = vec![fill; above_need];
             (above, left, fill)
         }
-        (false, false) => {
-            (vec![DEFAULT_ABOVE; above_need], vec![DEFAULT_LEFT; left_need], DEFAULT_TOP_LEFT)
-        }
+        (false, false) => (
+            vec![DEFAULT_ABOVE; above_need],
+            vec![DEFAULT_LEFT; left_need],
+            DEFAULT_TOP_LEFT,
+        ),
     }
 }
 
@@ -1125,6 +1517,82 @@ fn predict_zone1_angle(above: &[u8], w: usize, h: usize, dx: i32, mrl: usize) ->
     pred
 }
 
+struct PreparedIdifRefs {
+    above: Vec<u8>,
+    left: Vec<u8>,
+    prefix_len: usize,
+}
+
+fn expand_directional_idif_refs(above: &[u8], left: &[u8], top_left: u8) -> PreparedIdifRefs {
+    let prefix_len = 2;
+    let above_tail = above.last().copied().unwrap_or(top_left);
+    let left_tail = left.last().copied().unwrap_or(top_left);
+
+    let mut above_idif = vec![top_left; prefix_len];
+    above_idif.extend_from_slice(above);
+    above_idif.push(above_tail);
+    above_idif.push(above_tail);
+
+    let mut left_idif = vec![top_left; prefix_len];
+    left_idif.extend_from_slice(left);
+    left_idif.push(left_tail);
+    left_idif.push(left_tail);
+
+    PreparedIdifRefs {
+        above: above_idif,
+        left: left_idif,
+        prefix_len,
+    }
+}
+
+fn dr_interp_sample(refs: &[u8], base_idx: usize, shift: usize) -> u8 {
+    let filter = DR_INTERP_FILTER[shift];
+    let val = filter[0] * refs[base_idx - 1] as i32
+        + filter[1] * refs[base_idx] as i32
+        + filter[2] * refs[base_idx + 1] as i32
+        + filter[3] * refs[base_idx + 2] as i32;
+    round_power_of_two_signed(val, POWER_DR_INTERP_FILTER).clamp(0, 255) as u8
+}
+
+fn predict_zone1_angle_idif(
+    above: &[u8],
+    prefix_len: usize,
+    w: usize,
+    h: usize,
+    dx: i32,
+    mrl: usize,
+) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    let max_base_x = (w + h) as i32 - 1 + (mrl as i32) * 2;
+    let mut pos_x = dx * (1 + mrl as i32);
+
+    for r in 0..h {
+        let mut base = pos_x >> 6;
+        let shift = ((pos_x & 0x3F) >> 1) as usize;
+
+        if base > max_base_x {
+            let fill = above[prefix_len + max_base_x as usize];
+            for i in r..h {
+                for c in 0..w {
+                    pred[i * w + c] = fill;
+                }
+            }
+            return pred;
+        }
+
+        for c in 0..w {
+            pred[r * w + c] = if base <= max_base_x {
+                dr_interp_sample(above, prefix_len + base as usize, shift)
+            } else {
+                above[prefix_len + max_base_x as usize]
+            };
+            base += 1;
+        }
+        pos_x += dx;
+    }
+    pred
+}
+
 fn predict_zone2_angle(
     above: &[u8],
     left: &[u8],
@@ -1149,7 +1617,10 @@ fn predict_zone2_angle(
                 let (s0, s1) = if base_x < 0 {
                     (tl as u32, above[0] as u32)
                 } else {
-                    (above[base_x as usize] as u32, above[(base_x + 1) as usize] as u32)
+                    (
+                        above[base_x as usize] as u32,
+                        above[(base_x + 1) as usize] as u32,
+                    )
                 };
                 let val = s0 * (32 - shift) + s1 * shift;
                 pred[r * w + c] = ((val + 16) >> 5) as u8;
@@ -1163,12 +1634,47 @@ fn predict_zone2_angle(
                     (tl as u32, left[0] as u32)
                 } else {
                     let by = base_y as usize;
-                    (left[by.min(left.len() - 1)] as u32,
-                     left[(by + 1).min(left.len() - 1)] as u32)
+                    (
+                        left[by.min(left.len() - 1)] as u32,
+                        left[(by + 1).min(left.len() - 1)] as u32,
+                    )
                 };
                 let val = s0 * (32 - shift) + s1 * shift;
                 pred[r * w + c] = ((val + 16) >> 5) as u8;
             }
+        }
+    }
+    pred
+}
+
+fn predict_zone2_angle_idif(
+    above: &[u8],
+    left: &[u8],
+    prefix_len: usize,
+    w: usize,
+    h: usize,
+    dx: i32,
+    dy: i32,
+    mrl: usize,
+) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    let min_base = -1 - mrl as i32;
+
+    for r in 0..h {
+        for c in 0..w {
+            let y = r as i32 + 1;
+            let mut x = ((c as i32) << 6) - (y + mrl as i32) * dx;
+            let base_x = x >> 6;
+            pred[r * w + c] = if base_x >= min_base {
+                let shift = ((x & 0x3F) >> 1) as usize;
+                dr_interp_sample(above, (base_x + prefix_len as i32) as usize, shift)
+            } else {
+                x = c as i32 + 1;
+                let y = ((r as i32) << 6) - (x + mrl as i32) * dy;
+                let base_y = y >> 6;
+                let shift = ((y & 0x3F) >> 1) as usize;
+                dr_interp_sample(left, (base_y + prefix_len as i32) as usize, shift)
+            };
         }
     }
     pred
@@ -1186,8 +1692,8 @@ fn predict_zone3_angle(left: &[u8], w: usize, h: usize, dy: i32, mrl: usize) -> 
         for r in 0..h {
             let b = base + r as i32;
             if b < max_base_y {
-                let val = left[b as usize] as u32 * (32 - shift)
-                    + left[(b + 1) as usize] as u32 * shift;
+                let val =
+                    left[b as usize] as u32 * (32 - shift) + left[(b + 1) as usize] as u32 * shift;
                 pred[r * w + c] = ((val + 16) >> 5) as u8;
             } else {
                 for ri in r..h {
@@ -1195,6 +1701,39 @@ fn predict_zone3_angle(left: &[u8], w: usize, h: usize, dy: i32, mrl: usize) -> 
                 }
                 break;
             }
+        }
+        pos_y += dy;
+    }
+    pred
+}
+
+fn predict_zone3_angle_idif(
+    left: &[u8],
+    prefix_len: usize,
+    w: usize,
+    h: usize,
+    dy: i32,
+    mrl: usize,
+) -> Vec<u8> {
+    let mut pred = vec![0u8; w * h];
+    let max_base_y = (w + h) as i32 - 1 + (mrl as i32) * 2;
+    let mut pos_y = dy * (1 + mrl as i32);
+
+    for c in 0..w {
+        let mut base = pos_y >> 6;
+        let shift = ((pos_y & 0x3F) >> 1) as usize;
+
+        for r in 0..h {
+            if base <= max_base_y {
+                pred[r * w + c] = dr_interp_sample(left, prefix_len + base as usize, shift);
+            } else {
+                let fill = left[prefix_len + max_base_y as usize];
+                for ri in r..h {
+                    pred[ri * w + c] = fill;
+                }
+                break;
+            }
+            base += 1;
         }
         pos_y += dy;
     }
@@ -1222,7 +1761,15 @@ fn predict_dc_from_refs(
         (true, true) => {
             let sum_above: u32 = above[..w].iter().map(|&value| value as u32).sum();
             let sum_left: u32 = left[..h].iter().map(|&value| value as u32).sum();
-            ((sum_above + sum_left + (w + h) as u32 / 2) / (w + h) as u32) as u8
+            let sum = (sum_above + sum_left) as i32;
+            let count = (w + h) as u32;
+            if w == h {
+                ((sum as u32 + count / 2) / count) as u8
+            } else {
+                let (scale, shift) = super::resolve_divisor_32(count);
+                let rounding = 1 << (shift - 1);
+                ((sum * scale as i32 + rounding) >> shift) as u8
+            }
         }
     };
     vec![val; w * h]
@@ -1319,6 +1866,14 @@ fn round_power_of_two(value: i32, bits: u32) -> i32 {
     (value + (1 << (bits - 1))) >> bits
 }
 
+fn round_power_of_two_signed(value: i32, bits: u32) -> i32 {
+    if value < 0 {
+        -round_power_of_two(-value, bits)
+    } else {
+        round_power_of_two(value, bits)
+    }
+}
+
 fn divide_round(value: i32, bits: u32) -> i32 {
     (value + (1 << (bits - 1))) >> bits
 }
@@ -1338,7 +1893,19 @@ fn predict_smooth(
     availability: Option<&[bool]>,
 ) -> Vec<u8> {
     let refs = prepare_intra_refs(recon, stride, x, y, w, h, mode, availability);
-    predict_smooth_from_refs(&refs.above, &refs.left, w, h, mode)
+    let pred = predict_smooth_from_refs(&refs.above, &refs.left, w, h, mode);
+    if trace_intra_block_match(x, y) {
+        for row in 0..h {
+            eprintln!(
+                "[WAV2C_INTRA_PRED] xy=({}, {}) y={} row={:?}",
+                x,
+                y,
+                row,
+                &pred[row * w..(row + 1) * w]
+            );
+        }
+    }
+    pred
 }
 
 fn predict_smooth_from_refs(
@@ -1348,7 +1915,10 @@ fn predict_smooth_from_refs(
     h: usize,
     mode: PredictionMode,
 ) -> Vec<u8> {
-    let scale = round_power_of_two((blk_size_log2(h) as i32 - 2 + blk_size_log2(w) as i32 - 2), 2);
+    let scale = round_power_of_two(
+        (blk_size_log2(h) as i32 - 2 + blk_size_log2(w) as i32 - 2),
+        2,
+    );
     let blend_max_log2 = blk_size_log2(32);
     let mut pred = vec![0u8; w * h];
 
@@ -1359,8 +1929,8 @@ fn predict_smooth_from_refs(
                 let s_top = 32 >> blk_size_log2(64).min(((row << 1) >> scale as usize) as u32);
                 for col in 0..w {
                     let top = above[col] as i32;
-                    let mut predv =
-                        below_pred + divide_round((top - below_pred) * (h - 1 - row) as i32, blk_size_log2(h));
+                    let mut predv = below_pred
+                        + divide_round((top - below_pred) * (h - 1 - row) as i32, blk_size_log2(h));
                     predv += divide_round((top - predv) * s_top, blend_max_log2 + 1);
                     pred[row * w + col] = predv.clamp(0, 255) as u8;
                 }
@@ -1371,8 +1941,7 @@ fn predict_smooth_from_refs(
             for row in 0..h {
                 let left_value = left[row] as i32;
                 for col in 0..w {
-                    let s_left =
-                        32 >> blk_size_log2(64).min(((col << 1) >> scale as usize) as u32);
+                    let s_left = 32 >> blk_size_log2(64).min(((col << 1) >> scale as usize) as u32);
                     let mut predh = right_pred
                         + divide_round(
                             (left_value - right_pred) * (w - 1 - col) as i32,
@@ -1390,11 +1959,10 @@ fn predict_smooth_from_refs(
                 let s_top = 32 >> blk_size_log2(64).min(((row << 1) >> scale as usize) as u32);
                 let left_value = left[row] as i32;
                 for col in 0..w {
-                    let s_left =
-                        32 >> blk_size_log2(64).min(((col << 1) >> scale as usize) as u32);
+                    let s_left = 32 >> blk_size_log2(64).min(((col << 1) >> scale as usize) as u32);
                     let top = above[col] as i32;
-                    let mut predv =
-                        below_pred + divide_round((top - below_pred) * (h - 1 - row) as i32, blk_size_log2(h));
+                    let mut predv = below_pred
+                        + divide_round((top - below_pred) * (h - 1 - row) as i32, blk_size_log2(h));
                     let mut predh = right_pred
                         + divide_round(
                             (left_value - right_pred) * (w - 1 - col) as i32,
@@ -1512,6 +2080,14 @@ mod tests {
     }
 
     #[test]
+    fn dc_rect_16x4_matches_av2_divisor() {
+        let above = [232, 242, 242, 199, 202, 206, 212, 218, 220, 217, 214, 210, 210, 205, 194, 184];
+        let left = [240, 240, 240, 240];
+        let pred = predict_dc_from_refs(&above, &left, 16, 4, true, true);
+        assert!(pred.iter().all(|&value| value == 219));
+    }
+
+    #[test]
     fn v_pred_with_above() {
         let mut recon = vec![0u8; 128 * 128];
         for (i, pixel) in recon[..64].iter_mut().enumerate() {
@@ -1570,7 +2146,10 @@ mod tests {
         recon[..128].fill(100);
         let pred = predict_intra(&recon, 128, 0, 1, 8, 8, PredictionMode::D45Pred, 0, 0, 0);
         for &v in &pred {
-            assert_eq!(v, 100, "D45 with uniform above should produce 100 everywhere");
+            assert_eq!(
+                v, 100,
+                "D45 with uniform above should produce 100 everywhere"
+            );
         }
     }
 
@@ -1582,7 +2161,10 @@ mod tests {
         }
         let pred = predict_intra(&recon, 128, 1, 0, 8, 8, PredictionMode::D203Pred, 0, 0, 0);
         for &v in &pred {
-            assert_eq!(v, 100, "D203 with uniform left should produce 100 everywhere");
+            assert_eq!(
+                v, 100,
+                "D203 with uniform left should produce 100 everywhere"
+            );
         }
     }
 
@@ -1610,6 +2192,8 @@ mod tests {
                 plane: 0,
                 enable_ibp: true,
                 is_cfl: false,
+                above_filter_type: 0,
+                left_filter_type: 0,
             },
         );
 
@@ -1643,6 +2227,8 @@ mod tests {
                 plane: 1,
                 enable_ibp: true,
                 is_cfl: true,
+                above_filter_type: 0,
+                left_filter_type: 0,
             },
         );
 
@@ -1676,6 +2262,8 @@ mod tests {
                 plane: 0,
                 enable_ibp: true,
                 is_cfl: false,
+                above_filter_type: 0,
+                left_filter_type: 0,
             },
         );
         let odd_delta = predict_intra_with_control(
@@ -1693,10 +2281,15 @@ mod tests {
                 plane: 0,
                 enable_ibp: true,
                 is_cfl: false,
+                above_filter_type: 0,
+                left_filter_type: 0,
             },
         );
 
         assert_ne!(enabled, base);
-        assert_eq!(odd_delta, predict_intra(&recon, stride, 1, 1, 8, 8, PredictionMode::D45Pred, 1, 0, 0));
+        assert_eq!(
+            odd_delta,
+            predict_intra(&recon, stride, 1, 1, 8, 8, PredictionMode::D45Pred, 1, 0, 0)
+        );
     }
 }

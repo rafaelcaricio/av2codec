@@ -1,10 +1,16 @@
 use crate::block::TxSize;
 use crate::dct;
-use crate::scan::{get_scan_for_tx, get_tx_class, TxClass, DEFAULT_SCAN_32X32};
+use crate::scan::{DEFAULT_SCAN_32X32, TxClass, get_scan_for_tx, get_tx_class};
 
 const TCQ_NEXT_STATE: [[u8; 2]; 8] = [
-    [0, 4], [4, 0], [1, 5], [5, 1],
-    [6, 2], [2, 6], [7, 3], [3, 7],
+    [0, 4],
+    [4, 0],
+    [1, 5],
+    [5, 1],
+    [6, 2],
+    [2, 6],
+    [7, 3],
+    [3, 7],
 ];
 
 fn tcq_quant(state: u8) -> i32 {
@@ -237,11 +243,7 @@ pub fn dequantize_only(
     dqcoeffs
 }
 
-pub fn inverse_transform_only(
-    dqcoeffs: &[i32],
-    tx_size: TxSize,
-    tx_type: usize,
-) -> Vec<i32> {
+pub fn inverse_transform_only(dqcoeffs: &[i32], tx_size: TxSize, tx_type: usize) -> Vec<i32> {
     let pixel_count = tx_size.width() * tx_size.height();
     if dqcoeffs.iter().all(|&c| c == 0) {
         return vec![0i32; pixel_count];

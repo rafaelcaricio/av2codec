@@ -65,7 +65,10 @@ impl<'a> BitReader<'a> {
     }
 
     pub fn remaining_bytes(&self) -> &'a [u8] {
-        assert!(self.byte_aligned(), "must be byte-aligned to get remaining bytes");
+        assert!(
+            self.byte_aligned(),
+            "must be byte-aligned to get remaining bytes"
+        );
         &self.data[self.byte_pos..]
     }
 

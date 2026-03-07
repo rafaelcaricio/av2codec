@@ -52,14 +52,20 @@ impl<'a> DaalaDecoder<'a> {
 
     fn bypass_normalize(&mut self, dif: u64, n_bypass: i32) {
         self.cnt -= n_bypass;
-        self.dif = dif.wrapping_add(1).wrapping_shl(n_bypass as u32).wrapping_sub(1);
+        self.dif = dif
+            .wrapping_add(1)
+            .wrapping_shl(n_bypass as u32)
+            .wrapping_sub(1);
         if self.cnt < OD_EC_MIN_BITS {
             self.refill();
         }
     }
 
     pub fn trace_state(&self, label: &str) {
-        eprintln!("[TRACE] {} rng=0x{:04x} dif=0x{:016x} cnt={}", label, self.rng, self.dif, self.cnt);
+        eprintln!(
+            "[TRACE] {} rng=0x{:04x} dif=0x{:016x} cnt={}",
+            label, self.rng, self.dif, self.cnt
+        );
     }
 
     pub fn decode_bool(&mut self, f: u16) -> bool {
