@@ -202,6 +202,37 @@ cargo test --test avmdec_integration -- --ignored
 
 The integration suite covers single-frame, multi-frame, multiple colors (green, red, gray), all three YUV planes, gradient/testsrc2 patterns with PSNR validation, decoder agreement between wav2c and avmdec, and CLI roundtrip encoding.
 
+Visual encoder/decoder matrix with burned-in labels:
+
+```sh
+# Requires uv, ffmpeg, avmenc, and avmdec
+./scripts/compare_codec_matrix.py -s 256x256 -q 30 -o /tmp/codec_matrix.png photo.jpg
+```
+
+The script:
+
+- Converts one input image into a single prepared Y4M frame
+- Encodes that same frame with both `avmenc` and `wav2c`
+- Decodes both bitstreams with both `avmdec` and `wav2c_decode`
+- Produces a labeled 2x3 PNG grid with:
+  - top row: `Original`, `avmenc -> avmdec`, `avmenc -> wav2c`
+  - bottom row: `Original`, `wav2c -> avmdec`, `wav2c -> wav2c`
+
+Useful flags:
+
+- `-s WxH` resizes and center-crops the source image before encode
+- `-q N` applies the same quality value to `avmenc --qp` and `wav2c --qindex`
+- `--cpu-used N` controls avmenc speed
+- `--scale-up N` enlarges the comparison cells for easier inspection
+- `--keep-workdir` preserves intermediate OBUs, Y4Ms, PNGs, and logs
+- `--no-build` skips rebuilding `wav2c` release binaries
+
+See:
+
+```sh
+./scripts/compare_codec_matrix.py --help
+```
+
 ## Project structure
 
 ```
