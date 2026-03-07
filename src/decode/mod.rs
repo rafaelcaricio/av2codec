@@ -32,6 +32,18 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+fn trace_block_match(tag: &str, x: usize, y: usize) -> bool {
+    match std::env::var(tag) {
+        Ok(spec) => {
+            let mut parts = spec.split(',');
+            let sx = parts.next().and_then(|v| v.trim().parse::<usize>().ok());
+            let sy = parts.next().and_then(|v| v.trim().parse::<usize>().ok());
+            sx == Some(x) && sy == Some(y)
+        }
+        Err(_) => false,
+    }
+}
+
 pub struct DecodedFrame {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
@@ -300,6 +312,8 @@ fn derive_cfl_alpha_q3_neighbors(
     let mut sum_y = 0i64;
     let mut sum_xx = 0i64;
     let mut sum_xy = 0i64;
+    let trace = trace_block_match("WAV2C_TRACE_CFL", uv_bx, uv_by);
+    let mut samples: Vec<(usize, usize, i64, i64)> = Vec::new();
 
     let mut add_sample = |sx: usize, sy: usize| {
         if sx >= uv_w || sy >= uv_h {
@@ -307,6 +321,9 @@ fn derive_cfl_alpha_q3_neighbors(
         }
         if let Some(x_q3) = subsampled_luma_q3(y_plane, y_w, y_h, sx, sy) {
             let yv = chroma_plane[sy * uv_w + sx] as i64;
+            if trace {
+                samples.push((sx, sy, x_q3, yv));
+            }
             n += 1;
             sum_x += x_q3;
             sum_y += yv;
@@ -335,10 +352,34 @@ fn derive_cfl_alpha_q3_neighbors(
     let cov_num = n * sum_xy - sum_x * sum_y;
     let var_num = n * sum_xx - sum_x * sum_x;
     if var_num == 0 {
+        if trace {
+            eprintln!(
+                "[WAV2C_CFL_DERIVE] uv=({}, {}) size={}x{} n={} sum_x={} sum_y={} sum_xx={} sum_xy={} cov={} var={} alpha=0",
+                uv_bx, uv_by, uv_bw, uv_bh, n, sum_x, sum_y, sum_xx, sum_xy, cov_num, var_num
+            );
+            for (sx, sy, x_q3, yv) in samples.iter() {
+                eprintln!(
+                    "[WAV2C_CFL_SAMPLE] s=({}, {}) x_q3={} y={}",
+                    sx, sy, x_q3, yv
+                );
+            }
+        }
         return 0;
     }
 
     let alpha_q3 = div_round_signed(cov_num << 11, var_num).clamp(-1024, 1024);
+    if trace {
+        eprintln!(
+            "[WAV2C_CFL_DERIVE] uv=({}, {}) size={}x{} n={} sum_x={} sum_y={} sum_xx={} sum_xy={} cov={} var={} alpha={}",
+            uv_bx, uv_by, uv_bw, uv_bh, n, sum_x, sum_y, sum_xx, sum_xy, cov_num, var_num, alpha_q3
+        );
+        for (sx, sy, x_q3, yv) in samples.iter() {
+            eprintln!(
+                "[WAV2C_CFL_SAMPLE] s=({}, {}) x_q3={} y={}",
+                sx, sy, x_q3, yv
+            );
+        }
+    }
     alpha_q3 as i32
 }
 
@@ -372,13 +413,11 @@ fn solve_3x3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
             a.swap(i, pivot);
             b.swap(i, pivot);
         }
-
         let diag = a[i][i];
         for c in i..3 {
             a[i][c] /= diag;
         }
         b[i] /= diag;
-
         for r in 0..3 {
             if r == i {
                 continue;
@@ -408,10 +447,13 @@ fn derive_mhccp_params_neighbors(
     uv_bw: usize,
     uv_bh: usize,
     mh_dir: u8,
+    plane_name: char,
 ) -> Option<[f64; 3]> {
     let mut ata = [[0.0f64; 3]; 3];
     let mut aty = [0.0f64; 3];
     let mut count = 0usize;
+    let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
+    let mut samples: Vec<(usize, usize, f64, f64, f64, f64, f64)> = Vec::new();
 
     let mut add_sample = |sx: usize, sy: usize| {
         if sx >= uv_w || sy >= uv_h {
@@ -439,6 +481,9 @@ fn derive_mhccp_params_neighbors(
         };
         let feats = [base, (center * center + 128.0) / 256.0, 128.0];
         let yv = chroma_plane[sy * uv_w + sx] as f64;
+        if trace {
+            samples.push((sx, sy, center, top, left, feats[1], yv));
+        }
 
         for i in 0..3 {
             aty[i] += feats[i] * yv;
@@ -480,6 +525,22 @@ fn derive_mhccp_params_neighbors(
     params[0] = params[0].clamp(-2.0, 2.0);
     params[1] = params[1].clamp(-2.0, 2.0);
     params[2] = params[2].clamp(-1.0, 2.0);
+    if trace {
+        eprintln!(
+            "[WAV2C_MHCCP_DERIVE] plane={} uv=({}, {}) size={}x{} dir={} count={} params={:?}",
+            plane_name, uv_bx, uv_by, uv_bw, uv_bh, mh_dir, count, params
+        );
+        eprintln!(
+            "[WAV2C_MHCCP_DERIVE] ata={:?} aty={:?}",
+            ata, aty
+        );
+        for (sx, sy, center, top, left, nonlinear, yv) in samples.iter() {
+            eprintln!(
+                "[WAV2C_MHCCP_SAMPLE] plane={} s=({}, {}) c={:.3} t={:.3} l={:.3} nl={:.3} y={:.3}",
+                plane_name, sx, sy, center, top, left, nonlinear, yv
+            );
+        }
+    }
     Some(params)
 }
 
@@ -495,8 +556,10 @@ fn mhccp_predict_block(
     uv_bh: usize,
     mh_dir: u8,
     params: [f64; 3],
+    plane_name: char,
 ) -> Vec<u8> {
     let mut pred = vec![128u8; uv_bw * uv_bh];
+    let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
     for r in 0..uv_bh {
         for c in 0..uv_bw {
             let sx = uv_bx + c;
@@ -527,6 +590,12 @@ fn mhccp_predict_block(
             let value = params[0] * base + params[1] * feat1 + params[2] * 128.0;
             pred[r * uv_bw + c] = value.round().clamp(0.0, 255.0) as u8;
         }
+    }
+    if trace {
+        eprintln!(
+            "[WAV2C_MHCCP_PRED] plane={} uv=({}, {}) size={}x{} dir={} params={:?} pred={:?}",
+            plane_name, uv_bx, uv_by, uv_bw, uv_bh, mh_dir, params, pred
+        );
     }
     pred
 }
@@ -962,6 +1031,7 @@ fn reconstruct_partitioned_frame(
                         uv_bw,
                         uv_bh,
                         block.mhccp_dir,
+                        'U',
                     )
                     .unwrap_or([0.0, 0.0, 1.0]);
                     let v_params = derive_mhccp_params_neighbors(
@@ -976,6 +1046,7 @@ fn reconstruct_partitioned_frame(
                         uv_bw,
                         uv_bh,
                         block.mhccp_dir,
+                        'V',
                     )
                     .unwrap_or([0.0, 0.0, 1.0]);
                     let u_pred = mhccp_predict_block(
@@ -990,6 +1061,7 @@ fn reconstruct_partitioned_frame(
                         uv_bh,
                         block.mhccp_dir,
                         u_params,
+                        'U',
                     );
                     let v_pred = mhccp_predict_block(
                         &y_plane,
@@ -1003,6 +1075,7 @@ fn reconstruct_partitioned_frame(
                         uv_bh,
                         block.mhccp_dir,
                         v_params,
+                        'V',
                     );
                     (u_pred, v_pred)
                 } else {
@@ -1057,6 +1130,7 @@ fn reconstruct_partitioned_frame(
                     let avg_q3 =
                         cfl_neighbor_avg_q3(&y_plane, w, h, uv_w, uv_h, uv_bx, uv_by, uv_bw, uv_bh);
 
+                    let trace_cfl = trace_block_match("WAV2C_TRACE_CFL", uv_bx, uv_by);
                     let (alpha_u_q3, alpha_v_q3) = if block.cfl_idx == 0 {
                         (block.cfl_alpha_u as i32 * 32, block.cfl_alpha_v as i32 * 32)
                     } else {
@@ -1069,6 +1143,15 @@ fn reconstruct_partitioned_frame(
                             ),
                         )
                     };
+                    if trace_cfl {
+                        eprintln!(
+                            "[WAV2C_CFL_BLOCK] uv=({}, {}) size={}x{} cfl_idx={} avg_q3={} alpha_u={} alpha_v={}",
+                            uv_bx, uv_by, uv_bw, uv_bh, block.cfl_idx, avg_q3, alpha_u_q3, alpha_v_q3
+                        );
+                        eprintln!("[WAV2C_CFL_DC] u_dc={:?}", u_dc_pred);
+                        eprintln!("[WAV2C_CFL_DC] v_dc={:?}", v_dc_pred);
+                        eprintln!("[WAV2C_CFL_AC] recon_q3={:?}", recon_q3);
+                    }
 
                     let mut u_cfl = vec![0u8; uv_bw * uv_bh];
                     let mut v_cfl = vec![0u8; uv_bw * uv_bh];
@@ -1083,6 +1166,10 @@ fn reconstruct_partitioned_frame(
                             let v_scaled = round_power_of_two_signed(alpha_v_q3 * ac, 11);
                             v_cfl[r * uv_bw + c] = (v_dc + v_scaled).clamp(0, 255) as u8;
                         }
+                    }
+                    if trace_cfl {
+                        eprintln!("[WAV2C_CFL_PRED] u_pred={:?}", u_cfl);
+                        eprintln!("[WAV2C_CFL_PRED] v_pred={:?}", v_cfl);
                     }
                     (u_cfl, v_cfl)
                 }

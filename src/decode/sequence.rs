@@ -10,6 +10,7 @@ pub struct SequenceParams {
     pub sb_size: u32,
     pub enable_sdp: bool,
     pub enable_cfl_intra: bool,
+    pub cfl_ds_filter_index: u8,
     pub enable_mhccp: bool,
     pub enable_ibp: bool,
     pub enable_mrls: bool,
@@ -249,9 +250,11 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
     let _intra_edge_filter = r.read_bit();
     let enable_mrls = r.read_bit();
     let enable_cfl_intra = r.read_bit();
-    if !monochrome {
-        let _cfl_ds_filter = r.read_literal(2);
-    }
+    let cfl_ds_filter_index = if !monochrome {
+        r.read_literal(2) as u8
+    } else {
+        0
+    };
     let enable_mhccp = r.read_bit();
     let enable_ibp = r.read_bit();
     eprintln!(
@@ -296,6 +299,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
         sb_size,
         enable_sdp,
         enable_cfl_intra,
+        cfl_ds_filter_index,
         enable_mhccp,
         enable_ibp,
         enable_mrls,
