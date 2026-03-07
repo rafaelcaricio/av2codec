@@ -223,9 +223,41 @@ Useful flags:
 - `-s WxH` resizes and center-crops the source image before encode
 - `-q N` applies the same quality value to `avmenc --qp` and `wav2c --qindex`
 - `--cpu-used N` controls avmenc speed
+- `--profile debug|release` selects the wav2c cargo profile for the run (`debug` by default for faster iteration)
+- `--cache-dir DIR` keeps prepared input, `avmenc.obu`, and `avmenc -> avmdec` artifacts stable across runs
+- `--watch` reruns on source changes and keeps going after build/decode failures
+- `--metrics-text PATH` and `--metrics-json PATH` write per-run numeric summaries next to the matrix PNG
 - `--scale-up N` enlarges the comparison cells for easier inspection
 - `--keep-workdir` preserves intermediate OBUs, Y4Ms, PNGs, and logs
-- `--no-build` skips rebuilding `wav2c` release binaries
+- `--no-build` skips rebuilding `wav2c` binaries for the selected profile
+
+Fast inner loop during encoder or decoder work:
+
+```sh
+./scripts/compare_codec_matrix.py \
+  -s 192x192 \
+  -q 30 \
+  --profile debug \
+  --cache-dir /tmp/wav2c_iter/jellyfish \
+  --watch \
+  -o /tmp/wav2c_iter/jellyfish/matrix.png \
+  photo.jpg
+```
+
+That loop:
+
+- reuses the prepared probe frame plus cached `avmenc -> avmdec` reference artifacts
+- rebuilds only `wav2c` and `wav2c_decode`
+- refreshes `avmenc -> wav2c`, `wav2c -> avmdec`, and `wav2c -> wav2c` on every save
+- writes `matrix.png`, `matrix.txt`, and `matrix.json` so visual inspection is paired with PSNR/MAE and bitstream-size deltas
+
+Use `--profile release` for final confirmation, then run the normal regression gate:
+
+```sh
+cargo test
+cargo clippy --tests
+cargo test --test avmdec_integration -- --ignored
+```
 
 See:
 
