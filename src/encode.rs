@@ -7,7 +7,6 @@ use crate::bitstream::{
 use crate::dct;
 use crate::scan::DEFAULT_SCAN_32X32;
 use crate::tile;
-use crate::tile::SbCoeffs;
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -159,7 +158,7 @@ impl Encoder {
                 order_hint: self.order_hint,
                 enable_partitioning: false,
             },
-            false,
+            true,
         );
 
         let frame_number = self.order_hint as u64;
@@ -229,22 +228,262 @@ struct FrameEncodeParams {
 #[repr(u8)]
 pub enum IntraMode {
     DcPred = 0,
-    SmoothPred = 1,
-    SmoothVPred = 2,
-    SmoothHPred = 3,
-    PaethPred = 4,
+    VPred = 1,
+    HPred = 2,
+    D45Pred = 3,
+    D135Pred = 4,
+    D113Pred = 5,
+    D157Pred = 6,
+    D203Pred = 7,
+    D67Pred = 8,
+    SmoothPred = 9,
+    SmoothVPred = 10,
+    SmoothHPred = 11,
+    PaethPred = 12,
 }
 
 impl IntraMode {
-    pub fn from_index(idx: u8) -> Self {
-        match idx {
+    pub fn from_av2(val: u8) -> Self {
+        match val {
             0 => IntraMode::DcPred,
-            1 => IntraMode::SmoothPred,
-            2 => IntraMode::SmoothVPred,
-            3 => IntraMode::SmoothHPred,
-            4 => IntraMode::PaethPred,
+            1 => IntraMode::VPred,
+            2 => IntraMode::HPred,
+            3 => IntraMode::D45Pred,
+            4 => IntraMode::D135Pred,
+            5 => IntraMode::D113Pred,
+            6 => IntraMode::D157Pred,
+            7 => IntraMode::D203Pred,
+            8 => IntraMode::D67Pred,
+            9 => IntraMode::SmoothPred,
+            10 => IntraMode::SmoothVPred,
+            11 => IntraMode::SmoothHPred,
+            12 => IntraMode::PaethPred,
             _ => IntraMode::DcPred,
         }
+    }
+
+    pub fn is_directional(self) -> bool {
+        let v = self as u8;
+        v >= 1 && v <= 8
+    }
+
+    pub fn nominal_angle(self) -> u16 {
+        MODE_TO_ANGLE_MAP[self as usize]
+    }
+
+    pub fn reordered_index(self) -> usize {
+        REORDERED_Y_MODE_INV[self as usize]
+    }
+
+    pub fn joint_y_index(self) -> usize {
+        if !self.is_directional() {
+            self.reordered_index()
+        } else {
+            5 + self.reordered_index().saturating_sub(5) * 7 + 3
+        }
+    }
+}
+
+const NON_DIRECTIONAL_MODES_COUNT: usize = 5;
+const TOTAL_ANGLE_DELTA_COUNT: usize = 7;
+const MAX_ANGLE_DELTA: usize = 3;
+const LUMA_MODE_COUNT: usize = 61;
+
+const DEFAULT_MODE_LIST_Y: [usize; 56] = [
+    17, 45, 3, 10, 24, 31, 38, 52,
+    15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
+    16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53,
+    14, 20, 42, 48, 0, 6, 7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
+];
+
+pub fn build_y_mode_list(
+    _left_joint: Option<usize>,
+    _above_joint: Option<usize>,
+    _is_large_block: bool,
+    _is_small_block: bool,
+) -> [i32; LUMA_MODE_COUNT] {
+    let mut list = [-1i32; LUMA_MODE_COUNT];
+    let mut selected = [false; LUMA_MODE_COUNT];
+    let mut idx = 0;
+
+    for i in 0..NON_DIRECTIONAL_MODES_COUNT {
+        list[idx] = i as i32;
+        selected[i] = true;
+        idx += 1;
+    }
+
+    if !_is_small_block {
+        let left_dir = _left_joint
+            .filter(|&j| j >= NON_DIRECTIONAL_MODES_COUNT)
+            .is_some();
+        let above_dir = _above_joint
+            .filter(|&j| j >= NON_DIRECTIONAL_MODES_COUNT)
+            .is_some();
+
+        let mut neighbor_joints: Vec<usize> = Vec::new();
+
+        if left_dir && above_dir {
+            let lj = _left_joint.unwrap();
+            let aj = _above_joint.unwrap();
+            neighbor_joints.push(lj);
+            if lj != aj {
+                neighbor_joints.push(aj);
+            }
+        } else if above_dir {
+            neighbor_joints.push(_above_joint.unwrap());
+        } else if left_dir {
+            neighbor_joints.push(_left_joint.unwrap());
+        }
+
+        for &nj in &neighbor_joints {
+            if !selected[nj] {
+                list[idx] = nj as i32;
+                selected[nj] = true;
+                idx += 1;
+            }
+        }
+
+        if _is_large_block {
+            for i in 0..4 {
+                for &nj in &neighbor_joints {
+                    let nj_off = nj as isize - NON_DIRECTIONAL_MODES_COUNT as isize;
+                    let left_derived = ((nj_off - i as isize + 55) % 56) as usize
+                        + NON_DIRECTIONAL_MODES_COUNT;
+                    let right_derived = ((nj_off + i as isize) % 56) as usize
+                        + NON_DIRECTIONAL_MODES_COUNT;
+                    if !selected[left_derived] {
+                        list[idx] = left_derived as i32;
+                        selected[left_derived] = true;
+                        idx += 1;
+                    }
+                    if !selected[right_derived] {
+                        list[idx] = right_derived as i32;
+                        selected[right_derived] = true;
+                        idx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    for i in 0..DEFAULT_MODE_LIST_Y.len() {
+        if idx >= LUMA_MODE_COUNT {
+            break;
+        }
+        let joint = DEFAULT_MODE_LIST_Y[i] + NON_DIRECTIONAL_MODES_COUNT;
+        if !selected[joint] {
+            list[idx] = joint as i32;
+            selected[joint] = true;
+            idx += 1;
+        }
+    }
+
+    list
+}
+
+pub fn find_mode_idx_in_list(list: &[i32; LUMA_MODE_COUNT], joint: usize) -> usize {
+    for (i, &v) in list.iter().enumerate() {
+        if v == joint as i32 {
+            return i;
+        }
+    }
+    0
+}
+
+const DEFAULT_MODE_LIST_UV: [u8; 8] = [1, 2, 3, 4, 8, 5, 6, 7];
+
+pub fn build_uv_mode_list(y_mode: IntraMode) -> [i32; 13] {
+    let mut list = [-1i32; 13];
+    let mut selected = [false; 13];
+    let mut idx = 0;
+
+    if y_mode.is_directional() {
+        let m = y_mode as usize;
+        list[idx] = m as i32;
+        selected[m] = true;
+        idx += 1;
+    }
+
+    for &m in &[0u8, 9, 10, 11, 12] {
+        let mu = m as usize;
+        if !selected[mu] {
+            list[idx] = mu as i32;
+            selected[mu] = true;
+            idx += 1;
+        }
+    }
+
+    for &m in &DEFAULT_MODE_LIST_UV {
+        let mu = m as usize;
+        if !selected[mu] {
+            list[idx] = mu as i32;
+            selected[mu] = true;
+            idx += 1;
+        }
+    }
+
+    list
+}
+
+pub fn find_uv_mode_idx(list: &[i32; 13], mode: IntraMode) -> usize {
+    let m = mode as usize;
+    for (i, &v) in list.iter().enumerate() {
+        if v == m as i32 {
+            return i;
+        }
+    }
+    0
+}
+
+const MODE_TO_ANGLE_MAP: [u16; 13] = [
+    0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0,
+];
+
+const REORDERED_Y_MODE: [u8; 13] = [
+    0, 9, 10, 11, 12, 3, 8, 1, 5, 4, 6, 2, 7,
+];
+
+const REORDERED_Y_MODE_INV: [usize; 13] = {
+    let mut inv = [0usize; 13];
+    let reord: [u8; 13] = [0, 9, 10, 11, 12, 3, 8, 1, 5, 4, 6, 2, 7];
+    let mut i = 0;
+    while i < 13 {
+        inv[reord[i] as usize] = i;
+        i += 1;
+    }
+    inv
+};
+
+const DR_INTRA_DERIVATIVE: [i32; 90] = [
+    0, 4096, 2048, 1365, 1024, 819, 682, 585, 512,
+    455, 409, 409, 409, 372, 341, 292, 273, 256,
+    227, 215, 204, 186, 178, 170, 157, 151, 146, 136,
+    132, 128, 117, 110, 107, 99, 97, 97, 93, 87,
+    83, 81, 77, 74, 73, 69, 66, 64, 62, 59,
+    56, 55, 53, 50, 49, 47, 44, 42, 42, 41,
+    38, 37, 35, 32, 31, 30, 28, 27, 26, 24,
+    23, 22, 20, 19, 18, 16, 15, 14, 12, 11,
+    10, 10, 10, 9, 8, 7, 6, 5, 4, 3,
+    2, 1,
+];
+
+fn get_dx(angle: u16) -> i32 {
+    if angle > 0 && angle < 90 {
+        DR_INTRA_DERIVATIVE[angle as usize]
+    } else if angle > 90 && angle < 180 {
+        DR_INTRA_DERIVATIVE[(180 - angle) as usize]
+    } else {
+        1
+    }
+}
+
+fn get_dy(angle: u16) -> i32 {
+    if angle > 90 && angle < 180 {
+        DR_INTRA_DERIVATIVE[(angle - 90) as usize]
+    } else if angle > 180 && angle < 270 {
+        DR_INTRA_DERIVATIVE[(270 - angle) as usize]
+    } else {
+        1
     }
 }
 
@@ -275,9 +514,42 @@ struct RefPixels {
     below_left: u8,
     has_above: bool,
     has_left: bool,
+    above_ext: Vec<u8>,
+    left_ext: Vec<u8>,
+}
+
+impl RefPixels {
+    #[cfg(test)]
+    fn new_test(
+        above: Vec<u8>,
+        left: Vec<u8>,
+        top_left: u8,
+        has_above: bool,
+        has_left: bool,
+        above_right: u8,
+        below_left: u8,
+    ) -> Self {
+        let bsize = above.len();
+        let mut above_ext = above.clone();
+        above_ext.resize(bsize * 2, above[bsize - 1]);
+        let mut left_ext = left.clone();
+        left_ext.resize(bsize * 2, left[bsize - 1]);
+        RefPixels {
+            above,
+            left,
+            top_left,
+            above_right,
+            below_left,
+            has_above,
+            has_left,
+            above_ext,
+            left_ext,
+        }
+    }
 }
 
 fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> RefPixels {
+    let frame_h = recon.len() / stride;
     let has_above = y > 0;
     let has_left = x > 0;
 
@@ -291,12 +563,56 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
 
     let compute_below_left = |left: &[u8]| -> u8 { left[bsize - 1] };
 
+    let build_above_ext = |above: &[u8]| -> Vec<u8> {
+        let mut ext = vec![0u8; bsize + bsize];
+        ext[..bsize].copy_from_slice(above);
+        if has_above {
+            for i in 0..bsize {
+                let cx = x + bsize + i;
+                if cx < stride {
+                    ext[bsize + i] = recon[(y - 1) * stride + cx];
+                } else {
+                    ext[bsize + i] = above[bsize - 1];
+                }
+            }
+        } else {
+            let last = above[bsize - 1];
+            for i in 0..bsize {
+                ext[bsize + i] = last;
+            }
+        }
+        ext
+    };
+
+    let build_left_ext = |left: &[u8]| -> Vec<u8> {
+        let mut ext = vec![0u8; bsize + bsize];
+        ext[..bsize].copy_from_slice(left);
+        if has_left {
+            for j in 0..bsize {
+                let cy = y + bsize + j;
+                if cy < frame_h {
+                    ext[bsize + j] = recon[cy * stride + x - 1];
+                } else {
+                    ext[bsize + j] = left[bsize - 1];
+                }
+            }
+        } else {
+            let last = left[bsize - 1];
+            for j in 0..bsize {
+                ext[bsize + j] = last;
+            }
+        }
+        ext
+    };
+
     match (has_above, has_left) {
         (false, false) => {
             let above = vec![127; bsize];
             let left = vec![129; bsize];
             let ar = above[bsize - 1];
             let bl = left[bsize - 1];
+            let above_ext = build_above_ext(&above);
+            let left_ext = build_left_ext(&left);
             RefPixels {
                 above,
                 left,
@@ -305,6 +621,8 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
                 below_left: bl,
                 has_above: false,
                 has_left: false,
+                above_ext,
+                left_ext,
             }
         }
         (true, false) => {
@@ -316,6 +634,8 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
             let ar = compute_above_right(&above);
             let left = vec![tl; bsize];
             let bl = left[bsize - 1];
+            let above_ext = build_above_ext(&above);
+            let left_ext = build_left_ext(&left);
             RefPixels {
                 above,
                 left,
@@ -324,6 +644,8 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
                 below_left: bl,
                 has_above: true,
                 has_left: false,
+                above_ext,
+                left_ext,
             }
         }
         (false, true) => {
@@ -335,6 +657,8 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
             let bl = compute_below_left(&left);
             let above = vec![tl; bsize];
             let ar = above[bsize - 1];
+            let above_ext = build_above_ext(&above);
+            let left_ext = build_left_ext(&left);
             RefPixels {
                 above,
                 top_left: tl,
@@ -343,6 +667,8 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
                 left,
                 has_above: false,
                 has_left: true,
+                above_ext,
+                left_ext,
             }
         }
         (true, true) => {
@@ -357,6 +683,8 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
             let tl = recon[(y - 1) * stride + x - 1];
             let ar = compute_above_right(&above);
             let bl = compute_below_left(&left);
+            let above_ext = build_above_ext(&above);
+            let left_ext = build_left_ext(&left);
             RefPixels {
                 above,
                 left,
@@ -365,6 +693,8 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
                 below_left: bl,
                 has_above: true,
                 has_left: true,
+                above_ext,
+                left_ext,
             }
         }
     }
@@ -516,13 +846,204 @@ fn predict_paeth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     pred
 }
 
+fn predict_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+    let mut pred = vec![0u8; bsize * bsize];
+    for r in 0..bsize {
+        pred[r * bsize..(r + 1) * bsize].copy_from_slice(&refs.above[..bsize]);
+    }
+    pred
+}
+
+fn predict_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+    let mut pred = vec![0u8; bsize * bsize];
+    for r in 0..bsize {
+        let val = refs.left[r];
+        for c in 0..bsize {
+            pred[r * bsize + c] = val;
+        }
+    }
+    pred
+}
+
+const DR_INTERP_FILTER: [[i16; 4]; 32] = [
+    [0, 128, 0, 0],     [-2, 127, 4, -1],   [-3, 125, 8, -2],
+    [-5, 123, 13, -3],  [-6, 121, 17, -4],  [-7, 118, 22, -5],
+    [-9, 116, 27, -6],  [-9, 112, 32, -7],  [-10, 109, 37, -8],
+    [-11, 106, 41, -8], [-11, 102, 46, -9], [-12, 98, 52, -10],
+    [-12, 94, 56, -10], [-12, 90, 61, -11], [-12, 85, 66, -11],
+    [-12, 81, 71, -12], [-12, 76, 76, -12], [-12, 71, 81, -12],
+    [-11, 66, 85, -12], [-11, 61, 90, -12], [-10, 56, 94, -12],
+    [-10, 52, 98, -12], [-9, 46, 102, -11], [-8, 41, 106, -11],
+    [-8, 37, 109, -10], [-7, 32, 112, -9],  [-6, 27, 116, -9],
+    [-5, 22, 118, -7],  [-4, 17, 121, -6],  [-3, 13, 123, -5],
+    [-2, 8, 125, -3],   [-1, 4, 127, -2],
+];
+
+fn idif_interp(p: [i32; 4], shift: usize) -> u8 {
+    let f = &DR_INTERP_FILTER[shift];
+    let val = p[0] * f[0] as i32 + p[1] * f[1] as i32
+        + p[2] * f[2] as i32 + p[3] * f[3] as i32;
+    ((val + 64) >> 7).clamp(0, 255) as u8
+}
+
+fn bilinear_interp(p0: i32, p1: i32, shift: i32) -> u8 {
+    let val = p0 * (32 - shift) + p1 * shift;
+    ((val + 16) >> 5).clamp(0, 255) as u8
+}
+
+fn predict_dr_z1(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u8> {
+    let dx = get_dx(angle);
+    let max_base_x = (bw + bh) - 1;
+    let above = &refs.above_ext;
+    let mut pred = vec![0u8; bw * bh];
+    let mut x = dx;
+    for r in 0..bh {
+        let base = x >> 6;
+        let shift = ((x & 0x3F) >> 1) as usize;
+        for c in 0..bw {
+            let b = base as usize + c;
+            if b < max_base_x {
+                if use_idif {
+                    let p0 = if b == 0 { above[0] } else { above[b - 1] } as i32;
+                    let p1 = above[b] as i32;
+                    let p2 = above[b + 1] as i32;
+                    let p3 = if b + 2 <= max_base_x { above[b + 2] } else { above[max_base_x] } as i32;
+                    pred[r * bw + c] = idif_interp([p0, p1, p2, p3], shift);
+                } else {
+                    pred[r * bw + c] = bilinear_interp(above[b] as i32, above[b + 1] as i32, shift as i32);
+                }
+            } else {
+                pred[r * bw + c] = above[max_base_x];
+            }
+        }
+        x += dx;
+    }
+    pred
+}
+
+fn get_above_z2(refs: &RefPixels, idx: isize, bw: usize) -> i32 {
+    if idx < -1 { refs.top_left as i32 }
+    else if idx == -1 { refs.top_left as i32 }
+    else if (idx as usize) < refs.above_ext.len() { refs.above_ext[idx as usize] as i32 }
+    else { refs.above_ext[refs.above_ext.len() - 1] as i32 }
+}
+
+fn get_left_z2(refs: &RefPixels, idx: isize, bh: usize) -> i32 {
+    if idx < -1 { refs.top_left as i32 }
+    else if idx == -1 { refs.top_left as i32 }
+    else if (idx as usize) < refs.left_ext.len() { refs.left_ext[idx as usize] as i32 }
+    else { refs.left_ext[refs.left_ext.len() - 1] as i32 }
+}
+
+fn predict_dr_z2(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u8> {
+    let dx = get_dx(angle);
+    let dy = get_dy(angle);
+    let mut pred = vec![0u8; bw * bh];
+    for r in 0..bh {
+        for c in 0..bw {
+            let y_val = (r + 1) as i32;
+            let x_val = (c as i32) * 64 - y_val * dx;
+            let base_x = x_val >> 6;
+            if base_x >= -1 {
+                let shift = ((x_val & 0x3F) >> 1) as usize;
+                let bx = base_x as isize;
+                if use_idif {
+                    let p = [
+                        get_above_z2(refs, bx - 1, bw),
+                        get_above_z2(refs, bx, bw),
+                        get_above_z2(refs, bx + 1, bw),
+                        get_above_z2(refs, bx + 2, bw),
+                    ];
+                    pred[r * bw + c] = idif_interp(p, shift);
+                } else {
+                    let p0 = get_above_z2(refs, bx, bw);
+                    let p1 = get_above_z2(refs, bx + 1, bw);
+                    pred[r * bw + c] = bilinear_interp(p0, p1, shift as i32);
+                }
+            } else {
+                let x_val2 = (c + 1) as i32;
+                let y_val2 = (r as i32) * 64 - x_val2 * dy;
+                let base_y = y_val2 >> 6;
+                let shift = ((y_val2 & 0x3F) >> 1) as usize;
+                let by = base_y as isize;
+                if use_idif {
+                    let p = [
+                        get_left_z2(refs, by - 1, bh),
+                        get_left_z2(refs, by, bh),
+                        get_left_z2(refs, by + 1, bh),
+                        get_left_z2(refs, by + 2, bh),
+                    ];
+                    pred[r * bw + c] = idif_interp(p, shift);
+                } else {
+                    let p0 = get_left_z2(refs, by, bh);
+                    let p1 = get_left_z2(refs, by + 1, bh);
+                    pred[r * bw + c] = bilinear_interp(p0, p1, shift as i32);
+                }
+            }
+        }
+    }
+    pred
+}
+
+fn predict_dr_z3(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u8> {
+    let dy = get_dy(angle);
+    let max_base_y = (bw + bh) - 1;
+    let left = &refs.left_ext;
+    let mut pred = vec![0u8; bw * bh];
+    let mut y = dy;
+    for c in 0..bw {
+        let base = y >> 6;
+        let shift = ((y & 0x3F) >> 1) as usize;
+        for r in 0..bh {
+            let b = base as usize + r;
+            if b < max_base_y {
+                if use_idif {
+                    let p0 = if b == 0 { left[0] } else { left[b - 1] } as i32;
+                    let p1 = left[b] as i32;
+                    let p2 = left[b + 1] as i32;
+                    let p3 = if b + 2 <= max_base_y { left[b + 2] } else { left[max_base_y] } as i32;
+                    pred[r * bw + c] = idif_interp([p0, p1, p2, p3], shift);
+                } else {
+                    pred[r * bw + c] = bilinear_interp(left[b] as i32, left[b + 1] as i32, shift as i32);
+                }
+            } else {
+                pred[r * bw + c] = left[max_base_y];
+            }
+        }
+        y += dy;
+    }
+    pred
+}
+
+fn predict_directional(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma: bool) -> Vec<u8> {
+    let angle = mode.nominal_angle();
+    if angle == 90 {
+        predict_v_block(refs, bsize)
+    } else if angle == 180 {
+        predict_h_block(refs, bsize)
+    } else if angle > 0 && angle < 90 {
+        predict_dr_z1(refs, bsize, bsize, angle, is_luma)
+    } else if angle > 90 && angle < 180 {
+        predict_dr_z2(refs, bsize, bsize, angle, is_luma)
+    } else {
+        predict_dr_z3(refs, bsize, bsize, angle, is_luma)
+    }
+}
+
 fn predict_block(refs: &RefPixels, bsize: usize, mode: IntraMode) -> Vec<u8> {
+    predict_block_plane(refs, bsize, mode, true)
+}
+
+fn predict_block_plane(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma: bool) -> Vec<u8> {
     match mode {
         IntraMode::DcPred => predict_dc_block(refs, bsize),
         IntraMode::SmoothPred => predict_smooth_block(refs, bsize),
         IntraMode::SmoothVPred => predict_smooth_v_block(refs, bsize),
         IntraMode::SmoothHPred => predict_smooth_h_block(refs, bsize),
         IntraMode::PaethPred => predict_paeth_block(refs, bsize),
+        IntraMode::VPred | IntraMode::HPred | IntraMode::D45Pred
+        | IntraMode::D135Pred | IntraMode::D113Pred | IntraMode::D157Pred
+        | IntraMode::D203Pred | IntraMode::D67Pred => predict_directional(refs, bsize, mode, is_luma),
     }
 }
 
@@ -535,11 +1056,31 @@ pub fn predict_intra_block(
     mode: IntraMode,
 ) -> Vec<u8> {
     let refs = get_ref_pixels(recon, stride, x, y, bsize);
-    predict_block(&refs, bsize, mode)
+    predict_block_plane(&refs, bsize, mode, true)
 }
 
-const ALL_INTRA_MODES: [IntraMode; 5] = [
+pub fn predict_intra_block_uv(
+    recon: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    bsize: usize,
+    mode: IntraMode,
+) -> Vec<u8> {
+    let refs = get_ref_pixels(recon, stride, x, y, bsize);
+    predict_block_plane(&refs, bsize, mode, false)
+}
+
+const ALL_INTRA_MODES: [IntraMode; 13] = [
     IntraMode::DcPred,
+    IntraMode::VPred,
+    IntraMode::HPred,
+    IntraMode::D45Pred,
+    IntraMode::D135Pred,
+    IntraMode::D113Pred,
+    IntraMode::D157Pred,
+    IntraMode::D203Pred,
+    IntraMode::D67Pred,
     IntraMode::SmoothPred,
     IntraMode::SmoothVPred,
     IntraMode::SmoothHPred,
@@ -554,11 +1095,27 @@ fn compute_sad(pixels: &[u8], pred: &[u8]) -> u64 {
         .sum()
 }
 
+const NONDIR_MODES: [IntraMode; 5] = [
+    IntraMode::DcPred,
+    IntraMode::SmoothPred,
+    IntraMode::SmoothVPred,
+    IntraMode::SmoothHPred,
+    IntraMode::PaethPred,
+];
+
 fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
+    select_intra_mode_from(pixels, refs, bsize, &ALL_INTRA_MODES, true)
+}
+
+fn select_intra_mode_nondir(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
+    select_intra_mode_from(pixels, refs, bsize, &NONDIR_MODES, true)
+}
+
+fn select_intra_mode_from(pixels: &[u8], refs: &RefPixels, bsize: usize, modes: &[IntraMode], is_luma: bool) -> IntraMode {
     let mut best_mode = IntraMode::DcPred;
     let mut best_sad = u64::MAX;
-    for &mode in &ALL_INTRA_MODES {
-        let pred = predict_block(refs, bsize, mode);
+    for &mode in modes {
+        let pred = predict_block_plane(refs, bsize, mode, is_luma);
         let sad = compute_sad(pixels, &pred);
         if sad < best_sad {
             best_sad = sad;
@@ -596,7 +1153,7 @@ fn encode_uv_subblock(
 ) -> (Vec<i32>, u16) {
     let refs = get_ref_pixels(recon_uv, uv_w, ux, uy, uv_bsize);
     let block = extract_subblock(uv_plane, uv_w, ux, uy, uv_bsize, uv_bsize);
-    let pred = predict_block(&refs, uv_bsize, mode);
+    let pred = predict_block_plane(&refs, uv_bsize, mode, false);
     let residual = compute_residual_block(&block, &pred);
 
     if uv_bsize == 32 {
@@ -890,7 +1447,7 @@ fn encode_plane_block_64(
 ) -> ([i32; 1024], u16, IntraMode) {
     let refs = get_ref_pixels(recon, plane_w, x, y, 64);
     let y_block = extract_subblock(pixels, plane_w, x, y, 64, 64);
-    let mode = select_intra_mode(&y_block, &refs, 64);
+    let mode = select_intra_mode_nondir(&y_block, &refs, 64);
     let pred_block = predict_block(&refs, 64, mode);
 
     let residual = compute_residual_block(&y_block, &pred_block);
@@ -929,8 +1486,8 @@ fn encode_plane_block_32_with_mode(
 ) -> ([i32; 1024], u16, IntraMode) {
     let refs = get_ref_pixels(recon, plane_w, x, y, 32);
     let uv_block = extract_subblock(pixels, plane_w, x, y, 32, 32);
-    let mode = forced_mode.unwrap_or_else(|| select_intra_mode(&uv_block, &refs, 32));
-    let pred_block = predict_block(&refs, 32, mode);
+    let mode = forced_mode.unwrap_or_else(|| select_intra_mode_from(&uv_block, &refs, 32, &ALL_INTRA_MODES, false));
+    let pred_block = predict_block_plane(&refs, 32, mode, false);
 
     let residual = compute_residual_block(&uv_block, &pred_block);
     let mut residual_arr = [0i32; 1024];
@@ -959,6 +1516,56 @@ fn qindex_to_lambda(qindex: u8) -> f64 {
     0.04 * q * q
 }
 
+fn encode_plane_block_32_vec(
+    pixels: &[u8],
+    plane_w: usize,
+    recon: &mut [u8],
+    x: usize,
+    y: usize,
+    dequant: i32,
+    forced_mode: Option<IntraMode>,
+) -> (Vec<i32>, u16, IntraMode) {
+    let (levels_arr, eob, mode) = encode_plane_block_32_with_mode(pixels, plane_w, recon, x, y, dequant, forced_mode);
+    (levels_arr.to_vec(), eob, mode)
+}
+
+fn encode_plane_block_16(
+    pixels: &[u8],
+    plane_w: usize,
+    recon: &mut [u8],
+    x: usize,
+    y: usize,
+    dequant: i32,
+    forced_mode: Option<IntraMode>,
+) -> (Vec<i32>, u16, IntraMode) {
+    let refs = get_ref_pixels(recon, plane_w, x, y, 16);
+    let block = extract_subblock(pixels, plane_w, x, y, 16, 16);
+    let mode = forced_mode.unwrap_or_else(|| select_intra_mode_from(&block, &refs, 16, &ALL_INTRA_MODES, false));
+    let pred_block = predict_block_plane(&refs, 16, mode, false);
+
+    let residual = compute_residual_block(&block, &pred_block);
+    let mut residual_arr = [0i32; 256];
+    residual_arr.copy_from_slice(&residual);
+    let dct_coeffs = dct::forward_dct2_16x16(&residual_arr);
+    let scan = &crate::scan::DEFAULT_SCAN_16X16;
+    let mut levels = vec![0i32; 256];
+    let mut eob = 0u16;
+    for scan_idx in 0..256 {
+        let coeff_idx = scan[scan_idx] as usize;
+        let level = quantize_coeff(dct_coeffs[coeff_idx] as i64, 0, dequant);
+        levels[scan_idx] = level;
+        if level != 0 { eob = scan_idx as u16 + 1; }
+    }
+    let mut dqcoeffs = [0i32; 256];
+    for scan_idx in 0..eob as usize {
+        let coeff_idx = scan[scan_idx] as usize;
+        dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
+    }
+    let inv_residual = dct::inverse_dct2_16x16(&dqcoeffs);
+    reconstruct_block(recon, plane_w, x, y, 16, &pred_block, &inv_residual.to_vec());
+    (levels, eob, mode)
+}
+
 fn encode_frame_yuv(
     y_plane: &[u8],
     u_plane: &[u8],
@@ -971,13 +1578,10 @@ fn encode_frame_yuv(
     let sb_cols = w / 64;
     let sb_rows = h / 64;
     let uv_w = w / 2;
-    let uv_h = h / 2;
 
     let mut recon_y = vec![0u8; w * h];
-    let mut recon_u = vec![0u8; uv_w * uv_h];
-    let mut recon_v = vec![0u8; uv_w * uv_h];
-
-    let lambda = qindex_to_lambda(params.base_qindex);
+    let mut recon_u = vec![0u8; uv_w * (h / 2)];
+    let mut recon_v = vec![0u8; uv_w * (h / 2)];
 
     let mut sb_grid = Vec::with_capacity(sb_cols * sb_rows);
     for sb_row in 0..sb_rows {
@@ -1005,7 +1609,7 @@ fn encode_frame_yuv(
         }
     }
 
-    let tile_data = tile::encode_tile_data_multi_sb(sb_cols, sb_rows, &sb_grid, allow_cdf_update);
+    let tile_data = tile::encode_tile_data_multi_sb(sb_cols, sb_rows, &sb_grid, allow_cdf_update, params.base_qindex);
     let frame_config = FrameHeaderConfig {
         width: params.width,
         height: params.height,
@@ -1712,10 +2316,10 @@ mod tests {
     #[test]
     fn intra_mode_values() {
         assert_eq!(IntraMode::DcPred as u8, 0);
-        assert_eq!(IntraMode::SmoothPred as u8, 1);
-        assert_eq!(IntraMode::SmoothVPred as u8, 2);
-        assert_eq!(IntraMode::SmoothHPred as u8, 3);
-        assert_eq!(IntraMode::PaethPred as u8, 4);
+        assert_eq!(IntraMode::SmoothPred as u8, 9);
+        assert_eq!(IntraMode::SmoothVPred as u8, 10);
+        assert_eq!(IntraMode::SmoothHPred as u8, 11);
+        assert_eq!(IntraMode::PaethPred as u8, 12);
     }
 
     #[test]
@@ -1789,45 +2393,21 @@ mod tests {
 
     #[test]
     fn predict_dc_block_no_neighbors() {
-        let refs = RefPixels {
-            above: vec![127; 32],
-            left: vec![129; 32],
-            top_left: 128,
-            has_above: false,
-            has_left: false,
-            above_right: 127,
-            below_left: 129,
-        };
+        let refs = RefPixels::new_test(vec![127; 32], vec![129; 32], 128, false, false, 127, 129);
         let pred = predict_dc_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 128));
     }
 
     #[test]
     fn predict_dc_block_both_neighbors() {
-        let refs = RefPixels {
-            above: vec![200; 32],
-            left: vec![100; 32],
-            top_left: 150,
-            has_above: true,
-            has_left: true,
-            above_right: 200,
-            below_left: 100,
-        };
+        let refs = RefPixels::new_test(vec![200; 32], vec![100; 32], 150, true, true, 200, 100);
         let pred = predict_dc_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 150));
     }
 
     #[test]
     fn predict_smooth_no_neighbors_approx_128() {
-        let refs = RefPixels {
-            above: vec![127; 32],
-            left: vec![129; 32],
-            top_left: 128,
-            has_above: false,
-            has_left: false,
-            above_right: 127,
-            below_left: 129,
-        };
+        let refs = RefPixels::new_test(vec![127; 32], vec![129; 32], 128, false, false, 127, 129);
         let pred = predict_smooth_block(&refs, 32);
         for &v in &pred {
             assert!(
@@ -1840,85 +2420,37 @@ mod tests {
 
     #[test]
     fn predict_smooth_v_vertical_gradient() {
-        let refs = RefPixels {
-            above: vec![255; 32],
-            left: vec![0; 32],
-            top_left: 255,
-            has_above: true,
-            has_left: true,
-            above_right: 255,
-            below_left: 0,
-        };
+        let refs = RefPixels::new_test(vec![255; 32], vec![0; 32], 255, true, true, 255, 0);
         let pred = predict_smooth_v_block(&refs, 32);
         assert!(pred[0] > pred[31 * 32], "should decrease top to bottom");
-        assert!(
-            pred[0] >= 240,
-            "top row should be near 255, got {}",
-            pred[0]
-        );
+        assert!(pred[0] >= 240, "top row should be near 255, got {}", pred[0]);
     }
 
     #[test]
     fn predict_smooth_h_horizontal_gradient() {
-        let refs = RefPixels {
-            above: vec![0; 32],
-            left: vec![255; 32],
-            top_left: 255,
-            has_above: true,
-            has_left: true,
-            above_right: 0,
-            below_left: 255,
-        };
+        let refs = RefPixels::new_test(vec![0; 32], vec![255; 32], 255, true, true, 0, 255);
         let pred = predict_smooth_h_block(&refs, 32);
         assert!(pred[0] > pred[31], "should decrease left to right");
-        assert!(
-            pred[0] >= 240,
-            "left col should be near 255, got {}",
-            pred[0]
-        );
+        assert!(pred[0] >= 240, "left col should be near 255, got {}", pred[0]);
     }
 
     #[test]
     fn predict_paeth_flat_returns_dc() {
-        let refs = RefPixels {
-            above: vec![128; 32],
-            left: vec![128; 32],
-            top_left: 128,
-            has_above: true,
-            has_left: true,
-            above_right: 128,
-            below_left: 128,
-        };
+        let refs = RefPixels::new_test(vec![128; 32], vec![128; 32], 128, true, true, 128, 128);
         let pred = predict_paeth_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 128));
     }
 
     #[test]
     fn predict_paeth_vertical_edge() {
-        let refs = RefPixels {
-            above: vec![200; 32],
-            left: vec![100; 32],
-            top_left: 200,
-            has_above: true,
-            has_left: true,
-            above_right: 200,
-            below_left: 100,
-        };
+        let refs = RefPixels::new_test(vec![200; 32], vec![100; 32], 200, true, true, 200, 100);
         let pred = predict_paeth_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 100));
     }
 
     #[test]
     fn predict_paeth_horizontal_edge() {
-        let refs = RefPixels {
-            above: vec![100; 32],
-            left: vec![200; 32],
-            top_left: 200,
-            has_above: true,
-            has_left: true,
-            above_right: 100,
-            below_left: 200,
-        };
+        let refs = RefPixels::new_test(vec![100; 32], vec![200; 32], 200, true, true, 100, 200);
         let pred = predict_paeth_block(&refs, 32);
         assert!(pred.iter().all(|&v| v == 100));
     }
@@ -1926,32 +2458,64 @@ mod tests {
     #[test]
     fn select_mode_flat_block_picks_dc() {
         let pixels = vec![150u8; 32 * 32];
-        let refs = RefPixels {
-            above: vec![150; 32],
-            left: vec![150; 32],
-            top_left: 150,
-            has_above: true,
-            has_left: true,
-            above_right: 150,
-            below_left: 150,
-        };
+        let refs = RefPixels::new_test(vec![150; 32], vec![150; 32], 150, true, true, 150, 150);
         assert_eq!(select_intra_mode(&pixels, &refs, 32), IntraMode::DcPred);
     }
 
     #[test]
     fn select_mode_vertical_gradient_prefers_smooth_v() {
-        let refs = RefPixels {
-            above: vec![255; 32],
-            left: vec![0; 32],
-            top_left: 255,
-            has_above: true,
-            has_left: true,
-            above_right: 255,
-            below_left: 0,
-        };
+        let refs = RefPixels::new_test(vec![255; 32], vec![0; 32], 255, true, true, 255, 0);
         let pred_sv = predict_smooth_v_block(&refs, 32);
         let mode = select_intra_mode(&pred_sv, &refs, 32);
         assert_eq!(mode, IntraMode::SmoothVPred);
+    }
+
+    #[test]
+    fn predict_v_copies_above_row() {
+        let refs = RefPixels::new_test(vec![200; 8], vec![100; 8], 150, true, true, 200, 100);
+        let pred = predict_v_block(&refs, 8);
+        assert!(pred.iter().all(|&v| v == 200));
+    }
+
+    #[test]
+    fn predict_h_copies_left_col() {
+        let refs = RefPixels::new_test(vec![200; 8], vec![100; 8], 150, true, true, 200, 100);
+        let pred = predict_h_block(&refs, 8);
+        for r in 0..8 {
+            for c in 0..8 {
+                assert_eq!(pred[r * 8 + c], 100);
+            }
+        }
+    }
+
+    #[test]
+    fn directional_modes_produce_valid_output() {
+        let refs = RefPixels::new_test(vec![200; 32], vec![100; 32], 150, true, true, 200, 100);
+        for &mode in &[
+            IntraMode::D45Pred, IntraMode::D135Pred, IntraMode::D113Pred,
+            IntraMode::D157Pred, IntraMode::D203Pred, IntraMode::D67Pred,
+        ] {
+            let pred = predict_block(&refs, 32, mode);
+            assert_eq!(pred.len(), 32 * 32);
+            assert_eq!(pred.len(), 32 * 32);
+        }
+    }
+
+    #[test]
+    fn mode_joint_index_non_directional() {
+        assert_eq!(IntraMode::DcPred.joint_y_index(), 0);
+        assert_eq!(IntraMode::SmoothPred.joint_y_index(), 1);
+        assert_eq!(IntraMode::SmoothVPred.joint_y_index(), 2);
+        assert_eq!(IntraMode::SmoothHPred.joint_y_index(), 3);
+        assert_eq!(IntraMode::PaethPred.joint_y_index(), 4);
+    }
+
+    #[test]
+    fn mode_list_default_has_all_13_base_modes_in_set0() {
+        let list = build_y_mode_list(None, None, true, false);
+        for i in 0..13 {
+            assert!(list[i] >= 0, "mode list position {} should be filled", i);
+        }
     }
 
     #[test]
@@ -1965,5 +2529,22 @@ mod tests {
         let a = vec![100u8; 4];
         let b = vec![110u8; 4];
         assert_eq!(compute_sad(&a, &b), 40);
+    }
+
+    #[test]
+    fn intra_mode_values_match_av2() {
+        assert_eq!(IntraMode::DcPred as u8, 0);
+        assert_eq!(IntraMode::VPred as u8, 1);
+        assert_eq!(IntraMode::HPred as u8, 2);
+        assert_eq!(IntraMode::D45Pred as u8, 3);
+        assert_eq!(IntraMode::D135Pred as u8, 4);
+        assert_eq!(IntraMode::D113Pred as u8, 5);
+        assert_eq!(IntraMode::D157Pred as u8, 6);
+        assert_eq!(IntraMode::D203Pred as u8, 7);
+        assert_eq!(IntraMode::D67Pred as u8, 8);
+        assert_eq!(IntraMode::SmoothPred as u8, 9);
+        assert_eq!(IntraMode::SmoothVPred as u8, 10);
+        assert_eq!(IntraMode::SmoothHPred as u8, 11);
+        assert_eq!(IntraMode::PaethPred as u8, 12);
     }
 }

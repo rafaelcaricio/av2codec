@@ -200,6 +200,9 @@ impl DaalaCoder {
         self.normalize(new_l, new_r, 0);
     }
 
+    pub fn rng(&self) -> u32 { self.rng }
+    pub fn cnt(&self) -> i32 { self.cnt }
+
     pub fn encode_symbol(&mut self, s: usize, icdf: &[u16]) {
         let nsyms = icdf.len();
         debug_assert!(s < nsyms);

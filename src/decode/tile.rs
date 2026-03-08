@@ -1363,12 +1363,13 @@ pub fn decode_tile_data_multi_sb(
     sb_cols: usize,
     sb_rows: usize,
     allow_update_cdf: bool,
+    base_qindex: u8,
 ) -> Vec<DecodedSbCoeffs> {
     let mut ec = DaalaDecoder::new(data);
     let mut result = Vec::with_capacity(sb_cols * sb_rows);
 
     let mut cdf_ctx = if allow_update_cdf {
-        Some(FrameCdfContext::new())
+        Some(FrameCdfContext::new_with_qindex(base_qindex))
     } else {
         None
     };
@@ -1376,33 +1377,78 @@ pub fn decode_tile_data_multi_sb(
     let mut above_y = vec![0u8; sb_cols * 16];
     let mut above_u = vec![0u8; sb_cols * 8];
     let mut above_v = vec![0u8; sb_cols * 8];
-
-    for _sb_row in 0..sb_rows {
+    let mut above_joint = vec![0u8; sb_cols];
+    for sb_row in 0..sb_rows {
         let mut left_y = [0u8; 16];
         let mut left_u = [0u8; 8];
         let mut left_v = [0u8; 8];
+        let mut left_joint_val: u8 = 0;
 
         for sb_col in 0..sb_cols {
-            let _partition = if let Some(ref mut ctx) = cdf_ctx {
+            let partition = if let Some(ref mut ctx) = cdf_ctx {
                 ec.decode_symbol_mut(&mut ctx.do_split)
             } else {
                 ec.decode_symbol(&DO_SPLIT_ICDF)
             };
-            let _mode_set = if let Some(ref mut ctx) = cdf_ctx {
-                ec.decode_symbol_mut(&mut ctx.y_mode_set)
+            assert!(partition == 0, "legacy decode path requires PARTITION_NONE (do_split=0)");
+
+            let left_jv = left_joint_val;
+            let above_jv = if sb_row > 0 { above_joint[sb_col] } else { 0u8 };
+            let is_left_dir = (left_jv as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+            let is_above_dir = (above_jv as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+            let y_mode_idx_ctx = is_left_dir as usize + is_above_dir as usize;
+
+            let mode_idx = if let Some(ref mut ctx) = cdf_ctx {
+                let mode_set = ec.decode_symbol_mut(&mut ctx.y_mode_set);
+                if mode_set == 0 {
+                    let mut idx = ec.decode_symbol_mut(&mut ctx.y_mode_idx[y_mode_idx_ctx]);
+                    if idx == 7 {
+                        idx += ec.decode_symbol_mut(&mut ctx.y_mode_idx_offset[y_mode_idx_ctx]);
+                    }
+                    idx as u8
+                } else {
+                    let literal = ec.decode_literal(4) as usize;
+                    (FIRST_MODE_COUNT + (mode_set - 1) * SECOND_MODE_COUNT + literal) as u8
+                }
             } else {
-                ec.decode_symbol(&Y_MODE_SET_ICDF)
+                let mode_set = ec.decode_symbol(&Y_MODE_SET_ICDF);
+                if mode_set == 0 {
+                    let mut idx = ec.decode_symbol(&Y_MODE_IDX_ICDF[y_mode_idx_ctx]);
+                    if idx == 7 {
+                        idx += ec.decode_symbol(&Y_MODE_IDX_OFFSET_ICDF[y_mode_idx_ctx]);
+                    }
+                    idx as u8
+                } else {
+                    let literal = ec.decode_literal(4) as usize;
+                    (FIRST_MODE_COUNT + (mode_set - 1) * SECOND_MODE_COUNT + literal) as u8
+                }
             };
-            let y_mode = if let Some(ref mut ctx) = cdf_ctx {
-                ec.decode_symbol_mut(&mut ctx.y_mode_idx[0]) as u8
+
+            let left_j_opt = if sb_col > 0 { Some(left_jv as usize) } else { None };
+            let above_j_opt = if sb_row > 0 { Some(above_jv as usize) } else { None };
+            let y_mode_list = crate::encode::build_y_mode_list(left_j_opt, above_j_opt, true, false);
+            let joint_y_mode = y_mode_list[mode_idx as usize] as u8;
+            let (y_mode, _angle_delta) = set_y_mode_and_delta_angle(joint_y_mode);
+
+            above_joint[sb_col] = joint_y_mode;
+            left_joint_val = joint_y_mode;
+
+            let uv_ctx = if is_directional_mode(y_mode) { 1 } else { 0 };
+            let uv_mode_list = crate::encode::build_uv_mode_list(crate::encode::IntraMode::from_av2(y_mode));
+            let uv_mode_idx = if let Some(ref mut ctx) = cdf_ctx {
+                let mut idx = ec.decode_symbol_mut(&mut ctx.uv_mode[uv_ctx]);
+                if idx == 7 {
+                    idx += ec.decode_literal(3) as usize;
+                }
+                idx
             } else {
-                ec.decode_symbol(&Y_MODE_IDX_ICDF[0]) as u8
+                let mut idx = ec.decode_symbol(&UV_MODE_ICDF[uv_ctx]);
+                if idx == 7 {
+                    idx += ec.decode_literal(3) as usize;
+                }
+                idx
             };
-            let uv_mode = if let Some(ref mut ctx) = cdf_ctx {
-                ec.decode_symbol_mut(&mut ctx.uv_mode[0]) as u8
-            } else {
-                ec.decode_symbol(&UV_MODE_ICDF[0]) as u8
-            };
+            let uv_mode = uv_mode_list[uv_mode_idx.min(12)] as u8;
 
             let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
             let y_dc_sign_ctx = compute_dc_sign_ctx(y_above, &left_y);
@@ -6455,7 +6501,7 @@ mod tests {
     #[test]
     fn roundtrip_all_zero() {
         let data = tile::encode_tile_data();
-        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false);
+        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false, 50);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].y_eob, 0);
         assert_eq!(decoded[0].u_eob, 0);
@@ -6471,7 +6517,7 @@ mod tests {
         let u_dc = -10i32;
         let v_dc = 5i32;
         let data = tile::encode_tile_data_with_dc(y_dc, u_dc, v_dc);
-        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false);
+        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false, 50);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].y_eob, 1);
         assert_eq!(decoded[0].u_eob, 1);
@@ -6497,7 +6543,7 @@ mod tests {
             0,
             0,
         );
-        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false);
+        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false, 50);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].y_eob, 3);
         assert_eq!(decoded[0].y_levels[0], 100);
@@ -6530,8 +6576,8 @@ mod tests {
                 sb
             })
             .collect();
-        let data = tile::encode_tile_data_multi_sb(2, 2, &sbs, false);
-        let decoded = decode_tile_data_multi_sb(&data, 2, 2, false);
+        let data = tile::encode_tile_data_multi_sb(2, 2, &sbs, false, 50);
+        let decoded = decode_tile_data_multi_sb(&data, 2, 2, false, 50);
         assert_eq!(decoded.len(), 4);
         for (i, sb) in decoded.iter().enumerate() {
             assert_eq!(sb.y_eob, 1);
@@ -6549,7 +6595,7 @@ mod tests {
         let u_dc = -150i32;
         let v_dc = 100i32;
         let data = tile::encode_tile_data_with_dc(y_dc, u_dc, v_dc);
-        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false);
+        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false, 50);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].y_levels[0], y_dc);
         assert_eq!(decoded[0].u_levels[0], u_dc);
@@ -6564,7 +6610,7 @@ mod tests {
         v_levels[0] = -20;
         let data =
             tile::encode_tile_data_with_coeffs(&[0i32; 1024], 0, &u_levels, 1, &v_levels, 1, 0, 0);
-        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false);
+        let decoded = decode_tile_data_multi_sb(&data, 1, 1, false, 50);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].y_eob, 0);
         assert_eq!(decoded[0].u_eob, 1);
