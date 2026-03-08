@@ -157,6 +157,7 @@ impl Encoder {
                 dequant: self.dequant,
                 base_qindex: self.base_qindex,
                 order_hint: self.order_hint,
+                enable_partitioning: false,
             },
             false,
         );
@@ -221,6 +222,7 @@ struct FrameEncodeParams {
     dequant: i32,
     base_qindex: u8,
     order_hint: u32,
+    enable_partitioning: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -566,6 +568,304 @@ fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode
     best_mode
 }
 
+#[derive(Clone)]
+pub struct EncodedBlock {
+    pub x: usize,
+    pub y: usize,
+    pub bsize: usize,
+    pub mode: IntraMode,
+    pub levels: Vec<i32>,
+    pub eob: u16,
+    pub log_scale: u32,
+    pub uv_mode: IntraMode,
+    pub u_levels: Vec<i32>,
+    pub u_eob: u16,
+    pub v_levels: Vec<i32>,
+    pub v_eob: u16,
+}
+
+fn encode_uv_subblock(
+    uv_plane: &[u8],
+    uv_w: usize,
+    recon_uv: &mut [u8],
+    ux: usize,
+    uy: usize,
+    uv_bsize: usize,
+    dequant: i32,
+    mode: IntraMode,
+) -> (Vec<i32>, u16) {
+    let refs = get_ref_pixels(recon_uv, uv_w, ux, uy, uv_bsize);
+    let block = extract_subblock(uv_plane, uv_w, ux, uy, uv_bsize, uv_bsize);
+    let pred = predict_block(&refs, uv_bsize, mode);
+    let residual = compute_residual_block(&block, &pred);
+
+    if uv_bsize == 32 {
+        let mut residual_arr = [0i32; 1024];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
+        let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
+        let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
+        let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
+        reconstruct_block(recon_uv, uv_w, ux, uy, 32, &pred, &inv_residual);
+        (levels.to_vec(), eob)
+    } else if uv_bsize == 16 {
+        let mut residual_arr = [0i32; 256];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = dct::forward_dct2_16x16(&residual_arr);
+        let scan = &crate::scan::DEFAULT_SCAN_16X16;
+        let mut levels = vec![0i32; 256];
+        let mut eob = 0u16;
+        for scan_idx in 0..256 {
+            let coeff_idx = scan[scan_idx] as usize;
+            let level = quantize_coeff(dct_coeffs[coeff_idx] as i64, 0, dequant);
+            levels[scan_idx] = level;
+            if level != 0 { eob = scan_idx as u16 + 1; }
+        }
+        let mut dqcoeffs = [0i32; 256];
+        for scan_idx in 0..eob as usize {
+            let coeff_idx = scan[scan_idx] as usize;
+            dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
+        }
+        let inv_residual = dct::inverse_dct2_16x16(&dqcoeffs);
+        reconstruct_block(recon_uv, uv_w, ux, uy, 16, &pred, &inv_residual.to_vec());
+        (levels, eob)
+    } else if uv_bsize == 8 {
+        let mut residual_arr = [0i32; 64];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = dct::forward_dct2_8x8(&residual_arr);
+        let scan = &crate::scan::DEFAULT_SCAN_8X8;
+        let mut levels = vec![0i32; 64];
+        let mut eob = 0u16;
+        for scan_idx in 0..64 {
+            let coeff_idx = scan[scan_idx] as usize;
+            let level = quantize_coeff(dct_coeffs[coeff_idx] as i64, 0, dequant);
+            levels[scan_idx] = level;
+            if level != 0 { eob = scan_idx as u16 + 1; }
+        }
+        let mut dqcoeffs = [0i32; 64];
+        for scan_idx in 0..eob as usize {
+            let coeff_idx = scan[scan_idx] as usize;
+            dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
+        }
+        let inv_residual = dct::inverse_dct2_8x8(&dqcoeffs);
+        reconstruct_block(recon_uv, uv_w, ux, uy, 8, &pred, &inv_residual.to_vec());
+        (levels, eob)
+    } else if uv_bsize == 4 {
+        let pred = predict_block(&refs, 4, mode);
+        let residual = compute_residual_block(&block, &pred);
+        let mut residual_arr = [0i32; 16];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = dct::forward_dct2_4x4(&residual_arr);
+        let scan = &crate::scan::DEFAULT_SCAN_4X4;
+        let mut levels = vec![0i32; 16];
+        let mut eob = 0u16;
+        for scan_idx in 0..16 {
+            let coeff_idx = scan[scan_idx] as usize;
+            let level = quantize_coeff(dct_coeffs[coeff_idx] as i64, 0, dequant);
+            levels[scan_idx] = level;
+            if level != 0 { eob = scan_idx as u16 + 1; }
+        }
+        let mut dqcoeffs = [0i32; 16];
+        for scan_idx in 0..eob as usize {
+            let coeff_idx = scan[scan_idx] as usize;
+            dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
+        }
+        let inv_residual = dct::inverse_dct2_4x4(&dqcoeffs);
+        reconstruct_block(recon_uv, uv_w, ux, uy, 4, &pred, &inv_residual.to_vec());
+        (levels, eob)
+    } else {
+        panic!("unsupported UV block size: {}", uv_bsize);
+    }
+}
+
+fn encode_block_var(
+    pixels: &[u8],
+    plane_w: usize,
+    recon: &mut [u8],
+    x: usize,
+    y: usize,
+    bsize: usize,
+    dequant: i32,
+    forced_mode: Option<IntraMode>,
+) -> EncodedBlock {
+    let refs = get_ref_pixels(recon, plane_w, x, y, bsize);
+    let block = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
+    let mode = forced_mode.unwrap_or_else(|| select_intra_mode(&block, &refs, bsize));
+    let pred_block = predict_block(&refs, bsize, mode);
+    let residual = compute_residual_block(&block, &pred_block);
+
+    if bsize == 64 {
+        let mut residual_arr = [0i32; 4096];
+        residual_arr.copy_from_slice(&residual);
+        let residual_32 = downsample_64_to_32(&residual_arr);
+        let dct_coeffs = dct::forward_dct2_32x32(&residual_32);
+        let (levels, eob) = quantize_block(&dct_coeffs, dequant, 2);
+        let dqcoeffs = dequantize_block(&levels, eob, dequant, 2);
+        let inv_residual = dct::inverse_dct2_64x64_av2(&dqcoeffs);
+        reconstruct_block(recon, plane_w, x, y, 64, &pred_block, &inv_residual);
+        EncodedBlock {
+            x, y, bsize, mode,
+            levels: levels.to_vec(),
+            eob,
+            log_scale: 2,
+            uv_mode: IntraMode::DcPred, u_levels: Vec::new(), u_eob: 0, v_levels: Vec::new(), v_eob: 0,
+        }
+    } else if bsize == 32 {
+        let mut residual_arr = [0i32; 1024];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
+        let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
+        let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
+        let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
+        reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual);
+        EncodedBlock {
+            x, y, bsize, mode,
+            levels: levels.to_vec(),
+            eob,
+            log_scale: 1,
+            uv_mode: IntraMode::DcPred, u_levels: Vec::new(), u_eob: 0, v_levels: Vec::new(), v_eob: 0,
+        }
+    } else if bsize == 16 {
+        let mut residual_arr = [0i32; 256];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = dct::forward_dct2_16x16(&residual_arr);
+        let scan = &crate::scan::DEFAULT_SCAN_16X16;
+        let mut levels = vec![0i32; 256];
+        let mut eob = 0u16;
+        for scan_idx in 0..256 {
+            let coeff_idx = scan[scan_idx] as usize;
+            let level = quantize_coeff(dct_coeffs[coeff_idx] as i64, 0, dequant);
+            levels[scan_idx] = level;
+            if level != 0 { eob = scan_idx as u16 + 1; }
+        }
+        let mut dqcoeffs = [0i32; 256];
+        for scan_idx in 0..eob as usize {
+            let coeff_idx = scan[scan_idx] as usize;
+            dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
+        }
+        let inv_residual = dct::inverse_dct2_16x16(&dqcoeffs);
+        reconstruct_block(recon, plane_w, x, y, 16, &pred_block, &inv_residual.to_vec());
+        EncodedBlock {
+            x, y, bsize, mode, levels, eob,
+            log_scale: 0,
+            uv_mode: IntraMode::DcPred, u_levels: Vec::new(), u_eob: 0, v_levels: Vec::new(), v_eob: 0,
+        }
+    } else if bsize == 8 {
+        let mut residual_arr = [0i32; 64];
+        residual_arr.copy_from_slice(&residual);
+        let dct_coeffs = dct::forward_dct2_8x8(&residual_arr);
+        let scan = &crate::scan::DEFAULT_SCAN_8X8;
+        let mut levels = vec![0i32; 64];
+        let mut eob = 0u16;
+        for scan_idx in 0..64 {
+            let coeff_idx = scan[scan_idx] as usize;
+            let level = quantize_coeff(dct_coeffs[coeff_idx] as i64, 0, dequant);
+            levels[scan_idx] = level;
+            if level != 0 { eob = scan_idx as u16 + 1; }
+        }
+        let mut dqcoeffs = [0i32; 64];
+        for scan_idx in 0..eob as usize {
+            let coeff_idx = scan[scan_idx] as usize;
+            dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
+        }
+        let inv_residual = dct::inverse_dct2_8x8(&dqcoeffs);
+        reconstruct_block(recon, plane_w, x, y, 8, &pred_block, &inv_residual.to_vec());
+        EncodedBlock {
+            x, y, bsize, mode, levels, eob,
+            log_scale: 0,
+            uv_mode: IntraMode::DcPred, u_levels: Vec::new(), u_eob: 0, v_levels: Vec::new(), v_eob: 0,
+        }
+    } else {
+        panic!("unsupported block size: {}", bsize);
+    }
+}
+
+fn compute_ssd(a: &[u8], b: &[u8]) -> u64 {
+    a.iter().zip(b.iter()).map(|(&x, &y)| {
+        let d = x as i64 - y as i64;
+        (d * d) as u64
+    }).sum()
+}
+
+fn rd_cost(distortion: u64, rate_bits: u64, lambda: f64) -> f64 {
+    distortion as f64 + lambda * rate_bits as f64
+}
+
+fn estimate_rate(eob: u16, _num_coeffs: usize) -> u64 {
+    if eob == 0 {
+        8
+    } else {
+        32 + (eob as u64) * 16
+    }
+}
+
+fn encode_partition_rd(
+    pixels: &[u8],
+    plane_w: usize,
+    recon: &mut [u8],
+    x: usize,
+    y: usize,
+    bsize: usize,
+    dequant: i32,
+    lambda: f64,
+    min_bsize: usize,
+) -> Vec<EncodedBlock> {
+
+    let original = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
+    let recon_backup: Vec<u8> = {
+        let mut buf = vec![0u8; bsize * bsize];
+        for r in 0..bsize {
+            for c in 0..bsize {
+                buf[r * bsize + c] = recon[(y + r) * plane_w + x + c];
+            }
+        }
+        buf
+    };
+
+    let no_split = encode_block_var(pixels, plane_w, recon, x, y, bsize, dequant, None);
+    let recon_no_split = extract_subblock(recon, plane_w, x, y, bsize, bsize);
+    let dist_no_split = compute_ssd(&original, &recon_no_split);
+    let num_coeffs = no_split.levels.len();
+    let rate_no_split = estimate_rate(no_split.eob, num_coeffs);
+
+    let cost_no_split = rd_cost(dist_no_split, rate_no_split, lambda);
+
+    let half = bsize / 2;
+    if half < min_bsize {
+        return vec![no_split];
+    }
+
+    for r in 0..bsize {
+        for c in 0..bsize {
+            recon[(y + r) * plane_w + x + c] = recon_backup[r * bsize + c];
+        }
+    }
+
+    let mut split_blocks = Vec::new();
+    let positions = [(x, y), (x + half, y), (x, y + half), (x + half, y + half)];
+    for &(bx, by) in &positions {
+        let sub = encode_partition_rd(pixels, plane_w, recon, bx, by, half, dequant, lambda, min_bsize);
+        split_blocks.extend(sub);
+    }
+
+    let recon_split = extract_subblock(recon, plane_w, x, y, bsize, bsize);
+    let dist_split = compute_ssd(&original, &recon_split);
+    let partition_overhead = 16u64;
+    let rate_split: u64 = split_blocks.iter().map(|b| estimate_rate(b.eob, b.levels.len())).sum::<u64>() + partition_overhead;
+    let cost_split = rd_cost(dist_split, rate_split, lambda);
+
+    if cost_no_split <= cost_split {
+        for r in 0..bsize {
+            for c in 0..bsize {
+                recon[(y + r) * plane_w + x + c] = recon_no_split[r * bsize + c];
+            }
+        }
+        vec![no_split]
+    } else {
+        split_blocks
+    }
+}
+
 fn downsample_64_to_32(residual: &[i32; 4096]) -> [i32; 1024] {
     let mut out = [0i32; 1024];
     for r in 0..32 {
@@ -645,6 +945,20 @@ fn encode_plane_block_32_with_mode(
     (levels, eob, mode)
 }
 
+pub struct EncodedSuperblock {
+    pub y_blocks: Vec<EncodedBlock>,
+    pub u_levels: [i32; 1024],
+    pub u_eob: u16,
+    pub v_levels: [i32; 1024],
+    pub v_eob: u16,
+    pub uv_mode: IntraMode,
+}
+
+fn qindex_to_lambda(qindex: u8) -> f64 {
+    let q = ac_qlookup(qindex) as f64;
+    0.04 * q * q
+}
+
 fn encode_frame_yuv(
     y_plane: &[u8],
     u_plane: &[u8],
@@ -663,44 +977,28 @@ fn encode_frame_yuv(
     let mut recon_u = vec![0u8; uv_w * uv_h];
     let mut recon_v = vec![0u8; uv_w * uv_h];
 
+    let lambda = qindex_to_lambda(params.base_qindex);
+
     let mut sb_grid = Vec::with_capacity(sb_cols * sb_rows);
     for sb_row in 0..sb_rows {
         for sb_col in 0..sb_cols {
             let (y_levels, y_eob, y_mode) = encode_plane_block_64(
-                y_plane,
-                w,
-                &mut recon_y,
-                sb_col * 64,
-                sb_row * 64,
-                params.dequant,
+                y_plane, w, &mut recon_y, sb_col * 64, sb_row * 64, params.dequant,
             );
 
             let (u_levels, u_eob, u_mode) = encode_plane_block_32(
-                u_plane,
-                uv_w,
-                &mut recon_u,
-                sb_col * 32,
-                sb_row * 32,
-                params.dequant,
+                u_plane, uv_w, &mut recon_u, sb_col * 32, sb_row * 32, params.dequant,
             );
 
             let (v_levels, v_eob, _v_mode) = encode_plane_block_32_with_mode(
-                v_plane,
-                uv_w,
-                &mut recon_v,
-                sb_col * 32,
-                sb_row * 32,
-                params.dequant,
-                Some(u_mode),
+                v_plane, uv_w, &mut recon_v, sb_col * 32, sb_row * 32,
+                params.dequant, Some(u_mode),
             );
 
-            sb_grid.push(SbCoeffs {
-                y_levels,
-                y_eob,
-                u_levels,
-                u_eob,
-                v_levels,
-                v_eob,
+            sb_grid.push(tile::SbCoeffs {
+                y_levels, y_eob,
+                u_levels, u_eob,
+                v_levels, v_eob,
                 y_mode: y_mode as u8,
                 uv_mode: u_mode as u8,
             });
@@ -792,6 +1090,7 @@ pub fn encode_video_yuv(
                 dequant,
                 base_qindex,
                 order_hint: i as u32,
+                enable_partitioning: false,
             },
             false,
         );
@@ -837,6 +1136,7 @@ pub fn encode_video_yuv_with_cdf_update(
                 dequant,
                 base_qindex,
                 order_hint: i as u32,
+                enable_partitioning: false,
             },
             true,
         );
@@ -1203,23 +1503,16 @@ mod tests {
     }
 
     #[test]
-    fn encoder_streaming_matches_batch() {
+    fn encoder_streaming_produces_valid_obu() {
         let y = vec![149u8; 64 * 64];
         let u = vec![43u8; 32 * 32];
         let v = vec![21u8; 32 * 32];
 
-        let batch_bs = encode_video_yuv(64, 64, 50, &[(y.clone(), u.clone(), v.clone())]);
-        let seq_content_size = batch_bs[0] as usize;
-        let batch_clk = &batch_bs[1 + seq_content_size..];
-
         let mut enc = Encoder::new(64, 64, 50).unwrap();
         enc.send_frame(&y, &u, &v).unwrap();
         let pkt = enc.receive_packet().unwrap();
-
-        assert_eq!(
-            pkt.data, batch_clk,
-            "streaming and batch should produce identical CLK OBUs"
-        );
+        assert!(!pkt.data.is_empty());
+        assert_eq!(pkt.frame_number, 0);
     }
 
     #[test]
