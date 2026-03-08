@@ -1390,7 +1390,7 @@ pub fn decode_tile_data_multi_sb(
             } else {
                 ec.decode_symbol(&DO_SPLIT_ICDF)
             };
-            assert!(partition == 0, "legacy decode path requires PARTITION_NONE (do_split=0)");
+            assert!(partition == 0, "flat-SB decode path requires PARTITION_NONE (do_split=0)");
 
             let left_jv = left_joint_val;
             let above_jv = if sb_row > 0 { above_joint[sb_col] } else { 0u8 };
@@ -2774,7 +2774,9 @@ fn read_uv_mode(
     cfl_allowed_in_sdp: bool,
     cdf: &mut FrameCdfContext,
 ) -> (u8, i8, i8, u8, u8) {
-    if cfl_allowed_in_sdp && is_cfl_allowed(block_w, block_h) {
+    let cfl_or_mhccp_allowed = (enable_cfl_intra || enable_mhccp) && is_cfl_allowed(block_w, block_h);
+    let mhccp_only_allowed = !enable_cfl_intra && enable_mhccp && is_mhccp_allowed(enable_mhccp, block_w, block_h);
+    if cfl_allowed_in_sdp && (cfl_or_mhccp_allowed || mhccp_only_allowed) {
         ec.trace_state(&format!("before_is_cfl ctx={}", cfl_ctx));
         let is_cfl = ec.decode_symbol_mut(&mut cdf.cfl[cfl_ctx]);
         ec.trace_state(&format!("after_is_cfl={}", is_cfl));

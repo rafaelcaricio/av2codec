@@ -433,43 +433,43 @@ mod tests {
     }
 
     #[test]
-    fn var_32x32_matches_legacy() {
+    fn var_32x32_matches_fixed_size_path() {
         let mut levels_arr = [0i32; 1024];
         levels_arr[0] = 100;
-        let legacy = dequantize_and_inverse(&levels_arr, 1, 164, 1, false);
+        let fixed_size = dequantize_and_inverse(&levels_arr, 1, 164, 1, false);
         let levels_vec: Vec<i32> = levels_arr.to_vec();
-        let new = dequantize_and_inverse_var(&levels_vec, 1, 164, TxSize::Tx32x32);
-        assert_eq!(legacy.len(), new.len());
-        for (i, (&a, &b)) in legacy.iter().zip(new.iter()).enumerate() {
+        let variable_size = dequantize_and_inverse_var(&levels_vec, 1, 164, TxSize::Tx32x32);
+        assert_eq!(fixed_size.len(), variable_size.len());
+        for (i, (&a, &b)) in fixed_size.iter().zip(variable_size.iter()).enumerate() {
             assert_eq!(a, b, "mismatch at {}", i);
         }
     }
 
     #[test]
-    fn var_64x64_matches_legacy() {
+    fn var_64x64_matches_fixed_size_path() {
         let mut levels_arr = [0i32; 1024];
         levels_arr[0] = 500;
-        let legacy = dequantize_and_inverse(&levels_arr, 1, 164, 2, true);
+        let fixed_size = dequantize_and_inverse(&levels_arr, 1, 164, 2, true);
         let levels_vec: Vec<i32> = levels_arr.to_vec();
-        let new = dequantize_and_inverse_var(&levels_vec, 1, 164, TxSize::Tx64x64);
-        assert_eq!(legacy.len(), new.len());
-        for (i, (&a, &b)) in legacy.iter().zip(new.iter()).enumerate() {
+        let variable_size = dequantize_and_inverse_var(&levels_vec, 1, 164, TxSize::Tx64x64);
+        assert_eq!(fixed_size.len(), variable_size.len());
+        for (i, (&a, &b)) in fixed_size.iter().zip(variable_size.iter()).enumerate() {
             assert_eq!(a, b, "mismatch at {}", i);
         }
     }
 
     #[test]
-    fn var_32x32_multi_coeff_matches_legacy() {
+    fn var_32x32_multi_coeff_matches_fixed_size_path() {
         let mut levels_arr = [0i32; 1024];
         levels_arr[0] = 100;
         levels_arr[1] = -50;
         levels_arr[2] = 30;
         levels_arr[3] = -10;
-        let legacy = dequantize_and_inverse(&levels_arr, 4, 164, 1, false);
+        let fixed_size = dequantize_and_inverse(&levels_arr, 4, 164, 1, false);
         let levels_vec: Vec<i32> = levels_arr.to_vec();
-        let new = dequantize_and_inverse_var(&levels_vec, 4, 164, TxSize::Tx32x32);
-        assert_eq!(legacy.len(), new.len());
-        for (i, (&a, &b)) in legacy.iter().zip(new.iter()).enumerate() {
+        let variable_size = dequantize_and_inverse_var(&levels_vec, 4, 164, TxSize::Tx32x32);
+        assert_eq!(fixed_size.len(), variable_size.len());
+        for (i, (&a, &b)) in fixed_size.iter().zip(variable_size.iter()).enumerate() {
             assert_eq!(a, b, "mismatch at {}", i);
         }
     }

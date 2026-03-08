@@ -1208,7 +1208,7 @@ fn encode_uv_subblock(
         reconstruct_block(recon_uv, uv_w, ux, uy, 8, &pred, &inv_residual.to_vec());
         (levels, eob)
     } else if uv_bsize == 4 {
-        let pred = predict_block(&refs, 4, mode);
+        let pred = predict_block_plane(&refs, 4, mode, false);
         let residual = compute_residual_block(&block, &pred);
         let mut residual_arr = [0i32; 16];
         residual_arr.copy_from_slice(&residual);
@@ -1247,7 +1247,7 @@ fn encode_block_var(
 ) -> EncodedBlock {
     let refs = get_ref_pixels(recon, plane_w, x, y, bsize);
     let block = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
-    let mode = forced_mode.unwrap_or_else(|| select_intra_mode(&block, &refs, bsize));
+    let mode = forced_mode.unwrap_or_else(|| select_intra_mode_nondir(&block, &refs, bsize));
     let pred_block = predict_block(&refs, bsize, mode);
     let residual = compute_residual_block(&block, &pred_block);
 
@@ -1566,6 +1566,32 @@ fn encode_plane_block_16(
     (levels, eob, mode)
 }
 
+fn encode_plane_block_32_y(
+    pixels: &[u8],
+    plane_w: usize,
+    recon: &mut [u8],
+    x: usize,
+    y: usize,
+    dequant: i32,
+) -> (Vec<i32>, u16, IntraMode) {
+    let refs = get_ref_pixels(recon, plane_w, x, y, 32);
+    let block = extract_subblock(pixels, plane_w, x, y, 32, 32);
+    let mode = select_intra_mode_nondir(&block, &refs, 32);
+    let pred_block = predict_block_plane(&refs, 32, mode, true);
+
+    let residual = compute_residual_block(&block, &pred_block);
+    let mut residual_arr = [0i32; 1024];
+    residual_arr.copy_from_slice(&residual);
+    let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
+    let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
+
+    let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
+    let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
+    reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual);
+
+    (levels.to_vec(), eob, mode)
+}
+
 fn encode_frame_yuv(
     y_plane: &[u8],
     u_plane: &[u8],
@@ -1578,38 +1604,70 @@ fn encode_frame_yuv(
     let sb_cols = w / 64;
     let sb_rows = h / 64;
     let uv_w = w / 2;
+    let uv_h = h / 2;
 
     let mut recon_y = vec![0u8; w * h];
-    let mut recon_u = vec![0u8; uv_w * (h / 2)];
-    let mut recon_v = vec![0u8; uv_w * (h / 2)];
+    let mut recon_u = vec![0u8; uv_w * uv_h];
+    let mut recon_v = vec![0u8; uv_w * uv_h];
 
-    let mut sb_grid = Vec::with_capacity(sb_cols * sb_rows);
+    let block_offsets: [(usize, usize); 4] = [
+        (0, 0), (32, 0), (0, 32), (32, 32),
+    ];
+
+    let lambda = qindex_to_lambda(params.base_qindex);
+
+    let mut sbs = Vec::with_capacity(sb_cols * sb_rows);
     for sb_row in 0..sb_rows {
         for sb_col in 0..sb_cols {
-            let (y_levels, y_eob, y_mode) = encode_plane_block_64(
-                y_plane, w, &mut recon_y, sb_col * 64, sb_row * 64, params.dequant,
-            );
+            let sb_x = sb_col * 64;
+            let sb_y = sb_row * 64;
 
-            let (u_levels, u_eob, u_mode) = encode_plane_block_32(
-                u_plane, uv_w, &mut recon_u, sb_col * 32, sb_row * 32, params.dequant,
-            );
+            let mut y_blocks = Vec::new();
+            for &(bx, by) in &block_offsets {
+                let yx = sb_x + bx;
+                let yy = sb_y + by;
 
-            let (v_levels, v_eob, _v_mode) = encode_plane_block_32_with_mode(
-                v_plane, uv_w, &mut recon_v, sb_col * 32, sb_row * 32,
-                params.dequant, Some(u_mode),
-            );
+                let mut leaf_blocks = encode_partition_rd(
+                    y_plane, w, &mut recon_y, yx, yy, 32, params.dequant, lambda, 8,
+                );
 
-            sb_grid.push(tile::SbCoeffs {
-                y_levels, y_eob,
-                u_levels, u_eob,
-                v_levels, v_eob,
-                y_mode: y_mode as u8,
-                uv_mode: u_mode as u8,
+
+
+                for block in &mut leaf_blocks {
+                    let uv_bsize = block.bsize / 2;
+                    let ux = block.x / 2;
+                    let uy = block.y / 2;
+
+                    let uv_mode = IntraMode::DcPred;
+                    let (u_levels, u_eob) = encode_uv_subblock(
+                        u_plane, uv_w, &mut recon_u, ux, uy, uv_bsize, params.dequant, uv_mode,
+                    );
+                    let (v_levels, v_eob) = encode_uv_subblock(
+                        v_plane, uv_w, &mut recon_v, ux, uy, uv_bsize, params.dequant, uv_mode,
+                    );
+
+                    block.uv_mode = uv_mode;
+                    block.u_levels = u_levels;
+                    block.u_eob = u_eob;
+                    block.v_levels = v_levels;
+                    block.v_eob = v_eob;
+                }
+
+                y_blocks.extend(leaf_blocks);
+            }
+
+            sbs.push(EncodedSuperblock {
+                y_blocks,
+                u_levels: [0i32; 1024],
+                u_eob: 0,
+                v_levels: [0i32; 1024],
+                v_eob: 0,
+                uv_mode: IntraMode::DcPred,
             });
         }
     }
 
-    let tile_data = tile::encode_tile_data_multi_sb(sb_cols, sb_rows, &sb_grid, allow_cdf_update, params.base_qindex);
+    let tile_data = tile::encode_tile_data_split4(sb_cols, sb_rows, &sbs, allow_cdf_update, params.base_qindex);
     let frame_config = FrameHeaderConfig {
         width: params.width,
         height: params.height,
@@ -1696,7 +1754,7 @@ pub fn encode_video_yuv(
                 order_hint: i as u32,
                 enable_partitioning: false,
             },
-            false,
+            true,
         );
         output.extend_from_slice(&clk_obu);
     }

@@ -395,6 +395,7 @@ struct PlaneEncodeCtx<'a> {
     dc_sign_ctx: usize,
     entropy_ctx: usize,
     u_has_coeffs: bool,
+    tx_size_sqr: usize,
 }
 
 fn encode_plane_full(
@@ -432,6 +433,10 @@ fn encode_plane_full(
     let pl_ctx = if plane == 0 { 0 } else { 2 };
     let num_coeffs = ctx.num_coeffs;
     encode_eob_var_size(ec, eob, num_coeffs, pl_ctx, cdf, update);
+
+    if plane == 0 && eob > 1 && ctx.tx_size_sqr < 3 {
+        encode_sym(ec, 0, &mut cdf.intra_ext_tx[ctx.tx_size_sqr.min(3)], update);
+    }
 
     let scan = scan_for_num_coeffs(num_coeffs);
     let width = 1usize << bwl;
@@ -670,6 +675,7 @@ pub fn encode_tile_data_with_coeffs(
             dc_sign_ctx: 0,
             entropy_ctx: 0,
             u_has_coeffs: false,
+            tx_size_sqr: 3,
         },
         &mut cdf,
         false,
@@ -692,6 +698,7 @@ pub fn encode_tile_data_with_coeffs(
             dc_sign_ctx: 0,
             entropy_ctx: 0,
             u_has_coeffs: false,
+            tx_size_sqr: 3,
         },
         &mut cdf,
         false,
@@ -714,6 +721,7 @@ pub fn encode_tile_data_with_coeffs(
             dc_sign_ctx: 0,
             entropy_ctx: 0,
             u_has_coeffs: u_eob > 0,
+            tx_size_sqr: 3,
         },
         &mut cdf,
         false,
@@ -876,6 +884,7 @@ pub fn encode_tile_data_multi_sb(
                     dc_sign_ctx: y_dc_sign_ctx,
                     entropy_ctx: 0,
                     u_has_coeffs: false,
+                    tx_size_sqr: 3,
                 },
                 &mut cdf_ctx,
                 update,
@@ -906,6 +915,7 @@ pub fn encode_tile_data_multi_sb(
                     dc_sign_ctx: 0,
                     entropy_ctx: u_entropy_ctx,
                     u_has_coeffs: false,
+                    tx_size_sqr: 3,
                 },
                 &mut cdf_ctx,
                 update,
@@ -936,6 +946,7 @@ pub fn encode_tile_data_multi_sb(
                     dc_sign_ctx: 0,
                     entropy_ctx: v_entropy_ctx,
                     u_has_coeffs: sb.u_eob > 0,
+                    tx_size_sqr: 3,
                 },
                 &mut cdf_ctx,
                 update,
@@ -974,28 +985,289 @@ fn rect_type_ctx(above_part: &[u8], left_part: &[u8], bw_log2: usize, bh_log2: u
     bsize_rect_group * 4 + (left_bit as usize) * 2 + (above_bit as usize)
 }
 
+fn part_ctx_above(w: usize) -> u8 {
+    match w {
+        4 => 63, 8 => 62, 16 => 60, 32 => 56, 64 => 48, 128 => 32, _ => 0,
+    }
+}
+
+fn part_ctx_left(h: usize) -> u8 {
+    match h {
+        4 => 63, 8 => 62, 16 => 60, 32 => 56, 64 => 48, 128 => 32, _ => 0,
+    }
+}
+
+fn split_group(w: usize, h: usize) -> usize {
+    if w <= 8 && h <= 8 { return 0; }
+    let mi_area = (w / 4) * (h / 4);
+    if mi_area <= 16 { return 1; }
+    if mi_area <= 64 { return 2; }
+    3
+}
+
+fn rect_split_group(w: usize, h: usize) -> usize {
+    match (w, h) {
+        (64, 64) => 6,
+        (64, 32) => 5,
+        (32, 64) => 4,
+        (32, 32) => 3,
+        (32, 16) | (16, 8) => 2,
+        (16, 32) | (8, 16) => 1,
+        _ => 0,
+    }
+}
+
+fn mi_log2(pixels: usize) -> usize {
+    match pixels / 4 {
+        1 => 0, 2 => 1, 4 => 2, 8 => 3, 16 => 4, 32 => 5, _ => 0,
+    }
+}
+
+struct PartCtx<'a> {
+    above_part: &'a mut [u8],
+    left_part: &'a mut [u8],
+    above_y: &'a mut [u8],
+    left_y: &'a mut [u8],
+    above_u: &'a mut [u8],
+    left_u: &'a mut [u8],
+    above_v: &'a mut [u8],
+    left_v: &'a mut [u8],
+    above_mode: &'a mut [Option<usize>],
+    left_mode: &'a mut [Option<usize>],
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_leaf_block(
+    ec: &mut DaalaCoder,
+    block: &crate::encode::EncodedBlock,
+    abs_mi_col: usize,
+    sb_mi_row: usize,
+    bsize: usize,
+    ctx: &mut PartCtx,
+    sb_row: usize,
+    sb_col: usize,
+    cdf: &mut FrameCdfContext,
+    update: bool,
+) {
+    let mi_size = bsize / 4;
+    let uv_bsize = bsize / 2;
+    let uv_mi_size = uv_bsize / 4;
+    let uv_abs_col = abs_mi_col / 2;
+    let uv_sb_row = sb_mi_row / 2;
+    let mi_col = abs_mi_col;
+    let mi_row = sb_mi_row;
+
+    let left_j = if mi_col > 0 || sb_col > 0 {
+        ctx.left_mode[mi_row]
+    } else {
+        None
+    };
+    let above_j = if mi_row > 0 || sb_row > 0 {
+        ctx.above_mode[mi_col]
+    } else {
+        None
+    };
+
+    let is_large = bsize >= 32;
+    let is_small = bsize <= 8;
+    let y_list = crate::encode::build_y_mode_list(left_j, above_j, is_large, is_small);
+    let y_joint = block.mode.joint_y_index();
+    let y_mode_idx = crate::encode::find_mode_idx_in_list(&y_list, y_joint);
+
+    let uv_list = crate::encode::build_uv_mode_list(block.mode);
+    let uv_mode_idx = crate::encode::find_uv_mode_idx(&uv_list, block.uv_mode);
+    let uv_ctx = if block.mode.is_directional() { 1 } else { 0 };
+
+    let is_left_dir = left_j.map(|j| j >= 5).unwrap_or(false);
+    let is_above_dir = above_j.map(|j| j >= 5).unwrap_or(false);
+    let y_mode_idx_ctx = is_left_dir as usize + is_above_dir as usize;
+
+    encode_y_mode(ec, y_mode_idx, y_mode_idx_ctx, cdf, update);
+    encode_uv_mode(ec, uv_mode_idx, uv_ctx, cdf, update);
+
+    for i in 0..mi_size { ctx.above_mode[mi_col + i] = Some(y_joint); }
+    for i in 0..mi_size { ctx.left_mode[mi_row + i] = Some(y_joint); }
+
+    let y_txs_ctx = txs_ctx_idx_for_bsize(bsize);
+    let y_bwl = bwl_for_bsize(bsize);
+    let y_h = height_for_bsize(bsize);
+    let y_nc = num_coeffs_for_bsize(bsize);
+    let y_tx_size_sqr = tx_size_sqr_for_bsize(bsize);
+
+    let y_above_slice = &ctx.above_y[mi_col..mi_col + mi_size];
+    let y_left_slice: Vec<u8> = ctx.left_y[mi_row..mi_row + mi_size].to_vec();
+    let y_dc_sign_ctx = compute_dc_sign_ctx(y_above_slice, &y_left_slice);
+    let y_entropy_ctx = 0;
+
+    let y_coeffs = PlaneCoeffs { levels: &block.levels, eob: block.eob };
+    encode_plane_full(ec, &y_coeffs, &PlaneEncodeCtx {
+        plane: 0, txs_ctx_idx: y_txs_ctx, bwl: y_bwl, height: y_h, num_coeffs: y_nc,
+        txb_skip_icdf: &TXB_SKIP_Y_ICDF[y_txs_ctx][y_entropy_ctx],
+        dc_sign_ctx: y_dc_sign_ctx, entropy_ctx: y_entropy_ctx, u_has_coeffs: false,
+        tx_size_sqr: y_tx_size_sqr,
+    }, cdf, update);
+
+    let y_cul = compute_cul_level_vec(&block.levels, block.eob);
+    for i in 0..mi_size { ctx.above_y[mi_col + i] = y_cul; }
+    for i in 0..mi_size { ctx.left_y[mi_row + i] = y_cul; }
+
+    let uv_txs_ctx = txs_ctx_idx_for_bsize(uv_bsize);
+    let uv_bwl = bwl_for_bsize(uv_bsize);
+    let uv_h = height_for_bsize(uv_bsize);
+    let uv_nc = num_coeffs_for_bsize(uv_bsize);
+
+    let u_above_slice = &ctx.above_u[uv_abs_col..uv_abs_col + uv_mi_size];
+    let u_left_slice: Vec<u8> = ctx.left_u[uv_sb_row..uv_sb_row + uv_mi_size].to_vec();
+    let u_entropy_ctx = compute_entropy_ctx(u_above_slice, &u_left_slice);
+
+    let uv_tx_size_sqr = tx_size_sqr_for_bsize(uv_bsize);
+
+    let u_coeffs = PlaneCoeffs { levels: &block.u_levels, eob: block.u_eob };
+    encode_plane_full(ec, &u_coeffs, &PlaneEncodeCtx {
+        plane: 1, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
+        txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
+        dc_sign_ctx: 0, entropy_ctx: u_entropy_ctx, u_has_coeffs: false,
+        tx_size_sqr: uv_tx_size_sqr,
+    }, cdf, update);
+
+    let u_cul = compute_cul_level_vec(&block.u_levels, block.u_eob);
+    for i in 0..uv_mi_size { ctx.above_u[uv_abs_col + i] = u_cul; }
+    for i in 0..uv_mi_size { ctx.left_u[uv_sb_row + i] = u_cul; }
+
+    let v_above_slice = &ctx.above_v[uv_abs_col..uv_abs_col + uv_mi_size];
+    let v_left_slice: Vec<u8> = ctx.left_v[uv_sb_row..uv_sb_row + uv_mi_size].to_vec();
+    let v_entropy_ctx = compute_entropy_ctx(v_above_slice, &v_left_slice);
+
+    let v_coeffs = PlaneCoeffs { levels: &block.v_levels, eob: block.v_eob };
+    encode_plane_full(ec, &v_coeffs, &PlaneEncodeCtx {
+        plane: 2, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
+        txb_skip_icdf: &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx],
+        dc_sign_ctx: 0, entropy_ctx: v_entropy_ctx, u_has_coeffs: block.u_eob > 0,
+        tx_size_sqr: uv_tx_size_sqr,
+    }, cdf, update);
+
+    let v_cul = compute_cul_level_vec(&block.v_levels, block.v_eob);
+    for i in 0..uv_mi_size { ctx.above_v[uv_abs_col + i] = v_cul; }
+    for i in 0..uv_mi_size { ctx.left_v[uv_sb_row + i] = v_cul; }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_sq_part(
+    ec: &mut DaalaCoder,
+    blocks: &[crate::encode::EncodedBlock],
+    x: usize,
+    y: usize,
+    bsize: usize,
+    ctx: &mut PartCtx,
+    sb_row: usize,
+    sb_col: usize,
+    cdf: &mut FrameCdfContext,
+    update: bool,
+) {
+    let mi_col = x / 4;
+    let mi_row = (y % 64) / 4;
+    let mi_size = bsize / 4;
+
+    let is_leaf = blocks.iter().any(|b| b.x == x && b.y == y && b.bsize == bsize);
+
+    if is_leaf {
+        let bw_log2 = mi_log2(bsize);
+        let group = split_group(bsize, bsize);
+        let blk_above = ctx.above_part[mi_col..mi_col + mi_size].to_vec();
+        let blk_left = ctx.left_part[mi_row..mi_row + mi_size].to_vec();
+        let split_ctx = do_split_ctx(&blk_above, &blk_left, bw_log2, bw_log2, group);
+        encode_sym(ec, 0, &mut cdf.do_split_part[0][split_ctx.min(63)], update);
+
+        let block = blocks.iter().find(|b| b.x == x && b.y == y && b.bsize == bsize).unwrap();
+        encode_leaf_block(ec, block, mi_col, mi_row, bsize, ctx, sb_row, sb_col, cdf, update);
+
+        let pctx_a = part_ctx_above(bsize);
+        let pctx_l = part_ctx_left(bsize);
+        for i in 0..mi_size { ctx.above_part[mi_col + i] = pctx_a; }
+        for i in 0..mi_size { ctx.left_part[mi_row + i] = pctx_l; }
+    } else {
+        assert!(bsize >= 16, "cannot split block smaller than 16x16");
+        let half = bsize / 2;
+        let mi_half = half / 4;
+
+        let bw_log2 = mi_log2(bsize);
+        let group = split_group(bsize, bsize);
+        let blk_above = ctx.above_part[mi_col..mi_col + mi_size].to_vec();
+        let blk_left = ctx.left_part[mi_row..mi_row + mi_size].to_vec();
+
+        let split_ctx = do_split_ctx(&blk_above, &blk_left, bw_log2, bw_log2, group);
+        encode_sym(ec, 1, &mut cdf.do_split_part[0][split_ctx.min(63)], update);
+
+        let rgroup = rect_split_group(bsize, bsize);
+        let rctx = rect_type_ctx(&blk_above, &blk_left, bw_log2, bw_log2, rgroup);
+        encode_sym(ec, 0, &mut cdf.rect_type[0][rctx.min(63)], update);
+
+        encode_rect_vert(ec, blocks, x, y, bsize, half, ctx, sb_row, sb_col, cdf, update);
+        encode_rect_vert(ec, blocks, x, y + half, bsize, half, ctx, sb_row, sb_col, cdf, update);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_rect_vert(
+    ec: &mut DaalaCoder,
+    blocks: &[crate::encode::EncodedBlock],
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    ctx: &mut PartCtx,
+    sb_row: usize,
+    sb_col: usize,
+    cdf: &mut FrameCdfContext,
+    update: bool,
+) {
+    let mi_col = x / 4;
+    let mi_row = (y % 64) / 4;
+    let mi_w = w / 4;
+    let mi_h = h / 4;
+    let half_w = w / 2;
+
+    let bw_log2 = mi_log2(w);
+    let bh_log2 = mi_log2(h);
+    let group = split_group(w, h);
+    let rect_above = ctx.above_part[mi_col..mi_col + mi_w].to_vec();
+    let rect_left = ctx.left_part[mi_row..mi_row + mi_h].to_vec();
+
+    let split_ctx = do_split_ctx(&rect_above, &rect_left, bw_log2, bh_log2, group);
+    encode_sym(ec, 1, &mut cdf.do_split_part[0][split_ctx.min(63)], update);
+
+    let rgroup = rect_split_group(w, h);
+    let rctx = rect_type_ctx(&rect_above, &rect_left, bw_log2, bh_log2, rgroup);
+    encode_sym(ec, 1, &mut cdf.rect_type[0][rctx.min(63)], update);
+
+    encode_sq_part(ec, blocks, x, y, half_w, ctx, sb_row, sb_col, cdf, update);
+    encode_sq_part(ec, blocks, x + half_w, y, half_w, ctx, sb_row, sb_col, cdf, update);
+}
+
 pub fn encode_tile_data_split4(
     sb_cols: usize,
     sb_rows: usize,
     sbs: &[EncodedSuperblock],
-    _allow_update_cdf: bool,
+    allow_update_cdf: bool,
     base_qindex: u8,
 ) -> Vec<u8> {
     let mut ec = DaalaCoder::new();
     let mut cdf = FrameCdfContext::new_with_qindex(base_qindex);
-    let update = false;
+    let update = allow_update_cdf;
 
     let mi_cols = sb_cols * 16;
     let mut above_part = vec![0u8; mi_cols];
-    let mut above_y = vec![0u8; sb_cols * 16];
-    let mut above_u = vec![0u8; sb_cols * 8];
-    let mut above_v = vec![0u8; sb_cols * 8];
+    let mut above_y = vec![0u8; mi_cols];
+    let mut above_u = vec![0u8; mi_cols / 2];
+    let mut above_v = vec![0u8; mi_cols / 2];
+    let mut above_mode: Vec<Option<usize>> = vec![None; mi_cols];
 
     for sb_row in 0..sb_rows {
         let mut left_part = vec![0u8; 16];
-        let mut left_y = [0u8; 16];
-        let mut left_u = [0u8; 8];
-        let mut left_v = [0u8; 8];
+        let mut left_y = vec![0u8; 16];
+        let mut left_u = vec![0u8; 8];
+        let mut left_v = vec![0u8; 8];
+        let mut left_mode: Vec<Option<usize>> = vec![None; 16];
 
         for sb_col in 0..sb_cols {
             let sb = &sbs[sb_row * sb_cols + sb_col];
@@ -1004,200 +1276,55 @@ pub fn encode_tile_data_split4(
             let sb_above = above_part[mi_col..mi_col + 16].to_vec();
             let sb_left = left_part[..16].to_vec();
 
-            // 64x64: do_split=1 (SPLIT_CTX_MODE, bsize_map[64x64]=3)
             let ctx_64 = do_split_ctx(&sb_above, &sb_left, 4, 4, 3);
-            eprintln!("[ENC_PART] 64x64 do_split=1 ctx={} rng=0x{:04x} cnt={}", ctx_64, ec.rng(), ec.cnt());
             encode_sym(&mut ec, 1, &mut cdf.do_split_part[0][ctx_64.min(63)], update);
 
-            // 64x64: rect_type=0 (HORZ) (RECT_TYPE_CTX_MODE, bsize_rect_map[64x64]=6)
             let rctx_64 = rect_type_ctx(&sb_above, &sb_left, 4, 4, 6);
-            eprintln!("[ENC_PART] 64x64 rect_type=0 ctx={} rng=0x{:04x} cnt={}", rctx_64, ec.rng(), ec.cnt());
             encode_sym(&mut ec, 0, &mut cdf.rect_type[0][rctx_64.min(63)], update);
 
-            // Block positions: top-left, top-right, bottom-left, bottom-right
-            let block_positions: [(usize, usize); 4] = [
-                (0, 0), (32, 0), (0, 32), (32, 32),
-            ];
+            for half_idx in 0..2u32 {
+                let half_mi_row = half_idx as usize * 8;
 
-            // Process two 64x32 halves (top then bottom)
-            for half_idx in 0..2 {
-                let temp_above: Vec<u8>;
-                let temp_left: Vec<u8>;
+                let half_above: Vec<u8> = above_part[mi_col..mi_col + 16].to_vec();
+                let half_left: Vec<u8> = left_part[half_mi_row..half_mi_row + 8].to_vec();
 
-                if half_idx == 0 {
-                    temp_above = sb_above.clone();
-                    temp_left = sb_left[..8].to_vec();
-                } else {
-                    // After top-left and top-right 32x32 leaves updated context
-                    temp_above = above_part[mi_col..mi_col + 16].to_vec();
-                    temp_left = left_part[8..16].to_vec();
-                }
-
-                // 64x32: do_split=1 (bsize_map[64x32]=3, bw_log2=4, bh_log2=3)
-                let ctx_rect = do_split_ctx(&temp_above, &temp_left, 4, 3, 3);
-                eprintln!("[ENC_PART] 64x32[{}] do_split=1 ctx={} rng=0x{:04x} cnt={}", half_idx, ctx_rect, ec.rng(), ec.cnt());
+                let ctx_rect = do_split_ctx(&half_above, &half_left, 4, 3, 3);
                 encode_sym(&mut ec, 1, &mut cdf.do_split_part[0][ctx_rect.min(63)], update);
 
-                // 64x32: rect_type=1 (VERT) (bsize_rect_map[64x32]=5)
-                let rctx_rect = rect_type_ctx(&temp_above, &temp_left, 4, 3, 5);
-                eprintln!("[ENC_PART] 64x32[{}] rect_type=1 ctx={} rng=0x{:04x} cnt={}", half_idx, rctx_rect, ec.rng(), ec.cnt());
+                let rctx_rect = rect_type_ctx(&half_above, &half_left, 4, 3, 5);
                 encode_sym(&mut ec, 1, &mut cdf.rect_type[0][rctx_rect.min(63)], update);
 
-                // Process two 32x32 sub-blocks (left then right)
-                for sub_idx in 0..2 {
-                    let blk_idx = half_idx * 2 + sub_idx;
-                    let block = &sb.y_blocks[blk_idx];
+                let sb_x = sb_col * 64;
+                let sb_y = sb_row * 64;
+                for sub_idx in 0..2u32 {
+                    let bx = sb_x + sub_idx as usize * 32;
+                    let by = sb_y + half_idx as usize * 32;
 
-                    let (bx, by) = block_positions[blk_idx];
-                    let blk_mi_col = mi_col + bx / 4;
-                    let blk_mi_row = by / 4;
+                    let blk_blocks: Vec<crate::encode::EncodedBlock> = sb.y_blocks.iter()
+                        .filter(|b| b.x >= bx && b.x < bx + 32 && b.y >= by && b.y < by + 32)
+                        .cloned()
+                        .collect();
 
-                    let blk_above: Vec<u8>;
-                    let blk_left: Vec<u8>;
-                    if sub_idx == 0 {
-                        blk_above = temp_above[..8].to_vec();
-                        blk_left = temp_left.clone();
-                    } else {
-                        // After first 32x32 leaf, partition context is updated
-                        blk_above = above_part[blk_mi_col..blk_mi_col + 8].to_vec();
-                        blk_left = vec![56u8; 8]; // 32x32 leaf sets partition ctx to 56
-                    }
-
-                    // 32x32: do_split=0 (PARTITION_NONE) (bsize_map[32x32]=2)
-                    let ctx_32 = do_split_ctx(&blk_above, &blk_left, 3, 3, 2);
-                    eprintln!("[ENC_PART] 32x32[{},{}] do_split=0 ctx={} rng=0x{:04x} cnt={}", half_idx, sub_idx, ctx_32, ec.rng(), ec.cnt());
-                    encode_sym(&mut ec, 0, &mut cdf.do_split_part[0][ctx_32.min(63)], update);
-
-                    // Mode signaling (must use proper y_mode_list / joint index encoding)
-                    let y_intra = block.mode;
-                    let uv_intra = block.uv_mode;
-
-                    let left_j = if sub_idx > 0 {
-                        Some(sb.y_blocks[blk_idx - 1].mode.joint_y_index())
-                    } else if half_idx > 0 && sub_idx == 0 {
-                        Some(sb.y_blocks[blk_idx - 2].mode.joint_y_index())
-                    } else if sb_col > 0 {
-                        None // For simplicity, use None for cross-SB context
-                    } else {
-                        None
-                    };
-                    let above_j = if half_idx > 0 {
-                        Some(sb.y_blocks[blk_idx - 2].mode.joint_y_index())
-                    } else if sb_row > 0 {
-                        None // For simplicity, use None for cross-SB context
-                    } else {
-                        None
-                    };
-
-                    let y_list = crate::encode::build_y_mode_list(left_j, above_j, true, false);
-                    let y_joint = y_intra.joint_y_index();
-                    let y_mode_idx = crate::encode::find_mode_idx_in_list(&y_list, y_joint);
-
-                    let uv_list = crate::encode::build_uv_mode_list(y_intra);
-                    let uv_mode_idx = crate::encode::find_uv_mode_idx(&uv_list, uv_intra);
-                    let uv_ctx = if y_intra.is_directional() { 1 } else { 0 };
-
-                    let is_left_dir = left_j.map(|j| j >= 5).unwrap_or(false);
-                    let is_above_dir = above_j.map(|j| j >= 5).unwrap_or(false);
-                    let y_mode_idx_ctx = is_left_dir as usize + is_above_dir as usize;
-
-                    eprintln!("[ENC_MODE] block[{},{}] y_mode={:?} y_joint={} y_mode_idx={} y_ctx={} uv_mode={:?} uv_idx={} uv_ctx={} rng=0x{:04x} cnt={}", 
-                             half_idx, sub_idx, y_intra, y_joint, y_mode_idx, y_mode_idx_ctx, uv_intra, uv_mode_idx, uv_ctx, ec.rng(), ec.cnt());
-                    encode_y_mode(&mut ec, y_mode_idx, y_mode_idx_ctx, &mut cdf, update);
-                    eprintln!("[ENC_MODE] AFTER y_mode rng=0x{:04x} cnt={}", ec.rng(), ec.cnt());
-                    encode_uv_mode(&mut ec, uv_mode_idx, uv_ctx, &mut cdf, update);
-                    eprintln!("[ENC_MODE] AFTER uv_mode rng=0x{:04x} cnt={}", ec.rng(), ec.cnt());
-
-                    // Y coefficients (32x32: txs_ctx_idx=3, bwl=5, height=32, 1024 coeffs)
-                    let y_mi_size = 8usize;
-                    let y_above_slice = &above_y[blk_mi_col..blk_mi_col + y_mi_size];
-                    let y_left_slice: Vec<u8> = if bx == 0 {
-                        left_y[blk_mi_row..blk_mi_row + y_mi_size].to_vec()
-                    } else {
-                        // Right block: use updated above_y from left sibling
-                        above_y[blk_mi_col..blk_mi_col + y_mi_size].to_vec()
-                    };
-
-                    let y_dc_sign_ctx = compute_dc_sign_ctx(y_above_slice, &y_left_slice);
-                    let y_entropy_ctx = compute_entropy_ctx(y_above_slice, &y_left_slice);
-
-                    let y_coeffs = PlaneCoeffs { levels: &block.levels, eob: block.eob };
-                    encode_plane_full(&mut ec, &y_coeffs, &PlaneEncodeCtx {
-                        plane: 0, txs_ctx_idx: 3, bwl: 5, height: 32, num_coeffs: 1024,
-                        txb_skip_icdf: &TXB_SKIP_Y_ICDF[3][y_entropy_ctx],
-                        dc_sign_ctx: y_dc_sign_ctx, entropy_ctx: y_entropy_ctx, u_has_coeffs: false,
-                    }, &mut cdf, update);
-
-                    eprintln!("[ENC_COEFF] AFTER Y block[{},{}] eob={} rng=0x{:04x} cnt={}", half_idx, sub_idx, block.eob, ec.rng(), ec.cnt());
-                    let y_cul = compute_cul_level(&block.levels, block.eob);
-                    for v in &mut above_y[blk_mi_col..blk_mi_col + y_mi_size] { *v = y_cul; }
-                    if bx == 0 {
-                        for i in blk_mi_row..blk_mi_row + y_mi_size { left_y[i] = y_cul; }
-                    } else {
-                        // Right block left context doesn't go to SB-level left
-                    }
-
-                    // U coefficients (16x16: txs_ctx_idx=2, bwl=4, height=16, 256 coeffs)
-                    let uv_mi_col = blk_mi_col / 2;
-                    let uv_mi_row = blk_mi_row / 2;
-                    let uv_mi_size = 4usize;
-
-                    let u_above_slice = &above_u[uv_mi_col..uv_mi_col + uv_mi_size];
-                    let u_left_slice: Vec<u8> = if bx == 0 {
-                        left_u[uv_mi_row..uv_mi_row + uv_mi_size].to_vec()
-                    } else {
-                        above_u[uv_mi_col..uv_mi_col + uv_mi_size].to_vec()
-                    };
-
-                    let u_entropy_ctx = compute_entropy_ctx(u_above_slice, &u_left_slice);
-                    let u_coeffs = PlaneCoeffs { levels: &block.u_levels, eob: block.u_eob };
-                    encode_plane_full(&mut ec, &u_coeffs, &PlaneEncodeCtx {
-                        plane: 1, txs_ctx_idx: 2, bwl: 4, height: 16, num_coeffs: 256,
-                        txb_skip_icdf: &TXB_SKIP_Y_ICDF[2][u_entropy_ctx + 6],
-                        dc_sign_ctx: 0, entropy_ctx: u_entropy_ctx, u_has_coeffs: false,
-                    }, &mut cdf, update);
-
-                    eprintln!("[ENC_TXB] AFTER U block[{},{}] eob={} rng=0x{:04x} cnt={}", half_idx, sub_idx, block.u_eob, ec.rng(), ec.cnt());
-                    let u_cul = compute_cul_level_vec(&block.u_levels, block.u_eob);
-                    for v in &mut above_u[uv_mi_col..uv_mi_col + uv_mi_size] { *v = u_cul; }
-                    if bx == 0 {
-                        for i in uv_mi_row..uv_mi_row + uv_mi_size { left_u[i] = u_cul; }
-                    }
-
-                    // V coefficients
-                    let v_above_slice = &above_v[uv_mi_col..uv_mi_col + uv_mi_size];
-                    let v_left_slice: Vec<u8> = if bx == 0 {
-                        left_v[uv_mi_row..uv_mi_row + uv_mi_size].to_vec()
-                    } else {
-                        above_v[uv_mi_col..uv_mi_col + uv_mi_size].to_vec()
-                    };
-
-                    let v_entropy_ctx = compute_entropy_ctx(v_above_slice, &v_left_slice);
-                    let v_coeffs = PlaneCoeffs { levels: &block.v_levels, eob: block.v_eob };
-                    encode_plane_full(&mut ec, &v_coeffs, &PlaneEncodeCtx {
-                        plane: 2, txs_ctx_idx: 2, bwl: 4, height: 16, num_coeffs: 256,
-                        txb_skip_icdf: &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx],
-                        dc_sign_ctx: 0, entropy_ctx: v_entropy_ctx, u_has_coeffs: block.u_eob > 0,
-                    }, &mut cdf, update);
-
-                    eprintln!("[ENC_TXB] AFTER V block[{},{}] eob={} rng=0x{:04x} cnt={}", half_idx, sub_idx, block.v_eob, ec.rng(), ec.cnt());
-                    let v_cul = compute_cul_level_vec(&block.v_levels, block.v_eob);
-                    for v in &mut above_v[uv_mi_col..uv_mi_col + uv_mi_size] { *v = v_cul; }
-                    if bx == 0 {
-                        for i in uv_mi_row..uv_mi_row + uv_mi_size { left_v[i] = v_cul; }
-                    }
-
-                    eprintln!("[ENC_LEAF] AFTER block[{},{}] mi=({},{}) rng=0x{:04x} cnt={}", half_idx, sub_idx, blk_mi_row, blk_mi_col, ec.rng(), ec.cnt());
-
-                    // Update partition context: 32x32 leaf → partition_context_lookup[BLOCK_32X32] = {56, 56}
-                    let part_val = 56u8;
-                    for v in &mut above_part[blk_mi_col..blk_mi_col + 8] { *v = part_val; }
-                    if bx == 0 {
-                        for i in blk_mi_row..blk_mi_row + 8 { left_part[i] = part_val; }
-                    } else {
-                        // Right block doesn't affect SB left context
+                    {
+                        let mut pctx = PartCtx {
+                            above_part: &mut above_part,
+                            left_part: &mut left_part,
+                            above_y: &mut above_y,
+                            left_y: &mut left_y,
+                            above_u: &mut above_u,
+                            left_u: &mut left_u,
+                            above_v: &mut above_v,
+                            left_v: &mut left_v,
+                            above_mode: &mut above_mode,
+                            left_mode: &mut left_mode,
+                        };
+                        encode_sq_part(
+                            &mut ec, &blk_blocks, bx, by, 32,
+                            &mut pctx, sb_row, sb_col, &mut cdf, update,
+                        );
                     }
                 }
+
             }
         }
     }
@@ -1230,6 +1357,13 @@ fn num_coeffs_for_bsize(bsize: usize) -> usize {
     match bsize {
         4 => 16, 8 => 64, 16 => 256, 32 | 64 => 1024,
         _ => panic!("unsupported bsize {}", bsize),
+    }
+}
+
+fn tx_size_sqr_for_bsize(bsize: usize) -> usize {
+    match bsize {
+        4 => 0, 8 => 1, 16 => 2, 32 | 64 => 3,
+        _ => 3,
     }
 }
 
@@ -1329,19 +1463,23 @@ fn encode_partition_and_coeffs(
             }
 
             let y_dc_sign_ctx = compute_dc_sign_ctx(above_y, left_y);
+            let y_tx_sqr = tx_size_sqr_for_bsize(bsize);
             let coeffs = PlaneCoeffs { levels: &block.levels, eob: block.eob };
             encode_plane_full(ec, &coeffs, &PlaneEncodeCtx {
                 plane: 0, txs_ctx_idx: txs_ctx, bwl, height: h, num_coeffs: nc,
                 txb_skip_icdf: &TXB_SKIP_Y_ICDF[txs_ctx][0],
                 dc_sign_ctx: y_dc_sign_ctx, entropy_ctx: 0, u_has_coeffs: false,
+                tx_size_sqr: y_tx_sqr,
             }, cdf, update);
 
+            let uv_tx_sqr = tx_size_sqr_for_bsize(uv_bsize);
             let u_entropy_ctx = compute_entropy_ctx(above_u, left_u);
             let u_coeffs = PlaneCoeffs { levels: &block.u_levels, eob: block.u_eob };
             encode_plane_full(ec, &u_coeffs, &PlaneEncodeCtx {
                 plane: 1, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
                 txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
                 dc_sign_ctx: 0, entropy_ctx: u_entropy_ctx, u_has_coeffs: false,
+                tx_size_sqr: uv_tx_sqr,
             }, cdf, update);
 
             let v_entropy_ctx = compute_entropy_ctx(above_v, left_v);
@@ -1350,6 +1488,7 @@ fn encode_partition_and_coeffs(
                 plane: 2, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
                 txb_skip_icdf: &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx],
                 dc_sign_ctx: 0, entropy_ctx: v_entropy_ctx, u_has_coeffs: block.u_eob > 0,
+                tx_size_sqr: uv_tx_sqr,
             }, cdf, update);
         }
         PartitionNode::Split(children) => {
@@ -1381,8 +1520,15 @@ fn collect_leaves(node: &PartitionNode, out: &mut Vec<usize>) {
 
 fn compute_cul_level_vec(levels: &[i32], eob: u16) -> u8 {
     if eob == 0 { return 0; }
-    let sum: usize = levels[..eob as usize].iter().map(|&l| l.unsigned_abs() as usize).sum();
-    sum.min(COEFF_CONTEXT_MASK as usize) as u8
+    let sum: u32 = levels[..eob as usize].iter().map(|&l| l.unsigned_abs()).sum();
+    let mut cul = sum.min(COEFF_CONTEXT_MASK as u32) as u8;
+    let dc = levels[0];
+    if dc < 0 {
+        cul |= 1 << COEFF_CONTEXT_BITS;
+    } else if dc > 0 {
+        cul += 2 << COEFF_CONTEXT_BITS;
+    }
+    cul
 }
 
 pub fn encode_tile_data_partitioned(
@@ -1466,8 +1612,8 @@ mod tests {
     use crate::encode::{EncodedBlock, EncodedSuperblock, IntraMode};
 
     #[test]
-    fn partitioned_matches_legacy_for_none() {
-        let mut sb_old = SbCoeffs {
+    fn partitioned_matches_flat_sb_for_none() {
+        let mut flat_sb = SbCoeffs {
             y_levels: [0i32; 1024],
             y_eob: 0,
             u_levels: [0i32; 1024],
@@ -1477,12 +1623,12 @@ mod tests {
             y_mode: 0,
             uv_mode: 0,
         };
-        sb_old.y_levels[0] = 100;
-        sb_old.y_eob = 1;
+        flat_sb.y_levels[0] = 100;
+        flat_sb.y_eob = 1;
 
-        let old_data = encode_tile_data_multi_sb(1, 1, &[sb_old], false, 50);
+        let flat_sb_data = encode_tile_data_multi_sb(1, 1, &[flat_sb], false, 50);
 
-        let sb_new = EncodedSuperblock {
+        let partitioned_sb = EncodedSuperblock {
             y_blocks: vec![EncodedBlock {
                 x: 0, y: 0, bsize: 64,
                 mode: IntraMode::DcPred,
@@ -1506,20 +1652,20 @@ mod tests {
             uv_mode: IntraMode::DcPred,
         };
 
-        let new_data = encode_tile_data_partitioned(1, 1, &[sb_new], false, 50);
+        let partitioned_data = encode_tile_data_partitioned(1, 1, &[partitioned_sb], false, 50);
 
         assert_eq!(
-            old_data, new_data,
-            "PART_NONE should match legacy\nold len={} new len={}\nold: {:02x?}\nnew: {:02x?}",
-            old_data.len(), new_data.len(),
-            &old_data[..old_data.len().min(20)],
-            &new_data[..new_data.len().min(20)],
+            flat_sb_data, partitioned_data,
+            "PART_NONE should match flat-SB encoding\nflat-SB len={} partitioned len={}\nflat-SB: {:02x?}\npartitioned: {:02x?}",
+            flat_sb_data.len(), partitioned_data.len(),
+            &flat_sb_data[..flat_sb_data.len().min(20)],
+            &partitioned_data[..partitioned_data.len().min(20)],
         );
     }
 
     #[test]
-    fn partitioned_matches_legacy_with_uv() {
-        let mut sb_old = SbCoeffs {
+    fn partitioned_matches_flat_sb_with_uv() {
+        let mut flat_sb = SbCoeffs {
             y_levels: [0i32; 1024],
             y_eob: 0,
             u_levels: [0i32; 1024],
@@ -1529,16 +1675,16 @@ mod tests {
             y_mode: 0,
             uv_mode: 0,
         };
-        sb_old.y_levels[0] = 100;
-        sb_old.y_eob = 1;
-        sb_old.u_levels[0] = 50;
-        sb_old.u_eob = 1;
-        sb_old.v_levels[0] = -30;
-        sb_old.v_eob = 1;
+        flat_sb.y_levels[0] = 100;
+        flat_sb.y_eob = 1;
+        flat_sb.u_levels[0] = 50;
+        flat_sb.u_eob = 1;
+        flat_sb.v_levels[0] = -30;
+        flat_sb.v_eob = 1;
 
-        let old_data = encode_tile_data_multi_sb(1, 1, &[sb_old], false, 50);
+        let flat_sb_data = encode_tile_data_multi_sb(1, 1, &[flat_sb], false, 50);
 
-        let sb_new = EncodedSuperblock {
+        let partitioned_sb = EncodedSuperblock {
             y_blocks: vec![EncodedBlock {
                 x: 0, y: 0, bsize: 64,
                 mode: IntraMode::DcPred,
@@ -1570,14 +1716,14 @@ mod tests {
             uv_mode: IntraMode::DcPred,
         };
 
-        let new_data = encode_tile_data_partitioned(1, 1, &[sb_new], false, 50);
+        let partitioned_data = encode_tile_data_partitioned(1, 1, &[partitioned_sb], false, 50);
 
         assert_eq!(
-            old_data, new_data,
-            "PART_NONE with UV should match legacy\nold len={} new len={}\nold: {:02x?}\nnew: {:02x?}",
-            old_data.len(), new_data.len(),
-            &old_data[..old_data.len().min(20)],
-            &new_data[..new_data.len().min(20)],
+            flat_sb_data, partitioned_data,
+            "PART_NONE with UV should match flat-SB encoding\nflat-SB len={} partitioned len={}\nflat-SB: {:02x?}\npartitioned: {:02x?}",
+            flat_sb_data.len(), partitioned_data.len(),
+            &flat_sb_data[..flat_sb_data.len().min(20)],
+            &partitioned_data[..partitioned_data.len().min(20)],
         );
     }
 

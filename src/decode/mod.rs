@@ -148,7 +148,7 @@ impl Decoder {
                 let use_partitioned =
                     !sb_aligned || fp.tx_mode_select || seq.enable_sdp || seq.enable_ibp;
                 if !use_partitioned {
-                    let legacy_result =
+                    let flat_sb_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let decoded_sbs = tile::decode_tile_data_multi_sb(
                                 fp.tile_data,
@@ -166,7 +166,7 @@ impl Decoder {
                                 dequant,
                             )
                         }));
-                    match legacy_result {
+                    match flat_sb_result {
                         Ok(planes) => planes,
                         Err(_) => {
                             let partitioned_result =
@@ -192,7 +192,7 @@ impl Decoder {
                                         &fp.ccso_params,
                                     )
                                 }));
-                            partitioned_result.unwrap_or_else(|e| {
+                            partitioned_result.unwrap_or_else(|_e| {
                                 gray_frame(seq.width, seq.height)
                             })
                         }
@@ -2491,6 +2491,152 @@ fn reconstruct_partitioned_frame(
                     );
                     (u_p, v_p)
                 } else {
+                    let exact_uv_single_tu = tu_count == 1
+                        && uv_bw == 16
+                        && uv_bh == 16
+                        && block.uv_mode <= 12
+                        && !block.is_intrabc
+                        && block.cfl_idx == 0
+                        && block.mhccp_dir == 0
+                        && block.u_tu[0].cctx_type == 0
+                        && block.v_tu[0].cctx_type == 0
+                        && block.u_tu[0].tx_type == 0
+                        && block.v_tu[0].tx_type == 0
+                        && block.u_tu[0].row_offset == 0
+                        && block.u_tu[0].col_offset == 0
+                        && block.v_tu[0].row_offset == 0
+                        && block.v_tu[0].col_offset == 0
+                        && block.u_tu[0].tx_size.width() == uv_bw
+                        && block.u_tu[0].tx_size.height() == uv_bh
+                        && block.v_tu[0].tx_size.width() == uv_bw
+                        && block.v_tu[0].tx_size.height() == uv_bh;
+
+                    if exact_uv_single_tu {
+                        let uv_mode = crate::encode::IntraMode::from_av2(block.uv_mode);
+                        let u_tu = &block.u_tu[0];
+                        let v_tu = &block.v_tu[0];
+
+                        let mut u_dq = transform::dequantize_only(
+                            &u_tu.levels,
+                            u_tu.eob,
+                            uv_dequant,
+                            u_tu.tx_size,
+                            u_tu.tx_type,
+                            tcq_mode,
+                        );
+                        let mut v_dq = transform::dequantize_only(
+                            &v_tu.levels,
+                            v_tu.eob,
+                            uv_dequant,
+                            v_tu.tx_size,
+                            v_tu.tx_type,
+                            tcq_mode,
+                        );
+
+                        let mut u_dq_arr = [0i32; 256];
+                        u_dq_arr.copy_from_slice(&u_dq[..256]);
+                        let mut v_dq_arr = [0i32; 256];
+                        v_dq_arr.copy_from_slice(&v_dq[..256]);
+                        let u_res = crate::dct::inverse_dct2_16x16(&u_dq_arr).to_vec();
+                        let v_res = crate::dct::inverse_dct2_16x16(&v_dq_arr).to_vec();
+
+                        let u_pred = crate::encode::predict_intra_block_uv(
+                            &u_plane,
+                            uv_w,
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_mode,
+                        );
+                        let v_pred = crate::encode::predict_intra_block_uv(
+                            &v_plane,
+                            uv_w,
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_mode,
+                        );
+
+                        reconstruct_tu(
+                            &mut u_plane,
+                            uv_w,
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_bh,
+                            &u_pred,
+                            uv_bw,
+                            0,
+                            0,
+                            &u_res,
+                        );
+                        reconstruct_tu(
+                            &mut v_plane,
+                            uv_w,
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_bh,
+                            &v_pred,
+                            uv_bw,
+                            0,
+                            0,
+                            &v_res,
+                        );
+
+                        trace_uv_recon_tu(
+                            1,
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_bh,
+                            u_tu.tx_size,
+                            u_tu.tx_type,
+                            u_tu.eob,
+                            &u_tu.levels,
+                            &u_dq,
+                            &u_res,
+                            &u_pred,
+                            uv_bw,
+                            0,
+                            0,
+                            &u_plane,
+                            uv_w,
+                        );
+                        trace_uv_recon_tu(
+                            2,
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_bh,
+                            v_tu.tx_size,
+                            v_tu.tx_type,
+                            v_tu.eob,
+                            &v_tu.levels,
+                            &v_dq,
+                            &v_res,
+                            &v_pred,
+                            uv_bw,
+                            0,
+                            0,
+                            &v_plane,
+                            uv_w,
+                        );
+
+                        mark_region_ready(&mut u_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
+                        mark_region_ready(&mut v_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
+                        mark_region_filter(
+                            &mut uv_filter,
+                            uv_w,
+                            uv_bx,
+                            uv_by,
+                            uv_bw,
+                            uv_bh,
+                            block_uv_filter_type,
+                        );
+                        continue;
+                    }
+
                     for i in 0..tu_count {
                         let u_tu = &block.u_tu[i];
                         let v_tu = &block.v_tu[i];
@@ -3156,6 +3302,7 @@ fn reconstruct_frame(
     (y_plane, u_plane, v_plane)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3362,7 +3509,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "CDF adaptation internal roundtrip needs legacy decoder update for 13-mode support"]
+    #[ignore = "CDF adaptation internal roundtrip needs flat-SB decoder update for 13-mode support"]
     fn roundtrip_cdf_adaptation_128x128() {
         let y = vec![160u8; 128 * 128];
         let u = vec![128u8; 64 * 64];

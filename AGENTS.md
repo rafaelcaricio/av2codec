@@ -23,6 +23,7 @@ Execute phases sequentially. Each phase follows this cycle:
 
 - Never stop to ask questions — proceed with best approach
 - No code comments — self-documenting code through clear naming
+- Name things by their domain meaning and current role in the codec, never by timeline or migration framing; avoid names like `legacy`, `new`, `old`, or similar labels inside the codebase
 - Tasks only done when code compiles with all features working
 - Use subagent development for parallel work
 - All tests must pass before committing (cargo test + cargo clippy --tests)
