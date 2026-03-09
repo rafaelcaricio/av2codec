@@ -158,7 +158,7 @@ impl Encoder {
                 order_hint: self.order_hint,
                 enable_partitioning: false,
             },
-            std::env::var("WAV2C_NO_CDF_UPDATE").is_err(),
+            true,
         );
 
         let frame_number = self.order_hint as u64;
@@ -1422,14 +1422,6 @@ fn encode_block_var(
     let block = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
     let mode = forced_mode.unwrap_or_else(|| select_intra_mode(&block, &refs, bsize));
     let pred_block = predict_block(&refs, bsize, mode);
-    if std::env::var("WAV2C_DEBUG_BLOCKS").is_ok() {
-        eprintln!("BLOCK ({},{}) {}x{} mode={:?} above[0..4]={:?} left[0..4]={:?} ar={} bl={} pred[0..4]={:?}",
-            x, y, bsize, bsize, mode,
-            &refs.above[..4.min(refs.above.len())],
-            &refs.left[..4.min(refs.left.len())],
-            refs.above_right, refs.below_left,
-            &pred_block[..4.min(pred_block.len())]);
-    }
     let residual = compute_residual_block(&block, &pred_block);
 
     if bsize == 64 {
@@ -1859,13 +1851,6 @@ fn encode_frame_yuv(
                 y_blocks.extend(leaf_blocks);
             }
 
-            if std::env::var("WAV2C_DEBUG_BLOCKS").is_ok() {
-                eprintln!("SB({},{}) FINAL blocks:", sb_x, sb_y);
-                for b in &y_blocks {
-                    eprintln!("  FINAL ({},{}) {}x{} mode={:?}", b.x, b.y, b.bsize, b.bsize, b.mode);
-                }
-            }
-
             sbs.push(EncodedSuperblock {
                 y_blocks,
                 u_levels: [0i32; 1024],
@@ -1875,11 +1860,6 @@ fn encode_frame_yuv(
                 uv_mode: IntraMode::DcPred,
             });
         }
-    }
-
-    if let Ok(path) = std::env::var("WAV2C_DUMP_RECON") {
-        std::fs::write(&path, &recon_y).unwrap();
-        eprintln!("Dumped encoder recon Y ({} bytes) to {}", recon_y.len(), path);
     }
 
     let tile_data = tile::encode_tile_data_split4(sb_cols, sb_rows, &sbs, allow_cdf_update, params.base_qindex);

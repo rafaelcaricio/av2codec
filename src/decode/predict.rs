@@ -274,22 +274,6 @@ pub struct IntraPredictControl {
     pub left_filter_type: usize,
 }
 
-fn trace_intra_block_match(x: usize, y: usize) -> bool {
-    match std::env::var("WAV2C_TRACE_INTRA") {
-        Ok(spec) => {
-            let mut parts = spec.split(',');
-            let sx = parts
-                .next()
-                .and_then(|value| value.trim().parse::<usize>().ok());
-            let sy = parts
-                .next()
-                .and_then(|value| value.trim().parse::<usize>().ok());
-            sx == Some(x) && sy == Some(y)
-        }
-        Err(_) => false,
-    }
-}
-
 struct PreparedRefs {
     above: Vec<u8>,
     left: Vec<u8>,
@@ -612,18 +596,6 @@ fn predict_directional(
             }
         }
 
-        if trace_intra_block_match(x, y) {
-            for row in 0..h {
-                eprintln!(
-                    "[WAV2C_INTRA_PRED] xy=({}, {}) y={} row={:?}",
-                    x,
-                    y,
-                    row,
-                    &pred[row * w..(row + 1) * w]
-                );
-            }
-        }
-
         return pred;
     }
 
@@ -677,18 +649,6 @@ fn predict_directional(
                 );
                 apply_ibp_directional_zone3(&mut pred, &second, w, h, mode_index, 270 - p_angle);
             }
-        }
-    }
-
-    if trace_intra_block_match(x, y) {
-        for row in 0..h {
-            eprintln!(
-                "[WAV2C_INTRA_PRED] xy=({}, {}) y={} row={:?}",
-                x,
-                y,
-                row,
-                &pred[row * w..(row + 1) * w]
-            );
         }
     }
 
@@ -844,24 +804,6 @@ fn prepare_intra_refs(
         DEFAULT_TOP_LEFT
     };
 
-    if trace_intra_block_match(x, y) {
-        eprintln!(
-            "[WAV2C_INTRA_REFS] xy=({}, {}) size={}x{} mode={:?} n_top={} n_top_right={} n_left={} n_bottom_left={} top_left={} above={:?} left={:?}",
-            x,
-            y,
-            w,
-            h,
-            mode,
-            n_top_px,
-            n_topright_px,
-            n_left_px,
-            n_bottomleft_px,
-            top_left,
-            above,
-            left
-        );
-    }
-
     PreparedRefs {
         above,
         left,
@@ -960,24 +902,6 @@ fn prepare_directional_refs(
     } else {
         DEFAULT_TOP_LEFT
     };
-
-    if trace_intra_block_match(x, y) {
-        eprintln!(
-            "[WAV2C_INTRA_REFS] xy=({}, {}) size={}x{} p_angle={} n_top={} n_top_right={} n_left={} n_bottom_left={} top_left={} above={:?} left={:?}",
-            x,
-            y,
-            w,
-            h,
-            p_angle,
-            n_top_px,
-            n_topright_px,
-            n_left_px,
-            n_bottomleft_px,
-            top_left,
-            above,
-            left
-        );
-    }
 
     PreparedRefs {
         above,
@@ -1903,19 +1827,7 @@ fn predict_smooth(
     availability: Option<&[bool]>,
 ) -> Vec<u8> {
     let refs = prepare_intra_refs(recon, stride, x, y, w, h, mode, availability);
-    let pred = predict_smooth_from_refs(&refs.above, &refs.left, w, h, mode);
-    if trace_intra_block_match(x, y) {
-        for row in 0..h {
-            eprintln!(
-                "[WAV2C_INTRA_PRED] xy=({}, {}) y={} row={:?}",
-                x,
-                y,
-                row,
-                &pred[row * w..(row + 1) * w]
-            );
-        }
-    }
-    pred
+    predict_smooth_from_refs(&refs.above, &refs.left, w, h, mode)
 }
 
 fn predict_smooth_from_refs(

@@ -1082,15 +1082,7 @@ fn encode_leaf_block(
     let is_above_dir = above_j.map(|j| j >= 5).unwrap_or(false);
     let y_mode_idx_ctx = is_left_dir as usize + is_above_dir as usize;
 
-    if std::env::var("WAV2C_DEBUG_EC").is_ok() {
-        eprintln!("[ENC_LEAF] BEFORE mi=({},{}) {}x{} mode={:?} joint={} mode_idx={} ctx={} rng=0x{:04x} cnt={}",
-            mi_row, mi_col, bsize, bsize, block.mode, y_joint, y_mode_idx, y_mode_idx_ctx,
-            ec.rng(), ec.cnt());
-    }
     encode_y_mode(ec, y_mode_idx, y_mode_idx_ctx, cdf, update);
-    if std::env::var("WAV2C_DEBUG_EC").is_ok() {
-        eprintln!("[ENC_LEAF] AFTER y_mode rng=0x{:04x} cnt={}", ec.rng(), ec.cnt());
-    }
     encode_uv_mode(ec, uv_mode_idx, uv_ctx, cdf, update);
 
     for i in 0..mi_size { ctx.above_mode[mi_col + i] = Some(y_joint); }
@@ -1283,11 +1275,6 @@ pub fn encode_tile_data_split4(
 
             let sb_above = above_part[mi_col..mi_col + 16].to_vec();
             let sb_left = left_part[..16].to_vec();
-
-            if std::env::var("WAV2C_DEBUG_EC").is_ok() {
-                eprintln!("[ENC_SB_START] pixel=({},{}) rng=0x{:04x} cnt={}",
-                    sb_col * 64, sb_row * 64, ec.rng(), ec.cnt());
-            }
 
             let ctx_64 = do_split_ctx(&sb_above, &sb_left, 4, 4, 3);
             encode_sym(&mut ec, 1, &mut cdf.do_split_part[0][ctx_64.min(63)], update);
