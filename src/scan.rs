@@ -181,12 +181,6 @@ pub const DEFAULT_SCAN_32X32: [u16; 1024] = [
     991, 1023,
 ];
 
-pub fn scan_pos_to_rc(pos: u16, bwl: u32) -> (u32, u32) {
-    let row = (pos as u32) >> bwl;
-    let col = (pos as u32) & ((1 << bwl) - 1);
-    (row, col)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,28 +204,6 @@ mod tests {
         for &val in &DEFAULT_SCAN_32X32 {
             assert!(val < 1024, "out of range: {}", val);
         }
-    }
-
-    #[test]
-    fn scan_pos_to_rc_dc() {
-        assert_eq!(scan_pos_to_rc(0, 5), (0, 0));
-    }
-
-    #[test]
-    fn scan_pos_to_rc_first_row() {
-        assert_eq!(scan_pos_to_rc(1, 5), (0, 1));
-        assert_eq!(scan_pos_to_rc(31, 5), (0, 31));
-    }
-
-    #[test]
-    fn scan_pos_to_rc_first_col() {
-        assert_eq!(scan_pos_to_rc(32, 5), (1, 0));
-        assert_eq!(scan_pos_to_rc(64, 5), (2, 0));
-    }
-
-    #[test]
-    fn scan_pos_to_rc_last() {
-        assert_eq!(scan_pos_to_rc(1023, 5), (31, 31));
     }
 
     #[test]

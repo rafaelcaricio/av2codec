@@ -293,10 +293,10 @@ const DEFAULT_MODE_LIST_Y: [usize; 56] = [
 ];
 
 pub fn build_y_mode_list(
-    _left_joint: Option<usize>,
-    _above_joint: Option<usize>,
-    _is_large_block: bool,
-    _is_small_block: bool,
+    left_joint: Option<usize>,
+    above_joint: Option<usize>,
+    is_large_block: bool,
+    is_small_block: bool,
 ) -> [i32; LUMA_MODE_COUNT] {
     let mut list = [-1i32; LUMA_MODE_COUNT];
     let mut selected = [false; LUMA_MODE_COUNT];
@@ -308,27 +308,27 @@ pub fn build_y_mode_list(
         idx += 1;
     }
 
-    if !_is_small_block {
-        let left_dir = _left_joint
+    if !is_small_block {
+        let left_dir = left_joint
             .filter(|&j| j >= NON_DIRECTIONAL_MODES_COUNT)
             .is_some();
-        let above_dir = _above_joint
+        let above_dir = above_joint
             .filter(|&j| j >= NON_DIRECTIONAL_MODES_COUNT)
             .is_some();
 
         let mut neighbor_joints: Vec<usize> = Vec::new();
 
         if left_dir && above_dir {
-            let lj = _left_joint.unwrap();
-            let aj = _above_joint.unwrap();
+            let lj = left_joint.unwrap();
+            let aj = above_joint.unwrap();
             neighbor_joints.push(lj);
             if lj != aj {
                 neighbor_joints.push(aj);
             }
         } else if above_dir {
-            neighbor_joints.push(_above_joint.unwrap());
+            neighbor_joints.push(above_joint.unwrap());
         } else if left_dir {
-            neighbor_joints.push(_left_joint.unwrap());
+            neighbor_joints.push(left_joint.unwrap());
         }
 
         for &nj in &neighbor_joints {
@@ -339,7 +339,7 @@ pub fn build_y_mode_list(
             }
         }
 
-        if _is_large_block {
+        if is_large_block {
             for i in 0..4 {
                 for &nj in &neighbor_joints {
                     let nj_off = nj as isize - NON_DIRECTIONAL_MODES_COUNT as isize;
@@ -678,26 +678,6 @@ fn get_ref_pixels(
                 above_ext,
                 left_ext,
             }
-        }
-    }
-}
-
-pub fn predict_dc(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> u8 {
-    let refs = get_ref_pixels(recon, stride, x, y, bsize, stride, recon.len() / stride);
-    match (refs.has_above, refs.has_left) {
-        (false, false) => 128,
-        (true, false) => {
-            let sum: u32 = refs.above.iter().map(|&v| v as u32).sum();
-            ((sum + bsize as u32 / 2) / bsize as u32) as u8
-        }
-        (false, true) => {
-            let sum: u32 = refs.left.iter().map(|&v| v as u32).sum();
-            ((sum + bsize as u32 / 2) / bsize as u32) as u8
-        }
-        (true, true) => {
-            let sum: u32 = refs.above.iter().map(|&v| v as u32).sum::<u32>()
-                + refs.left.iter().map(|&v| v as u32).sum::<u32>();
-            ((sum + bsize as u32) / (2 * bsize as u32)) as u8
         }
     }
 }
@@ -1632,43 +1612,6 @@ fn encode_frame_yuv(
     ObuWriter::pack_obu(ObuType::Clk, &clk_payload)
 }
 
-pub fn encode_still_image(width: u32, height: u32, base_qindex: u8) -> Vec<u8> {
-    let pw = round_up_to_64(width);
-    let ph = round_up_to_64(height);
-    encode_video(width, height, base_qindex, &[vec![128; (pw * ph) as usize]])
-}
-
-pub fn encode_video(width: u32, height: u32, base_qindex: u8, y_planes: &[Vec<u8>]) -> Vec<u8> {
-    let mut output = Vec::new();
-
-    let pw = round_up_to_64(width);
-    let ph = round_up_to_64(height);
-
-    let seq_config = SequenceHeaderConfig {
-        width: pw,
-        height: ph,
-    };
-    let seq_payload = write_sequence_header(&seq_config);
-    let seq_obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload);
-    output.extend_from_slice(&seq_obu);
-
-    for (i, _y_plane) in y_planes.iter().enumerate() {
-        let tile_data = tile::encode_tile_data();
-        let frame_config = FrameHeaderConfig {
-            width: pw,
-            height: ph,
-            base_qindex,
-            order_hint: i as u32,
-            disable_cdf_update: true,
-        };
-        let clk_payload = write_clk_obu_payload(&frame_config, &tile_data);
-        let clk_obu = ObuWriter::pack_obu(ObuType::Clk, &clk_payload);
-        output.extend_from_slice(&clk_obu);
-    }
-
-    output
-}
-
 pub fn encode_video_yuv(
     width: u32,
     height: u32,
@@ -1859,64 +1802,6 @@ mod tests {
     fn quantize_dc(residual: i32, log_scale: u32, dequant: i32) -> i32 {
         let dc_coeff = 128i64 * residual as i64;
         quantize_coeff(dc_coeff, log_scale, dequant)
-    }
-
-    #[test]
-    fn bitstream_starts_with_seq_header_obu() {
-        let bs = encode_still_image(64, 64, 50);
-        assert!(bs.len() > 13);
-        let obu_type = (bs[1] >> 2) & 0x1F;
-        assert_eq!(obu_type, 1, "first OBU should be SequenceHeader");
-    }
-
-    #[test]
-    fn bitstream_contains_two_obus() {
-        let bs = encode_still_image(64, 64, 50);
-        let seq_content_size = bs[0] as usize;
-        let second_obu_start = 1 + seq_content_size;
-        let remaining = &bs[second_obu_start..];
-        assert!(
-            !remaining.is_empty(),
-            "should have CLK OBU after seq header"
-        );
-        let clk_type = (remaining[1] >> 2) & 0x1F;
-        assert_eq!(clk_type, 4, "second OBU should be CLK");
-    }
-
-    #[test]
-    fn bitstream_reasonable_size() {
-        let bs = encode_still_image(64, 64, 50);
-        assert!(bs.len() <= 50, "bitstream too large: {} bytes", bs.len());
-    }
-
-    #[test]
-    fn encode_multiple_frames() {
-        let frames: Vec<Vec<u8>> = (0..3).map(|_| vec![128; 64 * 64]).collect();
-        let bs = encode_video(64, 64, 50, &frames);
-        let seq_header_obu_size = 1 + 1 + 17; // leb128 + header + payload
-        let single_clk_obu_size = 1 + 1 + 4 + 4; // leb128 + header + frame_header + tile_data (approx)
-        assert!(
-            bs.len() > seq_header_obu_size + single_clk_obu_size,
-            "bitstream too small: {} bytes",
-            bs.len()
-        );
-    }
-
-    #[test]
-    fn encode_video_has_correct_obu_count() {
-        let frames: Vec<Vec<u8>> = (0..5).map(|_| vec![128; 64 * 64]).collect();
-        let bs = encode_video(64, 64, 50, &frames);
-        let seq_content_size = bs[0] as usize;
-        let mut pos = 1 + seq_content_size;
-        let mut clk_count = 0;
-        while pos < bs.len() {
-            let obu_size = bs[pos] as usize;
-            let obu_type = (bs[pos + 1] >> 2) & 0x1F;
-            assert_eq!(obu_type, 4, "expected CLK OBU");
-            clk_count += 1;
-            pos += 1 + obu_size;
-        }
-        assert_eq!(clk_count, 5);
     }
 
     #[test]

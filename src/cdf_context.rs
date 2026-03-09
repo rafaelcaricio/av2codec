@@ -1,4 +1,3 @@
-use crate::block::TxSize;
 use crate::cdf_tables::*;
 use crate::cdf_tables_qctx::*;
 
@@ -868,9 +867,6 @@ impl FrameCdfContext {
         }
     }
 
-    pub fn txb_skip_y_for_tx(&mut self, tx_size: TxSize, entropy_ctx: usize) -> &mut Vec<u16> {
-        &mut self.txb_skip_y[tx_size.txs_ctx()][entropy_ctx]
-    }
 }
 
 #[cfg(test)]

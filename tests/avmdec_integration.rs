@@ -59,48 +59,6 @@ fn encode_y4m_fixture(fixture_path: &str, out_path: &str, qindex: u8) {
 }
 
 #[test]
-fn avmdec_decodes_single_frame_midgray() {
-    if !avmdec_available() {
-        eprintln!("avmdec not found, skipping");
-        return;
-    }
-
-    let bs = av2codec::encode::encode_still_image(64, 64, 50);
-    fs::write("/tmp/av2codec_test_single.obu", &bs).unwrap();
-
-    let decoded = decode_with_avmdec(
-        "/tmp/av2codec_test_single.obu",
-        "/tmp/av2codec_test_single_out.yuv",
-    );
-
-    let frame_size = 64 * 64 + 32 * 32 * 2;
-    assert_eq!(decoded.len(), frame_size, "Expected 1 decoded I420 frame");
-    assert_eq!(decoded[0], 128, "Mid-gray frame should decode to Y=128");
-}
-
-#[test]
-fn avmdec_decodes_multi_frame_midgray() {
-    if !avmdec_available() {
-        eprintln!("avmdec not found, skipping");
-        return;
-    }
-
-    let frames: Vec<Vec<u8>> = (0..3).map(|_| vec![128; 64 * 64]).collect();
-    let bs = av2codec::encode::encode_video(64, 64, 50, &frames);
-    fs::write("/tmp/av2codec_test_multi.obu", &bs).unwrap();
-
-    let decoded = decode_with_avmdec("/tmp/av2codec_test_multi.obu", "/tmp/av2codec_test_multi_out.yuv");
-
-    let frame_size = 64 * 64 + 32 * 32 * 2;
-    assert_eq!(decoded.len(), frame_size * 3, "Expected 3 decoded frames");
-
-    for f in 0..3 {
-        let y_start = f * frame_size;
-        assert_eq!(decoded[y_start], 128, "Frame {} Y should be 128", f);
-    }
-}
-
-#[test]
 fn avmdec_decodes_solid_green_all_planes() {
     if !avmdec_available() {
         eprintln!("avmdec not found, skipping");

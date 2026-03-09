@@ -3464,7 +3464,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "CDF adaptation internal roundtrip needs flat-SB decoder update for 13-mode support"]
     fn roundtrip_cdf_adaptation_128x128() {
         let y = vec![160u8; 128 * 128];
         let u = vec![128u8; 64 * 64];
@@ -3636,8 +3635,20 @@ mod tests {
         assert_eq!(u_plane.len(), w / 2 * h / 2);
         assert_eq!(v_plane.len(), w / 2 * h / 2);
 
-        let ref_y4m = std::fs::read("/tmp/minimal_sph1_decoded.y4m").unwrap();
-        let y4m_header = "YUV4MPEG2 W256 H128 F0:0 Ip C420jpeg\nFRAME\n";
+        let avmdec = "../avm_build/avmdec";
+        let ref_path = "/tmp/minimal_sph1_decoded.y4m";
+        let output = std::process::Command::new(avmdec)
+            .args(["--codec=av2", "-o", ref_path, "tests/fixtures/avmenc_minimal.obu"])
+            .output()
+            .expect("avmdec not found");
+        assert!(
+            output.status.success(),
+            "avmdec failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let ref_y4m = std::fs::read(ref_path).unwrap();
+        let y4m_header = format!("YUV4MPEG2 W{} H{} F0:0 Ip C420jpeg\nFRAME\n", w, h);
         let header_len = y4m_header.len();
         let ref_y = &ref_y4m[header_len..header_len + w * h];
         let ref_u = &ref_y4m[header_len + w * h..header_len + w * h + w / 2 * h / 2];
@@ -3862,7 +3873,7 @@ mod tests {
             &fp.ccso_params,
         );
 
-        let avmdec = "/Users/rafaelcaricio/development/avm_build/avmdec";
+        let avmdec = "../avm_build/avmdec";
         let output = std::process::Command::new(avmdec)
             .args([
                 "--codec=av2",
@@ -3944,7 +3955,7 @@ mod tests {
         let w = frame.width as usize;
         let h = frame.height as usize;
 
-        let avmdec = "/Users/rafaelcaricio/development/avm_build/avmdec";
+        let avmdec = "../avm_build/avmdec";
         let ref_path = "/tmp/avmenc_128x128_q30_nofilter_ref.y4m";
         let output = std::process::Command::new(avmdec)
             .args(["--codec=av2", "-o", ref_path, obu_path])
@@ -4132,7 +4143,7 @@ mod tests {
         let w = frame.width as usize;
         let h = frame.height as usize;
 
-        let avmdec = "/Users/rafaelcaricio/development/avm_build/avmdec";
+        let avmdec = "../avm_build/avmdec";
         let ref_path = "/tmp/avmenc_128x128_q30_noibc_ref.y4m";
         let output = std::process::Command::new(avmdec)
             .args(["--codec=av2", "-o", ref_path, obu_path])
