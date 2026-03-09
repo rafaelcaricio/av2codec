@@ -342,14 +342,14 @@ mod tests {
 
     #[test]
     fn dequantize_block_solid_32x32() {
-        let pixel_val = 200u8;
+        let pixel_val = 200u16;
         let pixels = vec![pixel_val; 32 * 32];
-        let pred_block = vec![128u8; 32 * 32];
+        let pred_block = vec![128u16; 32 * 32];
         let residual = compute_residual_block(&pixels, &pred_block);
         let mut residual_arr = [0i32; 1024];
         residual_arr.copy_from_slice(&residual);
         let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
-        let dequant = ac_qlookup(50);
+        let dequant = ac_qlookup(50, 8);
         let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
 
         let reconstructed = dequantize_and_inverse(&levels, eob, dequant, 1, false);
@@ -371,14 +371,14 @@ mod tests {
 
     #[test]
     fn dequantize_block_solid_64x64() {
-        let pixel_val = 149u8;
+        let pixel_val = 149u16;
         let pixels = vec![pixel_val; 64 * 64];
-        let pred_block = vec![128u8; 64 * 64];
+        let pred_block = vec![128u16; 64 * 64];
         let residual = compute_residual_block(&pixels, &pred_block);
         let mut residual_arr = [0i32; 4096];
         residual_arr.copy_from_slice(&residual);
         let dct_coeffs = dct::forward_dct2_64x64(&residual_arr);
-        let dequant = ac_qlookup(50);
+        let dequant = ac_qlookup(50, 8);
         let (levels, eob) = quantize_block(&dct_coeffs, dequant, 2);
 
         let reconstructed = dequantize_and_inverse(&levels, eob, dequant, 2, true);

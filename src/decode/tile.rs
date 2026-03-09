@@ -38,7 +38,7 @@ const DEFAULT_MODE_LIST_Y: [u8; 56] = [
 const DEFAULT_MODE_LIST_UV: [u8; 8] = [1, 2, 3, 4, 8, 5, 6, 7];
 
 fn is_directional_mode(mode: u8) -> bool {
-    mode >= 1 && mode <= 8
+    (1..=8).contains(&mode)
 }
 
 fn set_y_mode_and_delta_angle(joint_y_mode: u8) -> (u8, i8) {
@@ -64,9 +64,9 @@ fn build_y_intra_mode_list(
     let mut selected = [false; LUMA_MODE_COUNT];
     let mut idx = 0;
 
-    for i in 0..NON_DIRECTIONAL_MODES_COUNT {
+    for (i, sel) in selected.iter_mut().enumerate().take(NON_DIRECTIONAL_MODES_COUNT) {
         list[idx] = i as u8;
-        selected[i] = true;
+        *sel = true;
         idx += 1;
     }
 
@@ -86,8 +86,8 @@ fn build_y_intra_mode_list(
             neighbor_joints[0] = neighbor_joints[1];
         }
 
-        for i in 0..dir_cnt {
-            let joint = neighbor_joints[i] as usize;
+        for &nj in neighbor_joints.iter().take(dir_cnt) {
+            let joint = nj as usize;
             if !selected[joint] {
                 list[idx] = joint as u8;
                 selected[joint] = true;
@@ -98,8 +98,8 @@ fn build_y_intra_mode_list(
         let is_large_block = block_w * block_h > 64;
         if is_large_block {
             for offset in 0..4usize {
-                for j in 0..dir_cnt {
-                    let nj = neighbor_joints[j] as usize;
+                for &nj_val in neighbor_joints.iter().take(dir_cnt) {
+                    let nj = nj_val as usize;
                     let left_derived = (nj - offset + 50) % 56 + NON_DIRECTIONAL_MODES_COUNT;
                     let right_derived = (nj + offset - 4) % 56 + NON_DIRECTIONAL_MODES_COUNT;
 
@@ -118,11 +118,11 @@ fn build_y_intra_mode_list(
         }
     }
 
-    for i in 0..(LUMA_MODE_COUNT - NON_DIRECTIONAL_MODES_COUNT) {
+    for &dml in DEFAULT_MODE_LIST_Y.iter().take(LUMA_MODE_COUNT - NON_DIRECTIONAL_MODES_COUNT) {
         if idx >= LUMA_MODE_COUNT {
             break;
         }
-        let joint = DEFAULT_MODE_LIST_Y[i] as usize + NON_DIRECTIONAL_MODES_COUNT;
+        let joint = dml as usize + NON_DIRECTIONAL_MODES_COUNT;
         if !selected[joint] {
             list[idx] = joint as u8;
             selected[joint] = true;
@@ -801,6 +801,7 @@ fn get_br_lf_ctx(levels: &[u8], coeff_idx: usize, bwl: u32, tx_class: TxClass) -
                 mag + 7
             }
         }
+        #[allow(clippy::if_same_then_else)]
         TxClass::Vert => {
             if row == 0 {
                 mag + 7
@@ -808,6 +809,7 @@ fn get_br_lf_ctx(levels: &[u8], coeff_idx: usize, bwl: u32, tx_class: TxClass) -
                 mag + 7
             }
         }
+        #[allow(clippy::if_same_then_else)]
         TxClass::Horiz => {
             if col == 0 {
                 mag + 7
@@ -1736,6 +1738,7 @@ fn get_chroma_tx_type(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_tx_type(
     ec: &mut DaalaDecoder,
     tx_size: TxSize,
@@ -1984,7 +1987,7 @@ fn get_lower_levels_ctx_bob(bwl: u32, height: usize, scan_idx: usize) -> usize {
     2
 }
 
-fn decode_low_range_fsc(ec: &mut DaalaDecoder, cdf: &mut Vec<u16>) -> usize {
+fn decode_low_range_fsc(ec: &mut DaalaDecoder, cdf: &mut [u16]) -> usize {
     let br_sym = ec.decode_symbol_mut(cdf);
     NUM_BASE_LEVELS + 1 + br_sym
 }
@@ -2126,6 +2129,7 @@ fn decode_coeff_tu_fsc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_coeff_tu(
     ec: &mut DaalaDecoder,
     plane: usize,
@@ -2452,8 +2456,8 @@ fn decode_coeff_tu(
         let mut sum_abs1 = 0usize;
         if enable_parity_hiding {
             let mut num_nz = 0usize;
-            for c in 1..(eob as usize) {
-                let level = abs_levels[c].min(MAX_BASE_BR_RANGE);
+            for &al in abs_levels.iter().take(eob as usize).skip(1) {
+                let level = al.min(MAX_BASE_BR_RANGE);
                 if level != 0 {
                     num_nz += 1;
                     sum_abs1 += level;
@@ -2619,6 +2623,7 @@ fn decode_coeff_tu(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_block_tus(
     ec: &mut DaalaDecoder,
     plane: usize,
@@ -2763,6 +2768,7 @@ fn mhccp_size_group(block_w: usize, block_h: usize) -> usize {
     mi_w_log2.min(mi_h_log2).min(3)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_uv_mode(
     ec: &mut DaalaDecoder,
     y_mode: u8,
@@ -2881,8 +2887,8 @@ struct ModeInfoGrid {
 
 impl ModeInfoGrid {
     fn new(frame_w: usize, frame_h: usize, sb_size: usize) -> Self {
-        let mi_cols = (frame_w + 3) / 4;
-        let mi_rows = (frame_h + 3) / 4;
+        let mi_cols = frame_w.div_ceil(4);
+        let mi_rows = frame_h.div_ceil(4);
         let n = mi_cols * mi_rows;
         Self {
             frame_w,
@@ -2914,6 +2920,7 @@ impl ModeInfoGrid {
         self.intrabc_refmv_bank.reset_hits_for_sb();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill(
         &mut self,
         x: usize,
@@ -2990,7 +2997,7 @@ impl ModeInfoGrid {
         let mi_w = w / 4;
         let mi_h = h / 4;
         let mib_size = sb_size / 4;
-        let at_sb_top = (mi_y % mib_size) == 0;
+        let at_sb_top = mi_y.is_multiple_of(mib_size);
 
         let mut ctx = 0usize;
         let mut count = 0;
@@ -3098,9 +3105,8 @@ impl ModeInfoGrid {
                 let idx = r * self.mi_cols + c;
                 self.palette_size_y[idx] = n_colors as u8;
                 let mut pal = [0u16; PALETTE_MAX_SIZE];
-                for i in 0..n_colors.min(PALETTE_MAX_SIZE) {
-                    pal[i] = colors[i];
-                }
+                let count = n_colors.min(PALETTE_MAX_SIZE);
+                pal[..count].copy_from_slice(&colors[..count]);
                 self.palette_colors_y[idx] = pal;
             }
         }
@@ -3110,7 +3116,7 @@ impl ModeInfoGrid {
         let mi_x = x / 4;
         let mi_y = y / 4;
 
-        let above_available = mi_y > 0 && (y % 64) != 0;
+        let above_available = mi_y > 0 && !y.is_multiple_of(64);
         let left_available = mi_x > 0;
 
         let (above_n, above_colors) = if above_available {
@@ -3183,7 +3189,7 @@ impl ModeInfoGrid {
         let mi_w = w / 4;
         let mi_h = h / 4;
         let mib_size = (sb_size / 4).max(1);
-        let not_at_sb_top_boundary = (mi_y % mib_size) != 0;
+        let not_at_sb_top_boundary = !mi_y.is_multiple_of(mib_size);
 
         let mut neighbors = [None, None];
         let mut push_idx = 0usize;
@@ -3273,7 +3279,7 @@ impl ModeInfoGrid {
         if cands.len() >= max_cands {
             return;
         }
-        if cands.iter().any(|&v| v == mv) {
+        if cands.contains(&mv) {
             return;
         }
         cands.push(mv);
@@ -3322,7 +3328,7 @@ impl ModeInfoGrid {
         if mi_row_in_sb == 0 && mi_col_in_sb == 0 {
             self.intrabc_refmv_bank.remain_hits = units_count.max(BANK_1ST_UNIT_UPDATE_COUNT);
             self.intrabc_refmv_bank.unit_hits = 0;
-        } else if mi_row_in_sb % unit_mi_size == 0 && mi_col_in_sb % unit_mi_size == 0 {
+        } else if mi_row_in_sb.is_multiple_of(unit_mi_size) && mi_col_in_sb.is_multiple_of(unit_mi_size) {
             self.intrabc_refmv_bank.remain_hits += units_count;
             self.intrabc_refmv_bank.unit_hits = 0;
         }
@@ -3353,6 +3359,7 @@ impl ModeInfoGrid {
         self.intrabc_refmv_bank.update_lru(mv);
     }
 
+    #[allow(clippy::type_complexity)]
     fn intrabc_ref_bv_candidates(
         &self,
         x: usize,
@@ -3391,14 +3398,7 @@ impl ModeInfoGrid {
             false
         } else {
             let bl_mask_row = mask_row + mi_h;
-            let bl_mask_col = mask_col - 1;
-            if bl_mask_row >= sb_mi_size {
-                false
-            } else if bl_mask_col < 0 {
-                true
-            } else {
-                true
-            }
+            bl_mask_row < sb_mi_size
         };
 
         let aligned_offset = |col_offset: isize| -> isize {
@@ -3520,6 +3520,7 @@ impl ModeInfoGrid {
         cands
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill_intrabc(
         &mut self,
         x: usize,
@@ -3556,8 +3557,8 @@ fn get_palette_color_index_context(
     color_order: &mut [u8],
     _n_colors: usize,
 ) -> usize {
-    for i in 0..PALETTE_MAX_SIZE {
-        color_order[i] = i as u8;
+    for (i, co) in color_order.iter_mut().enumerate().take(PALETTE_MAX_SIZE) {
+        *co = i as u8;
     }
     let mut status = [0u8; PALETTE_MAX_SIZE];
     let mut cnt = 0usize;
@@ -3608,8 +3609,8 @@ fn get_palette_color_index_context(
     }
 
     let mut write_idx = cnt;
-    for read_idx in 0..PALETTE_MAX_SIZE {
-        if status[read_idx] == 0 {
+    for (read_idx, &stat) in status.iter().enumerate().take(PALETTE_MAX_SIZE) {
+        if stat == 0 {
             color_order[write_idx] = read_idx as u8;
             write_idx += 1;
         }
@@ -3618,24 +3619,23 @@ fn get_palette_color_index_context(
     ctx
 }
 
-fn read_palette_colors_y(ec: &mut DaalaDecoder, n: usize, palette_cache: &[u16]) -> Vec<u16> {
-    let bit_depth = 8u32;
+fn read_palette_colors_y(ec: &mut DaalaDecoder, n: usize, palette_cache: &[u16], bit_depth: u32) -> Vec<u16> {
     let n_cache = palette_cache.len();
     let mut colors = Vec::with_capacity(n);
 
     let mut idx = 0;
-    for i in 0..n_cache {
+    for (i, &pc) in palette_cache.iter().enumerate().take(n_cache) {
         if idx >= n {
             break;
         }
         let use_cache = ec.decode_bit();
         eprintln!(
             "[TRACE] cache_bit[{}]={} cache_val={}",
-            i, use_cache, palette_cache[i]
+            i, use_cache, pc
         );
         ec.trace_state(&format!("after_cache_bit[{}]", i));
         if use_cache != 0 {
-            colors.push(palette_cache[i]);
+            colors.push(pc);
             idx += 1;
         }
     }
@@ -3793,7 +3793,7 @@ fn read_truncated_unary_mvd(ec: &mut DaalaDecoder, cdf: &mut FrameCdfContext) ->
     let mut result = 0;
     for bit_idx in 0..3usize {
         let this_bit = if bit_idx == 0 {
-            ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_class2) as usize
+            ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_class2)
         } else {
             ec.decode_literal(1) as usize
         };
@@ -3815,7 +3815,7 @@ fn read_tu_quasi_uniform(
     let mut col = 0usize;
     for bit_idx in 0..max_idx_bits {
         let ctx = bit_idx.min(1);
-        let this_bit = ec.decode_symbol_mut(&mut cdf.ndvc_col_mv_greater_flags[ctx]) as usize;
+        let this_bit = ec.decode_symbol_mut(&mut cdf.ndvc_col_mv_greater_flags[ctx]);
         col = bit_idx + this_bit;
         if this_bit == 0 {
             break;
@@ -3830,28 +3830,28 @@ fn read_tu_quasi_uniform(
 }
 
 fn read_mv_delta(ec: &mut DaalaDecoder, precision: usize, cdf: &mut FrameCdfContext) -> (i32, i32) {
-    let shell_set = ec.decode_symbol_mut(&mut cdf.ndvc_joint_shell_set) as usize;
+    let shell_set = ec.decode_symbol_mut(&mut cdf.ndvc_joint_shell_set);
 
     let num_mv_class = 11 + precision;
     let n0 = num_mv_class >> 1;
 
     let shell_class = if shell_set == 0 {
-        ec.decode_symbol_mut(&mut cdf.ndvc_joint_shell_class_0[precision]) as usize
+        ec.decode_symbol_mut(&mut cdf.ndvc_joint_shell_class_0[precision])
     } else {
-        let c = ec.decode_symbol_mut(&mut cdf.ndvc_joint_shell_class_1[precision]) as usize;
+        let c = ec.decode_symbol_mut(&mut cdf.ndvc_joint_shell_class_1[precision]);
         n0 + c
     };
 
     let shell_cls_offset = if shell_class == 0 {
-        ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_low_class[0]) as usize
+        ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_low_class[0])
     } else if shell_class == 1 {
-        ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_low_class[1]) as usize
+        ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_low_class[1])
     } else if shell_class == 2 {
         read_truncated_unary_mvd(ec, cdf)
     } else {
         let mut offset = 0usize;
         for i in 0..shell_class {
-            let bit = ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_other_class[i]) as usize;
+            let bit = ec.decode_symbol_mut(&mut cdf.ndvc_shell_offset_other_class[i]);
             offset |= bit << i;
         }
         offset
@@ -3880,7 +3880,7 @@ fn read_mv_delta(ec: &mut DaalaDecoder, precision: usize, cdf: &mut FrameCdfCont
         maximum_pair_index
     } else {
         let ctx = shell_class.min(3);
-        let bit = ec.decode_symbol_mut(&mut cdf.ndvc_col_mv_index[ctx]) as usize;
+        let bit = ec.decode_symbol_mut(&mut cdf.ndvc_col_mv_index[ctx]);
         if bit == 0 {
             this_pair_index
         } else {
@@ -3923,6 +3923,7 @@ fn lower_mv_precision_pair(row: i32, col: i32, precision: usize) -> (i32, i32) {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_intrabc_rest(
     ec: &mut DaalaDecoder,
     x: usize,
@@ -3934,7 +3935,7 @@ fn read_intrabc_rest(
     cdf: &mut FrameCdfContext,
     mi: &mut ModeInfoGrid,
 ) -> (i32, i32, bool) {
-    let intrabc_mode = ec.decode_symbol_mut(&mut cdf.intrabc_mode) as usize;
+    let intrabc_mode = ec.decode_symbol_mut(&mut cdf.intrabc_mode);
     ec.trace_state(&format!("ibc_mode={} block=({},{})", intrabc_mode, x, y));
 
     let mut drl_idx = 0u32;
@@ -3972,7 +3973,7 @@ fn read_intrabc_rest(
     ));
 
     let bv_precision = if !cfg.cur_frame_force_integer_mv && intrabc_mode == 0 {
-        let prec_idx = ec.decode_symbol_mut(&mut cdf.intrabc_bv_precision) as usize;
+        let prec_idx = ec.decode_symbol_mut(&mut cdf.intrabc_bv_precision);
         ec.trace_state(&format!("ibc_bv_prec_idx={} block=({},{})", prec_idx, x, y));
         if prec_idx == 0 { 3 } else { 5 }
     } else {
@@ -4034,6 +4035,7 @@ fn read_intrabc_rest(
     (bv_row, bv_col, morph_pred)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_leaf_block(
     ec: &mut DaalaDecoder,
     x: usize,
@@ -4323,7 +4325,7 @@ fn decode_leaf_block(
         };
     }
 
-    let is_sb2c_block = tree_type == TreeType::Chroma && x < 64 && y >= 64 && y < 128;
+    let is_sb2c_block = tree_type == TreeType::Chroma && x < 64 && (64..128).contains(&y);
     if tree_type == TreeType::Chroma {
         let mi_row = y / 4;
         let mi_col = x / 4;
@@ -4421,7 +4423,7 @@ fn decode_leaf_block(
                 palette_cache.len(),
                 palette_cache
             );
-            let colors = read_palette_colors_y(ec, n_colors, &palette_cache);
+            let colors = read_palette_colors_y(ec, n_colors, &palette_cache, 8u32);
             eprintln!(
                 "[TRACE] palette_colors block=({},{}) colors={:?}",
                 x, y, colors
@@ -4654,6 +4656,7 @@ fn have_nz_chroma_ref_offset(w: usize, h: usize, partition: PartitionType) -> bo
     }
 }
 
+#[allow(clippy::if_same_then_else)]
 fn is_sub_partition_chroma_ref(
     partition: PartitionType,
     index: usize,
@@ -4703,6 +4706,7 @@ fn is_sub_partition_chroma_ref(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn set_chroma_ref_offset_size(
     x: usize,
     y: usize,
@@ -5077,8 +5081,8 @@ fn partition_plane_context(
 
     let (ctx, bsize_offset) = match ctx_mode {
         PartCtxMode::Split => {
-            let shift_w = if bsl_w >= 1 { bsl_w - 1 } else { 0 };
-            let shift_h = if bsl_h >= 1 { bsl_h - 1 } else { 0 };
+            let shift_w = bsl_w.saturating_sub(1);
+            let shift_h = bsl_h.saturating_sub(1);
             let above_bit = (above_val >> shift_w) & 1;
             let left_bit = (left_val >> shift_h) & 1;
             let ctx = (left_bit as usize) * 2 + (above_bit as usize);
@@ -5089,8 +5093,8 @@ fn partition_plane_context(
             (ctx, bsize_map_val(w, h) * PARTITION_PLOFFSET)
         }
         PartCtxMode::SquareSplit => {
-            let shift_w = if bsl_w >= 1 { bsl_w - 1 } else { 0 };
-            let shift_h = if bsl_h >= 1 { bsl_h - 1 } else { 0 };
+            let shift_w = bsl_w.saturating_sub(1);
+            let shift_h = bsl_h.saturating_sub(1);
             let above_bit = (above_val >> shift_w) & 1;
             let left_bit = (left_val >> shift_h) & 1;
             let ctx = (left_bit as usize) * 2 + (above_bit as usize);
@@ -5098,8 +5102,8 @@ fn partition_plane_context(
             (ctx, offset)
         }
         PartCtxMode::Rect => {
-            let shift_w = if bsl_w >= 1 { bsl_w - 1 } else { 0 };
-            let shift_h = if bsl_h >= 1 { bsl_h - 1 } else { 0 };
+            let shift_w = bsl_w.saturating_sub(1);
+            let shift_h = bsl_h.saturating_sub(1);
             let above_bit = (above_val >> shift_w) & 1;
             let left_bit = (left_val >> shift_h) & 1;
             let ctx = (left_bit as usize) * 2 + (above_bit as usize);
@@ -5110,8 +5114,8 @@ fn partition_plane_context(
             (ctx, bsize_rect_map_val(w, h) * PARTITION_PLOFFSET)
         }
         PartCtxMode::Ext | PartCtxMode::FourWay => {
-            let shift_w = if bsl_w >= 2 { bsl_w - 2 } else { 0 };
-            let shift_h = if bsl_h >= 2 { bsl_h - 2 } else { 0 };
+            let shift_w = bsl_w.saturating_sub(2);
+            let shift_h = bsl_h.saturating_sub(2);
             let (ctx1, ctx2) = if rect_type == 0 {
                 let c1 = (left_ctx.first().copied().unwrap_or(0) >> shift_h) & 1;
                 let mid = mi_h / 2;
@@ -5321,6 +5325,7 @@ fn rect_type_implied_full(w: usize, h: usize, tree_type: TreeType) -> Option<usi
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_partition_type(
     ec: &mut DaalaDecoder,
     w: usize,
@@ -5550,20 +5555,10 @@ fn should_sdp_share(top_partition: PartitionType, sub_partitions: &[PartitionTyp
 }
 
 fn sdp_chroma_part_from_luma(luma_part: PartitionType) -> PartitionType {
-    match luma_part {
-        PartitionType::None => PartitionType::None,
-        PartitionType::Horz => PartitionType::Horz,
-        PartitionType::Vert => PartitionType::Vert,
-        PartitionType::Split => PartitionType::Split,
-        PartitionType::Horz3 => PartitionType::Horz3,
-        PartitionType::Vert3 => PartitionType::Vert3,
-        PartitionType::Horz4A => PartitionType::Horz4A,
-        PartitionType::Horz4B => PartitionType::Horz4B,
-        PartitionType::Vert4A => PartitionType::Vert4A,
-        PartitionType::Vert4B => PartitionType::Vert4B,
-    }
+    luma_part
 }
 
+#[allow(clippy::if_same_then_else)]
 fn implied_boundary_partition(
     x: usize,
     y: usize,
@@ -5593,17 +5588,16 @@ fn implied_boundary_partition(
         } else {
             None
         }
+    } else if !has_cols {
+        Some(PartitionType::Vert)
+    } else if !has_rows && (h < 16 || (y + h / 4) >= frame_h) {
+        Some(PartitionType::Vert)
     } else {
-        if !has_cols {
-            Some(PartitionType::Vert)
-        } else if !has_rows && (h < 16 || (y + h / 4) >= frame_h) {
-            Some(PartitionType::Vert)
-        } else {
-            None
-        }
+        None
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_partition(
     ec: &mut DaalaDecoder,
     x: usize,
@@ -5712,7 +5706,7 @@ fn decode_partition(
         if was_tracking && state.sdp_luma_depth == 1 {
             state.sdp_luma_sub_partitions.push(PartitionType::None);
         }
-        let is_sb2c_leaf = tree_type == TreeType::Chroma && x < 64 && y >= 64 && y < 128;
+        let is_sb2c_leaf = tree_type == TreeType::Chroma && x < 64 && (64..128).contains(&y);
         if is_sb2c_leaf {
             ec.trace_state(&format!(
                 "[SB2C_LEAF] mi=({},{}) {}x{}",
@@ -5723,10 +5717,8 @@ fn decode_partition(
             ));
         }
         let is_sb3l_leaf = (tree_type == TreeType::Luma || tree_type == TreeType::Shared)
-            && x >= 64
-            && x < 128
-            && y >= 64
-            && y < 128;
+            && (64..128).contains(&x)
+            && (64..128).contains(&y);
         if is_sb3l_leaf {
             ec.trace_state(&format!(
                 "[SB3L_LEAF] mi=({},{}) {}x{}",
@@ -5815,7 +5807,7 @@ fn decode_partition(
         return;
     }
 
-    let is_sb2_chroma = tree_type == TreeType::Chroma && x < 64 && y >= 64 && y < 128;
+    let is_sb2_chroma = tree_type == TreeType::Chroma && x < 64 && (64..128).contains(&y);
     if is_sb2_chroma {
         ec.trace_state(&format!(
             "[SB2C] decode_partition mi=({},{}) {}x{}",
@@ -5826,10 +5818,8 @@ fn decode_partition(
         ));
     }
     let is_sb3_luma = (tree_type == TreeType::Luma || tree_type == TreeType::Shared)
-        && x >= 64
-        && x < 128
-        && y >= 64
-        && y < 128;
+        && (64..128).contains(&x)
+        && (64..128).contains(&y);
     if is_sb3_luma {
         ec.trace_state(&format!(
             "[SB3L] decode_partition mi=({},{}) {}x{}",
@@ -6214,19 +6204,15 @@ fn read_tx_partition(
                 } else {
                     TxPartitionType::Horz4
                 }
-            } else {
-                if partition_type == 0 {
-                    TxPartitionType::Vert
-                } else {
-                    TxPartitionType::Vert4
-                }
-            }
-        } else {
-            if allow_horz {
-                TxPartitionType::Horz
-            } else {
+            } else if partition_type == 0 {
                 TxPartitionType::Vert
+            } else {
+                TxPartitionType::Vert4
             }
+        } else if allow_horz {
+            TxPartitionType::Horz
+        } else {
+            TxPartitionType::Vert
         }
     }
 }
@@ -6426,8 +6412,8 @@ pub fn decode_tile_data_partitioned_cfg(
     let mut mi = ModeInfoGrid::new(width, height, cfg.sb_size);
     let mut blocks = Vec::new();
 
-    let mi_w_y = (width + 3) / 4;
-    let mi_w_uv = (width / 2 + 3) / 4;
+    let mi_w_y = width.div_ceil(4);
+    let mi_w_uv = (width / 2).div_ceil(4);
     let sb_mi_h_y = sb_size / 4;
     let sb_mi_h_uv = sb_size / 2 / 4;
 
@@ -6452,8 +6438,8 @@ pub fn decode_tile_data_partitioned_cfg(
         sdp_luma_partition_for_cfl: None,
     };
 
-    let sb_cols = (width + sb_size - 1) / sb_size;
-    let sb_rows = (height + sb_size - 1) / sb_size;
+    let sb_cols = width.div_ceil(sb_size);
+    let sb_rows = height.div_ceil(sb_size);
 
     for sb_row in 0..sb_rows {
         state.sb_row_y = sb_row * sb_size;

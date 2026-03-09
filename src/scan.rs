@@ -181,6 +181,86 @@ pub const DEFAULT_SCAN_32X32: [u16; 1024] = [
     991, 1023,
 ];
 
+fn get_mrow_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
+    static MROW_SCANS: OnceLock<std::collections::HashMap<(usize, usize), Vec<u16>>> =
+        OnceLock::new();
+    let map = MROW_SCANS.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        for &(w, h) in &ALL_SCAN_SIZES {
+            m.insert((w, h), generate_mrow_scan(w, h));
+        }
+        m
+    });
+    map.get(&(coded_w, coded_h))
+        .expect("unsupported mrow scan size")
+}
+
+fn get_mcol_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
+    static MCOL_SCANS: OnceLock<std::collections::HashMap<(usize, usize), Vec<u16>>> =
+        OnceLock::new();
+    let map = MCOL_SCANS.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        for &(w, h) in &ALL_SCAN_SIZES {
+            m.insert((w, h), generate_mcol_scan(w, h));
+        }
+        m
+    });
+    map.get(&(coded_w, coded_h))
+        .expect("unsupported mcol scan size")
+}
+
+const ALL_SCAN_SIZES: [(usize, usize); 16] = [
+    (4, 4),
+    (8, 8),
+    (16, 16),
+    (32, 32),
+    (4, 8),
+    (8, 4),
+    (4, 16),
+    (16, 4),
+    (8, 16),
+    (16, 8),
+    (8, 32),
+    (32, 8),
+    (16, 32),
+    (32, 16),
+    (4, 32),
+    (32, 4),
+];
+
+fn generate_mrow_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
+    let mut scan = Vec::with_capacity(coded_w * coded_h);
+    for row in 0..coded_h {
+        for col in 0..coded_w {
+            scan.push((row * coded_w + col) as u16);
+        }
+    }
+    scan
+}
+
+fn generate_mcol_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
+    let mut scan = Vec::with_capacity(coded_w * coded_h);
+    for col in 0..coded_w {
+        for row in 0..coded_h {
+            scan.push((row * coded_w + col) as u16);
+        }
+    }
+    scan
+}
+
+fn generate_default_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
+    let mut scan = Vec::with_capacity(coded_w * coded_h);
+    for sum in 0..(coded_w + coded_h - 1) {
+        let x_start = if sum < coded_h { 0 } else { sum - coded_h + 1 };
+        let x_end = sum.min(coded_w - 1);
+        for x in x_start..=x_end {
+            let y = sum - x;
+            scan.push((y * coded_w + x) as u16);
+        }
+    }
+    scan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,84 +405,4 @@ mod tests {
         let scan = generate_default_scan(8, 8);
         assert_eq!(scan.as_slice(), &DEFAULT_SCAN_8X8[..]);
     }
-}
-
-fn get_mrow_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
-    static MROW_SCANS: OnceLock<std::collections::HashMap<(usize, usize), Vec<u16>>> =
-        OnceLock::new();
-    let map = MROW_SCANS.get_or_init(|| {
-        let mut m = std::collections::HashMap::new();
-        for &(w, h) in &ALL_SCAN_SIZES {
-            m.insert((w, h), generate_mrow_scan(w, h));
-        }
-        m
-    });
-    map.get(&(coded_w, coded_h))
-        .expect("unsupported mrow scan size")
-}
-
-fn get_mcol_scan(coded_w: usize, coded_h: usize) -> &'static [u16] {
-    static MCOL_SCANS: OnceLock<std::collections::HashMap<(usize, usize), Vec<u16>>> =
-        OnceLock::new();
-    let map = MCOL_SCANS.get_or_init(|| {
-        let mut m = std::collections::HashMap::new();
-        for &(w, h) in &ALL_SCAN_SIZES {
-            m.insert((w, h), generate_mcol_scan(w, h));
-        }
-        m
-    });
-    map.get(&(coded_w, coded_h))
-        .expect("unsupported mcol scan size")
-}
-
-const ALL_SCAN_SIZES: [(usize, usize); 16] = [
-    (4, 4),
-    (8, 8),
-    (16, 16),
-    (32, 32),
-    (4, 8),
-    (8, 4),
-    (4, 16),
-    (16, 4),
-    (8, 16),
-    (16, 8),
-    (8, 32),
-    (32, 8),
-    (16, 32),
-    (32, 16),
-    (4, 32),
-    (32, 4),
-];
-
-fn generate_mrow_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
-    let mut scan = Vec::with_capacity(coded_w * coded_h);
-    for row in 0..coded_h {
-        for col in 0..coded_w {
-            scan.push((row * coded_w + col) as u16);
-        }
-    }
-    scan
-}
-
-fn generate_mcol_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
-    let mut scan = Vec::with_capacity(coded_w * coded_h);
-    for col in 0..coded_w {
-        for row in 0..coded_h {
-            scan.push((row * coded_w + col) as u16);
-        }
-    }
-    scan
-}
-
-fn generate_default_scan(coded_w: usize, coded_h: usize) -> Vec<u16> {
-    let mut scan = Vec::with_capacity(coded_w * coded_h);
-    for sum in 0..(coded_w + coded_h - 1) {
-        let x_start = if sum < coded_h { 0 } else { sum - coded_h + 1 };
-        let x_end = sum.min(coded_w - 1);
-        for x in x_start..=x_end {
-            let y = sum - x;
-            scan.push((y * coded_w + x) as u16);
-        }
-    }
-    scan
 }

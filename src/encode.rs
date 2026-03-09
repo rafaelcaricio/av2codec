@@ -62,10 +62,11 @@ pub struct Encoder {
     dequant: i32,
     order_hint: u32,
     pending_packet: Option<Packet>,
+    bit_depth: u32,
 }
 
 impl Encoder {
-    pub fn new(width: u32, height: u32, base_qindex: u8) -> Result<Self, EncodeError> {
+    pub fn new(width: u32, height: u32, base_qindex: u8, bit_depth: u32) -> Result<Self, EncodeError> {
         if width < 4 || height < 4 || !width.is_multiple_of(4) || !height.is_multiple_of(4) {
             return Err(EncodeError::InvalidDimensions { width, height });
         }
@@ -75,9 +76,10 @@ impl Encoder {
             padded_width: round_up_to_64(width),
             padded_height: round_up_to_64(height),
             base_qindex,
-            dequant: ac_qlookup(base_qindex),
+            dequant: ac_qlookup(base_qindex, bit_depth),
             order_hint: 0,
             pending_packet: None,
+            bit_depth,
         })
     }
 
@@ -93,12 +95,13 @@ impl Encoder {
         let seq_config = SequenceHeaderConfig {
             width: self.padded_width,
             height: self.padded_height,
+            bit_depth: self.bit_depth,
         };
         let seq_payload = write_sequence_header(&seq_config);
         ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload)
     }
 
-    pub fn send_frame(&mut self, y: &[u8], u: &[u8], v: &[u8]) -> Result<(), EncodeError> {
+    pub fn send_frame(&mut self, y: &[u16], u: &[u16], v: &[u16]) -> Result<(), EncodeError> {
         let y_size = (self.width * self.height) as usize;
         let uv_size = (self.width / 2 * self.height / 2) as usize;
 
@@ -130,6 +133,7 @@ impl Encoder {
             self.height,
             self.padded_width,
             self.padded_height,
+            self.bit_depth,
         );
         let padded_u = pad_plane(
             u,
@@ -137,6 +141,7 @@ impl Encoder {
             self.height / 2,
             self.padded_width / 2,
             self.padded_height / 2,
+            self.bit_depth,
         );
         let padded_v = pad_plane(
             v,
@@ -144,6 +149,7 @@ impl Encoder {
             self.height / 2,
             self.padded_width / 2,
             self.padded_height / 2,
+            self.bit_depth,
         );
 
         let clk_obu = encode_frame_yuv(
@@ -156,6 +162,7 @@ impl Encoder {
                 dequant: self.dequant,
                 base_qindex: self.base_qindex,
                 order_hint: self.order_hint,
+                bit_depth: self.bit_depth,
             },
             true,
         );
@@ -180,14 +187,14 @@ impl Encoder {
 }
 
 fn extract_subblock(
-    plane: &[u8],
+    plane: &[u16],
     frame_w: usize,
     x: usize,
     y: usize,
     bw: usize,
     bh: usize,
-) -> Vec<u8> {
-    let mut block = vec![0u8; bw * bh];
+) -> Vec<u16> {
+    let mut block = vec![0u16; bw * bh];
     for row in 0..bh {
         let src_offset = (y + row) * frame_w + x;
         let dst_offset = row * bw;
@@ -200,14 +207,15 @@ fn round_up_to_64(dim: u32) -> u32 {
     (dim + 63) & !63
 }
 
-fn pad_plane(src: &[u8], orig_w: u32, orig_h: u32, padded_w: u32, padded_h: u32) -> Vec<u8> {
+fn pad_plane(src: &[u16], orig_w: u32, orig_h: u32, padded_w: u32, padded_h: u32, bit_depth: u32) -> Vec<u16> {
     let (ow, oh, pw, ph) = (
         orig_w as usize,
         orig_h as usize,
         padded_w as usize,
         padded_h as usize,
     );
-    let mut dst = vec![128u8; pw * ph];
+    let midpoint = 1u16 << (bit_depth - 1);
+    let mut dst = vec![midpoint; pw * ph];
     for row in 0..oh {
         dst[row * pw..row * pw + ow].copy_from_slice(&src[row * ow..row * ow + ow]);
     }
@@ -220,6 +228,7 @@ struct FrameEncodeParams {
     dequant: i32,
     base_qindex: u8,
     order_hint: u32,
+    bit_depth: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -262,7 +271,7 @@ impl IntraMode {
 
     pub fn is_directional(self) -> bool {
         let v = self as u8;
-        v >= 1 && v <= 8
+        (1..=8).contains(&v)
     }
 
     pub fn nominal_angle(self) -> u16 {
@@ -302,9 +311,9 @@ pub fn build_y_mode_list(
     let mut selected = [false; LUMA_MODE_COUNT];
     let mut idx = 0;
 
-    for i in 0..NON_DIRECTIONAL_MODES_COUNT {
+    for (i, sel) in selected.iter_mut().enumerate().take(NON_DIRECTIONAL_MODES_COUNT) {
         list[idx] = i as i32;
-        selected[i] = true;
+        *sel = true;
         idx += 1;
     }
 
@@ -362,11 +371,11 @@ pub fn build_y_mode_list(
         }
     }
 
-    for i in 0..DEFAULT_MODE_LIST_Y.len() {
+    for &default_mode in DEFAULT_MODE_LIST_Y.iter() {
         if idx >= LUMA_MODE_COUNT {
             break;
         }
-        let joint = DEFAULT_MODE_LIST_Y[i] + NON_DIRECTIONAL_MODES_COUNT;
+        let joint = default_mode + NON_DIRECTIONAL_MODES_COUNT;
         if !selected[joint] {
             list[idx] = joint as i32;
             selected[joint] = true;
@@ -480,27 +489,27 @@ fn get_dy(angle: u16) -> i32 {
 }
 
 struct RefPixels {
-    above: Vec<u8>,
-    left: Vec<u8>,
-    top_left: u8,
-    above_right: u8,
-    below_left: u8,
+    above: Vec<u16>,
+    left: Vec<u16>,
+    top_left: u16,
+    above_right: u16,
+    below_left: u16,
     has_above: bool,
     has_left: bool,
-    above_ext: Vec<u8>,
-    left_ext: Vec<u8>,
+    above_ext: Vec<u16>,
+    left_ext: Vec<u16>,
 }
 
 impl RefPixels {
     #[cfg(test)]
     fn new_test(
-        above: Vec<u8>,
-        left: Vec<u8>,
-        top_left: u8,
+        above: Vec<u16>,
+        left: Vec<u16>,
+        top_left: u16,
         has_above: bool,
         has_left: bool,
-        above_right: u8,
-        below_left: u8,
+        above_right: u16,
+        below_left: u16,
     ) -> Self {
         let bsize = above.len();
         let mut above_ext = above.clone();
@@ -522,14 +531,14 @@ impl RefPixels {
 }
 
 fn get_ref_pixels(
-    recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize,
+    recon: &[u16], stride: usize, x: usize, y: usize, bsize: usize,
     right_limit: usize, bottom_limit: usize,
 ) -> RefPixels {
     let frame_h = recon.len() / stride;
     let has_above = y > 0;
     let has_left = x > 0;
 
-    let compute_above_right = |above: &[u8]| -> u8 {
+    let compute_above_right = |above: &[u16]| -> u16 {
         if has_above && x + bsize < right_limit && x + bsize < stride {
             recon[(y - 1) * stride + x + bsize]
         } else {
@@ -537,7 +546,7 @@ fn get_ref_pixels(
         }
     };
 
-    let compute_below_left = |left: &[u8]| -> u8 {
+    let compute_below_left = |left: &[u16]| -> u16 {
         if has_left && y + bsize < bottom_limit && y + bsize < frame_h {
             recon[(y + bsize) * stride + x - 1]
         } else {
@@ -545,8 +554,8 @@ fn get_ref_pixels(
         }
     };
 
-    let build_above_ext = |above: &[u8]| -> Vec<u8> {
-        let mut ext = vec![0u8; bsize + bsize];
+    let build_above_ext = |above: &[u16]| -> Vec<u16> {
+        let mut ext = vec![0u16; bsize + bsize];
         ext[..bsize].copy_from_slice(above);
         if has_above {
             for i in 0..bsize {
@@ -566,8 +575,8 @@ fn get_ref_pixels(
         ext
     };
 
-    let build_left_ext = |left: &[u8]| -> Vec<u8> {
-        let mut ext = vec![0u8; bsize + bsize];
+    let build_left_ext = |left: &[u16]| -> Vec<u16> {
+        let mut ext = vec![0u16; bsize + bsize];
         ext[..bsize].copy_from_slice(left);
         if has_left {
             for j in 0..bsize {
@@ -608,7 +617,7 @@ fn get_ref_pixels(
             }
         }
         (true, false) => {
-            let mut above = vec![0u8; bsize];
+            let mut above = vec![0u16; bsize];
             for i in 0..bsize {
                 above[i] = recon[(y - 1) * stride + x + i];
             }
@@ -631,7 +640,7 @@ fn get_ref_pixels(
             }
         }
         (false, true) => {
-            let mut left = vec![0u8; bsize];
+            let mut left = vec![0u16; bsize];
             for j in 0..bsize {
                 left[j] = recon[(y + j) * stride + x - 1];
             }
@@ -654,11 +663,11 @@ fn get_ref_pixels(
             }
         }
         (true, true) => {
-            let mut above = vec![0u8; bsize];
+            let mut above = vec![0u16; bsize];
             for i in 0..bsize {
                 above[i] = recon[(y - 1) * stride + x + i];
             }
-            let mut left = vec![0u8; bsize];
+            let mut left = vec![0u16; bsize];
             for j in 0..bsize {
                 left[j] = recon[(y + j) * stride + x - 1];
             }
@@ -682,21 +691,21 @@ fn get_ref_pixels(
     }
 }
 
-fn predict_dc_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+fn predict_dc_block(refs: &RefPixels, bsize: usize) -> Vec<u16> {
     let val = match (refs.has_above, refs.has_left) {
-        (false, false) => 128u8,
+        (false, false) => 128u16,
         (true, false) => {
             let sum: u32 = refs.above.iter().map(|&v| v as u32).sum();
-            ((sum + bsize as u32 / 2) / bsize as u32) as u8
+            ((sum + bsize as u32 / 2) / bsize as u32) as u16
         }
         (false, true) => {
             let sum: u32 = refs.left.iter().map(|&v| v as u32).sum();
-            ((sum + bsize as u32 / 2) / bsize as u32) as u8
+            ((sum + bsize as u32 / 2) / bsize as u32) as u16
         }
         (true, true) => {
             let sum: u32 = refs.above.iter().map(|&v| v as u32).sum::<u32>()
                 + refs.left.iter().map(|&v| v as u32).sum::<u32>();
-            ((sum + bsize as u32) / (2 * bsize as u32)) as u8
+            ((sum + bsize as u32) / (2 * bsize as u32)) as u16
         }
     };
     vec![val; bsize * bsize]
@@ -713,7 +722,7 @@ const BLK_SIZE_LOG2: [u8; 65] = [
 ];
 const BLEND_WEIGHT_MAX: i32 = 32;
 
-fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u16> {
     let bl = refs.below_left as i32;
     let tr = refs.above_right as i32;
     let bw = bsize;
@@ -724,7 +733,7 @@ fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let bh_log2 = BLK_SIZE_LOG2[bh] as u32;
     let bw_log2 = BLK_SIZE_LOG2[bw] as u32;
 
-    let mut pred = vec![0u8; bsize * bsize];
+    let mut pred = vec![0u16; bsize * bsize];
     for r in 0..bh {
         let s_top = BLEND_WEIGHT_MAX >> blend_lut_idx.min(((r << 1) as u32) >> scale);
         let l = refs.left[r] as i32;
@@ -735,13 +744,13 @@ fn predict_smooth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
             let predh = tr + divide_round((l - tr) * (bw as i32 - 1 - c as i32), bw_log2);
             let predv = predv + divide_round((top - predv) * s_top, blend_max_log2 + 1);
             let predh = predh + divide_round((l - predh) * s_left, blend_max_log2 + 1);
-            pred[r * bsize + c] = divide_round(predv + predh, 1) as u8;
+            pred[r * bsize + c] = divide_round(predv + predh, 1) as u16;
         }
     }
     pred
 }
 
-fn predict_smooth_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+fn predict_smooth_v_block(refs: &RefPixels, bsize: usize) -> Vec<u16> {
     let bl = refs.below_left as i32;
     let bw = bsize;
     let bh = bsize;
@@ -750,20 +759,20 @@ fn predict_smooth_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let blend_lut_idx = BLK_SIZE_LOG2[(BLEND_WEIGHT_MAX as usize) << 1] as u32;
     let bh_log2 = BLK_SIZE_LOG2[bh] as u32;
 
-    let mut pred = vec![0u8; bsize * bsize];
+    let mut pred = vec![0u16; bsize * bsize];
     for r in 0..bh {
         let s_top = BLEND_WEIGHT_MAX >> blend_lut_idx.min(((r << 1) as u32) >> scale);
         for c in 0..bw {
             let top = refs.above[c] as i32;
             let predv = bl + divide_round((top - bl) * (bh as i32 - 1 - r as i32), bh_log2);
             pred[r * bsize + c] =
-                (predv + divide_round((top - predv) * s_top, blend_max_log2 + 1)) as u8;
+                (predv + divide_round((top - predv) * s_top, blend_max_log2 + 1)) as u16;
         }
     }
     pred
 }
 
-fn predict_smooth_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+fn predict_smooth_h_block(refs: &RefPixels, bsize: usize) -> Vec<u16> {
     let tr = refs.above_right as i32;
     let bw = bsize;
     let bh = bsize;
@@ -772,22 +781,22 @@ fn predict_smooth_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     let blend_lut_idx = BLK_SIZE_LOG2[(BLEND_WEIGHT_MAX as usize) << 1] as u32;
     let bw_log2 = BLK_SIZE_LOG2[bw] as u32;
 
-    let mut pred = vec![0u8; bsize * bsize];
+    let mut pred = vec![0u16; bsize * bsize];
     for r in 0..bh {
         let l = refs.left[r] as i32;
         for c in 0..bw {
             let s_left = BLEND_WEIGHT_MAX >> blend_lut_idx.min(((c << 1) as u32) >> scale);
             let predh = tr + divide_round((l - tr) * (bw as i32 - 1 - c as i32), bw_log2);
             pred[r * bsize + c] =
-                (predh + divide_round((l - predh) * s_left, blend_max_log2 + 1)) as u8;
+                (predh + divide_round((l - predh) * s_left, blend_max_log2 + 1)) as u16;
         }
     }
     pred
 }
 
-fn predict_paeth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
+fn predict_paeth_block(refs: &RefPixels, bsize: usize) -> Vec<u16> {
     let tl = refs.top_left as i32;
-    let mut pred = vec![0u8; bsize * bsize];
+    let mut pred = vec![0u16; bsize * bsize];
     for r in 0..bsize {
         let left = refs.left[r] as i32;
         for c in 0..bsize {
@@ -808,16 +817,16 @@ fn predict_paeth_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
     pred
 }
 
-fn predict_v_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; bsize * bsize];
+fn predict_v_block(refs: &RefPixels, bsize: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; bsize * bsize];
     for r in 0..bsize {
         pred[r * bsize..(r + 1) * bsize].copy_from_slice(&refs.above[..bsize]);
     }
     pred
 }
 
-fn predict_h_block(refs: &RefPixels, bsize: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; bsize * bsize];
+fn predict_h_block(refs: &RefPixels, bsize: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; bsize * bsize];
     for r in 0..bsize {
         let val = refs.left[r];
         for c in 0..bsize {
@@ -841,24 +850,24 @@ const DR_INTERP_FILTER: [[i16; 4]; 32] = [
     [-2, 8, 125, -3],   [-1, 4, 127, -2],
 ];
 
-fn idif_interp(p: [i32; 4], shift: usize) -> u8 {
+fn idif_interp(p: [i32; 4], shift: usize) -> u16 {
     let f = &DR_INTERP_FILTER[shift];
     let val = p[0] * f[0] as i32 + p[1] * f[1] as i32
         + p[2] * f[2] as i32 + p[3] * f[3] as i32;
-    ((val + 64) >> 7).clamp(0, 255) as u8
+    ((val + 64) >> 7).clamp(0, 255) as u16
 }
 
-fn bilinear_interp(p0: i32, p1: i32, shift: i32) -> u8 {
+fn bilinear_interp(p0: i32, p1: i32, shift: i32) -> u16 {
     let val = p0 * (32 - shift) + p1 * shift;
-    ((val + 16) >> 5).clamp(0, 255) as u8
+    ((val + 16) >> 5).clamp(0, 255) as u16
 }
 
-fn predict_dr_z1(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u8> {
+fn predict_dr_z1(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u16> {
     let dx = get_dx(angle);
     let max_base_x = (bw + bh) - 1;
     let above = &refs.above_ext;
     let tl = refs.top_left;
-    let mut pred = vec![0u8; bw * bh];
+    let mut pred = vec![0u16; bw * bh];
     let mut x = dx;
     for r in 0..bh {
         let base = x >> 6;
@@ -885,23 +894,21 @@ fn predict_dr_z1(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
 }
 
 fn get_above_z2(refs: &RefPixels, idx: isize, bw: usize) -> i32 {
-    if idx < -1 { refs.top_left as i32 }
-    else if idx == -1 { refs.top_left as i32 }
+    if idx <= -1 { refs.top_left as i32 }
     else if (idx as usize) < bw { refs.above_ext[idx as usize] as i32 }
     else { refs.above_ext[bw - 1] as i32 }
 }
 
 fn get_left_z2(refs: &RefPixels, idx: isize, bh: usize) -> i32 {
-    if idx < -1 { refs.top_left as i32 }
-    else if idx == -1 { refs.top_left as i32 }
+    if idx <= -1 { refs.top_left as i32 }
     else if (idx as usize) < bh { refs.left_ext[idx as usize] as i32 }
     else { refs.left_ext[bh - 1] as i32 }
 }
 
-fn predict_dr_z2(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u8> {
+fn predict_dr_z2(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u16> {
     let dx = get_dx(angle);
     let dy = get_dy(angle);
-    let mut pred = vec![0u8; bw * bh];
+    let mut pred = vec![0u16; bw * bh];
     for r in 0..bh {
         for c in 0..bw {
             let y_val = (r + 1) as i32;
@@ -948,12 +955,12 @@ fn predict_dr_z2(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
     pred
 }
 
-fn predict_dr_z3(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u8> {
+fn predict_dr_z3(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u16> {
     let dy = get_dy(angle);
     let max_base_y = (bw + bh) - 1;
     let left = &refs.left_ext;
     let tl = refs.top_left;
-    let mut pred = vec![0u8; bw * bh];
+    let mut pred = vec![0u16; bw * bh];
     let mut y = dy;
     for c in 0..bw {
         let base = y >> 6;
@@ -986,8 +993,6 @@ fn edge_filter_strength(bs0: usize, bs1: usize, delta: i32, filter_type: usize) 
     if filter_type == 0 {
         if blk_wh <= 8 {
             if d >= 56 { strength = 1; }
-        } else if blk_wh <= 12 {
-            if d >= 40 { strength = 1; }
         } else if blk_wh <= 16 {
             if d >= 40 { strength = 1; }
         } else if blk_wh <= 24 {
@@ -1001,23 +1006,21 @@ fn edge_filter_strength(bs0: usize, bs1: usize, delta: i32, filter_type: usize) 
         } else if d >= 1 {
             strength = 3;
         }
-    } else {
-        if blk_wh <= 8 {
-            if d >= 40 { strength = 1; }
-            if d >= 64 { strength = 2; }
-        } else if blk_wh <= 16 {
-            if d >= 20 { strength = 1; }
-            if d >= 48 { strength = 2; }
-        } else if blk_wh <= 24 {
-            if d >= 4 { strength = 3; }
-        } else if d >= 1 {
-            strength = 3;
-        }
+    } else if blk_wh <= 8 {
+        if d >= 40 { strength = 1; }
+        if d >= 64 { strength = 2; }
+    } else if blk_wh <= 16 {
+        if d >= 20 { strength = 1; }
+        if d >= 48 { strength = 2; }
+    } else if blk_wh <= 24 {
+        if d >= 4 { strength = 3; }
+    } else if d >= 1 {
+        strength = 3;
     }
     strength
 }
 
-fn filter_intra_edge(edge: &mut [u8], strength: usize) {
+fn filter_intra_edge(edge: &mut [u16], strength: usize) {
     if strength == 0 {
         return;
     }
@@ -1030,7 +1033,7 @@ fn filter_intra_edge(edge: &mut [u8], strength: usize) {
             let idx = ((i as isize) - 2 + j as isize).clamp(0, edge.len() as isize - 1) as usize;
             sum += src[idx] as u32 * coeff;
         }
-        edge[i] = ((sum + 8) >> 4) as u8;
+        edge[i] = ((sum + 8) >> 4) as u16;
     }
 }
 
@@ -1054,7 +1057,7 @@ fn apply_edge_filter_for_directional(refs: &mut RefPixels, bsize: usize, p_angle
     if need_above && need_left && w + h >= 24 && !refs.above.is_empty() && !refs.left.is_empty() {
         refs.top_left =
             ((refs.left[0] as u32 * 5 + refs.top_left as u32 * 6 + refs.above[0] as u32 * 5 + 8)
-                >> 4) as u8;
+                >> 4) as u16;
     }
 
     let angle_above = p_angle as i32 - 90;
@@ -1091,7 +1094,7 @@ fn apply_edge_filter_for_directional(refs: &mut RefPixels, bsize: usize, p_angle
     }
 }
 
-fn predict_directional(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma: bool) -> Vec<u8> {
+fn predict_directional(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma: bool) -> Vec<u16> {
     let angle = mode.nominal_angle();
     if angle == 90 {
         return predict_v_block(refs, bsize);
@@ -1120,11 +1123,11 @@ fn predict_directional(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma:
     }
 }
 
-fn predict_block(refs: &RefPixels, bsize: usize, mode: IntraMode) -> Vec<u8> {
+fn predict_block(refs: &RefPixels, bsize: usize, mode: IntraMode) -> Vec<u16> {
     predict_block_plane(refs, bsize, mode, true)
 }
 
-fn predict_block_plane(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma: bool) -> Vec<u8> {
+fn predict_block_plane(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma: bool) -> Vec<u16> {
     match mode {
         IntraMode::DcPred => predict_dc_block(refs, bsize),
         IntraMode::SmoothPred => predict_smooth_block(refs, bsize),
@@ -1138,30 +1141,30 @@ fn predict_block_plane(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma:
 }
 
 pub fn predict_intra_block(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
     bsize: usize,
     mode: IntraMode,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let refs = get_ref_pixels(recon, stride, x, y, bsize, stride, recon.len() / stride);
     predict_block_plane(&refs, bsize, mode, true)
 }
 
 pub fn predict_intra_block_uv(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
     bsize: usize,
     mode: IntraMode,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let refs = get_ref_pixels(recon, stride, x, y, bsize, stride, recon.len() / stride);
     predict_block_plane(&refs, bsize, mode, false)
 }
 
-fn compute_sad(pixels: &[u8], pred: &[u8]) -> u64 {
+fn compute_sad(pixels: &[u16], pred: &[u16]) -> u64 {
     pixels
         .iter()
         .zip(pred.iter())
@@ -1175,11 +1178,11 @@ const VH_MODES: [IntraMode; 7] = [
     IntraMode::VPred, IntraMode::HPred,
 ];
 
-fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
+fn select_intra_mode(pixels: &[u16], refs: &RefPixels, bsize: usize) -> IntraMode {
     select_intra_mode_from(pixels, refs, bsize, &VH_MODES, true)
 }
 
-fn select_intra_mode_from(pixels: &[u8], refs: &RefPixels, bsize: usize, modes: &[IntraMode], is_luma: bool) -> IntraMode {
+fn select_intra_mode_from(pixels: &[u16], refs: &RefPixels, bsize: usize, modes: &[IntraMode], is_luma: bool) -> IntraMode {
     let mut best_mode = IntraMode::DcPred;
     let mut best_sad = u64::MAX;
     for &mode in modes {
@@ -1209,15 +1212,17 @@ pub struct EncodedBlock {
     pub v_eob: u16,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_uv_subblock(
-    uv_plane: &[u8],
+    uv_plane: &[u16],
     uv_w: usize,
-    recon_uv: &mut [u8],
+    recon_uv: &mut [u16],
     ux: usize,
     uy: usize,
     uv_bsize: usize,
     dequant: i32,
     mode: IntraMode,
+    bit_depth: u32,
 ) -> (Vec<i32>, u16) {
     let uv_h = recon_uv.len() / uv_w;
     let refs = get_ref_pixels(recon_uv, uv_w, ux, uy, uv_bsize, uv_w, uv_h);
@@ -1232,7 +1237,7 @@ fn encode_uv_subblock(
         let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
         let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
         let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
-        reconstruct_block(recon_uv, uv_w, ux, uy, 32, &pred, &inv_residual);
+        reconstruct_block(recon_uv, uv_w, ux, uy, 32, &pred, &inv_residual, bit_depth);
         (levels.to_vec(), eob)
     } else if uv_bsize == 16 {
         let mut residual_arr = [0i32; 256];
@@ -1253,7 +1258,7 @@ fn encode_uv_subblock(
             dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
         }
         let inv_residual = dct::inverse_dct2_16x16(&dqcoeffs);
-        reconstruct_block(recon_uv, uv_w, ux, uy, 16, &pred, &inv_residual.to_vec());
+        reconstruct_block(recon_uv, uv_w, ux, uy, 16, &pred, inv_residual.as_ref(), bit_depth);
         (levels, eob)
     } else if uv_bsize == 8 {
         let mut residual_arr = [0i32; 64];
@@ -1274,7 +1279,7 @@ fn encode_uv_subblock(
             dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
         }
         let inv_residual = dct::inverse_dct2_8x8(&dqcoeffs);
-        reconstruct_block(recon_uv, uv_w, ux, uy, 8, &pred, &inv_residual.to_vec());
+        reconstruct_block(recon_uv, uv_w, ux, uy, 8, &pred, inv_residual.as_ref(), bit_depth);
         (levels, eob)
     } else if uv_bsize == 4 {
         let pred = predict_block_plane(&refs, 4, mode, false);
@@ -1297,17 +1302,18 @@ fn encode_uv_subblock(
             dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
         }
         let inv_residual = dct::inverse_dct2_4x4(&dqcoeffs);
-        reconstruct_block(recon_uv, uv_w, ux, uy, 4, &pred, &inv_residual.to_vec());
+        reconstruct_block(recon_uv, uv_w, ux, uy, 4, &pred, inv_residual.as_ref(), bit_depth);
         (levels, eob)
     } else {
         panic!("unsupported UV block size: {}", uv_bsize);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_block_var(
-    pixels: &[u8],
+    pixels: &[u16],
     plane_w: usize,
-    recon: &mut [u8],
+    recon: &mut [u16],
     x: usize,
     y: usize,
     bsize: usize,
@@ -1315,6 +1321,7 @@ fn encode_block_var(
     forced_mode: Option<IntraMode>,
     right_limit: usize,
     bottom_limit: usize,
+    bit_depth: u32,
 ) -> EncodedBlock {
     let refs = get_ref_pixels(recon, plane_w, x, y, bsize, right_limit, bottom_limit);
     let block = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
@@ -1330,7 +1337,7 @@ fn encode_block_var(
         let (levels, eob) = quantize_block(&dct_coeffs, dequant, 2);
         let dqcoeffs = dequantize_block(&levels, eob, dequant, 2);
         let inv_residual = dct::inverse_dct2_64x64_av2(&dqcoeffs);
-        reconstruct_block(recon, plane_w, x, y, 64, &pred_block, &inv_residual);
+        reconstruct_block(recon, plane_w, x, y, 64, &pred_block, &inv_residual, bit_depth);
         EncodedBlock {
             x, y, bsize, mode,
             levels: levels.to_vec(),
@@ -1345,7 +1352,7 @@ fn encode_block_var(
         let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
         let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
         let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
-        reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual);
+        reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual, bit_depth);
         EncodedBlock {
             x, y, bsize, mode,
             levels: levels.to_vec(),
@@ -1372,7 +1379,7 @@ fn encode_block_var(
             dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
         }
         let inv_residual = dct::inverse_dct2_16x16(&dqcoeffs);
-        reconstruct_block(recon, plane_w, x, y, 16, &pred_block, &inv_residual.to_vec());
+        reconstruct_block(recon, plane_w, x, y, 16, &pred_block, inv_residual.as_ref(), bit_depth);
         EncodedBlock {
             x, y, bsize, mode, levels, eob,
             log_scale: 0,
@@ -1397,7 +1404,7 @@ fn encode_block_var(
             dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
         }
         let inv_residual = dct::inverse_dct2_8x8(&dqcoeffs);
-        reconstruct_block(recon, plane_w, x, y, 8, &pred_block, &inv_residual.to_vec());
+        reconstruct_block(recon, plane_w, x, y, 8, &pred_block, inv_residual.as_ref(), bit_depth);
         EncodedBlock {
             x, y, bsize, mode, levels, eob,
             log_scale: 0,
@@ -1408,17 +1415,18 @@ fn encode_block_var(
     }
 }
 
-fn compute_ssd(a: &[u8], b: &[u8]) -> u64 {
+fn compute_ssd(a: &[u16], b: &[u16]) -> u64 {
     a.iter().zip(b.iter()).map(|(&x, &y)| {
         let d = x as i64 - y as i64;
         (d * d) as u64
     }).sum()
 }
 
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn encode_partition_rd(
-    pixels: &[u8],
+    pixels: &[u16],
     plane_w: usize,
-    recon: &mut [u8],
+    recon: &mut [u16],
     x: usize,
     y: usize,
     bsize: usize,
@@ -1427,11 +1435,12 @@ fn encode_partition_rd(
     min_bsize: usize,
     right_limit: usize,
     bottom_limit: usize,
+    bit_depth: u32,
 ) -> Vec<EncodedBlock> {
 
     let original = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
-    let recon_backup: Vec<u8> = {
-        let mut buf = vec![0u8; bsize * bsize];
+    let recon_backup: Vec<u16> = {
+        let mut buf = vec![0u16; bsize * bsize];
         for r in 0..bsize {
             for c in 0..bsize {
                 buf[r * bsize + c] = recon[(y + r) * plane_w + x + c];
@@ -1440,7 +1449,7 @@ fn encode_partition_rd(
         buf
     };
 
-    let no_split = encode_block_var(pixels, plane_w, recon, x, y, bsize, dequant, None, right_limit, bottom_limit);
+    let no_split = encode_block_var(pixels, plane_w, recon, x, y, bsize, dequant, None, right_limit, bottom_limit, bit_depth);
     let recon_no_split = extract_subblock(recon, plane_w, x, y, bsize, bsize);
     let dist_no_split = compute_ssd(&original, &recon_no_split);
 
@@ -1463,7 +1472,7 @@ fn encode_partition_rd(
         (x+half, y+half, x + bsize,         y + bsize),
     ];
     for &(bx, by, rl, bl) in &sub_params {
-        let sub = encode_partition_rd(pixels, plane_w, recon, bx, by, half, dequant, lambda, min_bsize, rl, bl);
+        let sub = encode_partition_rd(pixels, plane_w, recon, bx, by, half, dequant, lambda, min_bsize, rl, bl, bit_depth);
         split_blocks.extend(sub);
     }
 
@@ -1508,15 +1517,15 @@ pub struct EncodedSuperblock {
     pub uv_mode: IntraMode,
 }
 
-fn qindex_to_lambda(qindex: u8) -> f64 {
-    let q = ac_qlookup(qindex) as f64;
+fn qindex_to_lambda(qindex: u8, bit_depth: u32) -> f64 {
+    let q = ac_qlookup(qindex, bit_depth) as f64;
     0.04 * q * q
 }
 
 fn encode_frame_yuv(
-    y_plane: &[u8],
-    u_plane: &[u8],
-    v_plane: &[u8],
+    y_plane: &[u16],
+    u_plane: &[u16],
+    v_plane: &[u16],
     params: &FrameEncodeParams,
     allow_cdf_update: bool,
 ) -> Vec<u8> {
@@ -1527,15 +1536,15 @@ fn encode_frame_yuv(
     let uv_w = w / 2;
     let uv_h = h / 2;
 
-    let mut recon_y = vec![0u8; w * h];
-    let mut recon_u = vec![0u8; uv_w * uv_h];
-    let mut recon_v = vec![0u8; uv_w * uv_h];
+    let mut recon_y = vec![0u16; w * h];
+    let mut recon_u = vec![0u16; uv_w * uv_h];
+    let mut recon_v = vec![0u16; uv_w * uv_h];
 
     let block_offsets: [(usize, usize); 4] = [
         (0, 0), (32, 0), (0, 32), (32, 32),
     ];
 
-    let lambda = qindex_to_lambda(params.base_qindex);
+    let lambda = qindex_to_lambda(params.base_qindex, params.bit_depth);
 
     let mut sbs = Vec::with_capacity(sb_cols * sb_rows);
     for sb_row in 0..sb_rows {
@@ -1561,7 +1570,7 @@ fn encode_frame_yuv(
 
                 let mut leaf_blocks = encode_partition_rd(
                     y_plane, w, &mut recon_y, yx, yy, 32, params.dequant, lambda, 8,
-                    right_limit, bottom_limit,
+                    right_limit, bottom_limit, params.bit_depth,
                 );
 
 
@@ -1573,10 +1582,10 @@ fn encode_frame_yuv(
 
                     let uv_mode = IntraMode::DcPred;
                     let (u_levels, u_eob) = encode_uv_subblock(
-                        u_plane, uv_w, &mut recon_u, ux, uy, uv_bsize, params.dequant, uv_mode,
+                        u_plane, uv_w, &mut recon_u, ux, uy, uv_bsize, params.dequant, uv_mode, params.bit_depth,
                     );
                     let (v_levels, v_eob) = encode_uv_subblock(
-                        v_plane, uv_w, &mut recon_v, ux, uy, uv_bsize, params.dequant, uv_mode,
+                        v_plane, uv_w, &mut recon_v, ux, uy, uv_bsize, params.dequant, uv_mode, params.bit_depth,
                     );
 
                     block.uv_mode = uv_mode;
@@ -1616,7 +1625,8 @@ pub fn encode_video_yuv(
     width: u32,
     height: u32,
     base_qindex: u8,
-    frames: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+    frames: &[(Vec<u16>, Vec<u16>, Vec<u16>)],
+    bit_depth: u32,
 ) -> Vec<u8> {
     let mut output = Vec::new();
 
@@ -1626,17 +1636,18 @@ pub fn encode_video_yuv(
     let seq_config = SequenceHeaderConfig {
         width: pw,
         height: ph,
+        bit_depth,
     };
     let seq_payload = write_sequence_header(&seq_config);
     let seq_obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload);
     output.extend_from_slice(&seq_obu);
 
-    let dequant = ac_qlookup(base_qindex);
+    let dequant = ac_qlookup(base_qindex, bit_depth);
 
     for (i, (y_plane, u_plane, v_plane)) in frames.iter().enumerate() {
-        let padded_y = pad_plane(y_plane, width, height, pw, ph);
-        let padded_u = pad_plane(u_plane, width / 2, height / 2, pw / 2, ph / 2);
-        let padded_v = pad_plane(v_plane, width / 2, height / 2, pw / 2, ph / 2);
+        let padded_y = pad_plane(y_plane, width, height, pw, ph, bit_depth);
+        let padded_u = pad_plane(u_plane, width / 2, height / 2, pw / 2, ph / 2, bit_depth);
+        let padded_v = pad_plane(v_plane, width / 2, height / 2, pw / 2, ph / 2, bit_depth);
 
         let clk_obu = encode_frame_yuv(
             &padded_y,
@@ -1648,6 +1659,7 @@ pub fn encode_video_yuv(
                 dequant,
                 base_qindex,
                 order_hint: i as u32,
+                bit_depth,
             },
             true,
         );
@@ -1661,7 +1673,8 @@ pub fn encode_video_yuv_with_cdf_update(
     width: u32,
     height: u32,
     base_qindex: u8,
-    frames: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+    frames: &[(Vec<u16>, Vec<u16>, Vec<u16>)],
+    bit_depth: u32,
 ) -> Vec<u8> {
     let mut output = Vec::new();
 
@@ -1671,17 +1684,18 @@ pub fn encode_video_yuv_with_cdf_update(
     let seq_config = SequenceHeaderConfig {
         width: pw,
         height: ph,
+        bit_depth,
     };
     let seq_payload = write_sequence_header(&seq_config);
     let seq_obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &seq_payload);
     output.extend_from_slice(&seq_obu);
 
-    let dequant = ac_qlookup(base_qindex);
+    let dequant = ac_qlookup(base_qindex, bit_depth);
 
     for (i, (y_plane, u_plane, v_plane)) in frames.iter().enumerate() {
-        let padded_y = pad_plane(y_plane, width, height, pw, ph);
-        let padded_u = pad_plane(u_plane, width / 2, height / 2, pw / 2, ph / 2);
-        let padded_v = pad_plane(v_plane, width / 2, height / 2, pw / 2, ph / 2);
+        let padded_y = pad_plane(y_plane, width, height, pw, ph, bit_depth);
+        let padded_u = pad_plane(u_plane, width / 2, height / 2, pw / 2, ph / 2, bit_depth);
+        let padded_v = pad_plane(v_plane, width / 2, height / 2, pw / 2, ph / 2, bit_depth);
 
         let clk_obu = encode_frame_yuv(
             &padded_y,
@@ -1693,6 +1707,7 @@ pub fn encode_video_yuv_with_cdf_update(
                 dequant,
                 base_qindex,
                 order_hint: i as u32,
+                bit_depth,
             },
             true,
         );
@@ -1702,7 +1717,7 @@ pub fn encode_video_yuv_with_cdf_update(
     output
 }
 
-pub fn compute_residual_block(pixels: &[u8], pred_block: &[u8]) -> Vec<i32> {
+pub fn compute_residual_block(pixels: &[u16], pred_block: &[u16]) -> Vec<i32> {
     pixels
         .iter()
         .zip(pred_block.iter())
@@ -1741,7 +1756,7 @@ pub fn quantize_block(
     (levels, eob)
 }
 
-pub fn ac_qlookup(qindex: u8) -> i32 {
+pub fn ac_qlookup(qindex: u8, bit_depth: u32) -> i32 {
     #[rustfmt::skip]
     const AC_QLOOKUP_QTX: [i32; 25] = [
         64, 40, 41, 43, 44, 45, 47, 48, 49, 51, 52,
@@ -1749,10 +1764,16 @@ pub fn ac_qlookup(qindex: u8) -> i32 {
     ];
 
     let q = qindex as i32;
-    if q < 25 {
+    let base = if q < 25 {
         AC_QLOOKUP_QTX[q as usize]
     } else {
         AC_QLOOKUP_QTX[(((q - 1) % 24) + 1) as usize] << ((q - 1) / 24)
+    };
+    match bit_depth {
+        8 => base,
+        10 => base * 4,
+        12 => base * 16,
+        _ => base,
     }
 }
 
@@ -1777,19 +1798,22 @@ pub fn dequantize_block(
     dqcoeffs
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn reconstruct_block(
-    recon: &mut [u8],
+    recon: &mut [u16],
     stride: usize,
     x: usize,
     y: usize,
     bsize: usize,
-    pred_block: &[u8],
+    pred_block: &[u16],
     inv_residual: &[i32],
+    bit_depth: u32,
 ) {
+    let pixel_max = (1i32 << bit_depth) - 1;
     for row in 0..bsize {
         for col in 0..bsize {
             let pixel = (pred_block[row * bsize + col] as i32 + inv_residual[row * bsize + col])
-                .clamp(0, 255) as u8;
+                .clamp(0, pixel_max) as u16;
             recon[(y + row) * stride + x + col] = pixel;
         }
     }
@@ -1806,21 +1830,21 @@ mod tests {
 
     #[test]
     fn encode_frame_with_pixel_data() {
-        let y_plane = vec![149u8; 64 * 64];
-        let u_plane = vec![43u8; 32 * 32];
-        let v_plane = vec![21u8; 32 * 32];
-        let bs = encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)]);
+        let y_plane = vec![149u16; 64 * 64];
+        let u_plane = vec![43u16; 32 * 32];
+        let v_plane = vec![21u16; 32 * 32];
+        let bs = encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)], 8);
         assert!(!bs.is_empty());
     }
 
     #[test]
     fn ac_qlookup_qindex_0() {
-        assert_eq!(ac_qlookup(0), 64);
+        assert_eq!(ac_qlookup(0, 8), 64);
     }
 
     #[test]
     fn ac_qlookup_qindex_50() {
-        let q = ac_qlookup(50);
+        let q = ac_qlookup(50, 8);
         assert!(q > 0);
     }
 
@@ -1847,15 +1871,15 @@ mod tests {
 
     #[test]
     fn compute_residual_block_midgray() {
-        let pixels = vec![128u8; 64];
-        let residual = compute_residual_block(&pixels, &[128u8; 64]);
+        let pixels = vec![128u16; 64];
+        let residual = compute_residual_block(&pixels, &[128u16; 64]);
         assert!(residual.iter().all(|&r| r == 0));
     }
 
     #[test]
     fn compute_residual_block_values() {
-        let pixels = vec![200u8; 4];
-        let residual = compute_residual_block(&pixels, &[128u8; 4]);
+        let pixels = vec![200u16; 4];
+        let residual = compute_residual_block(&pixels, &[128u16; 4]);
         assert!(residual.iter().all(|&r| r == 72));
     }
 
@@ -1879,7 +1903,7 @@ mod tests {
 
     #[test]
     fn quantize_block_preserves_dc_value() {
-        let dequant = ac_qlookup(50);
+        let dequant = ac_qlookup(50, 8);
         let dc_from_old = quantize_dc(21, 2, dequant);
         let dc_coeff = 128 * 21;
         let dc_from_new = quantize_coeff(dc_coeff as i64, 2, dequant);
@@ -1888,12 +1912,12 @@ mod tests {
 
     #[test]
     fn solid_color_dct_produces_dc_only() {
-        let pixels = vec![200u8; 32 * 32];
-        let residual = compute_residual_block(&pixels, &vec![128u8; 32 * 32]);
+        let pixels = vec![200u16; 32 * 32];
+        let residual = compute_residual_block(&pixels, &vec![128u16; 32 * 32]);
         let mut residual_arr = [0i32; 1024];
         residual_arr.copy_from_slice(&residual);
         let dct_coeffs = crate::dct::forward_dct2_32x32(&residual_arr);
-        let dequant = ac_qlookup(50);
+        let dequant = ac_qlookup(50, 8);
         let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
         assert_eq!(eob, 1);
         assert!(levels[0] != 0);
@@ -1901,49 +1925,49 @@ mod tests {
 
     #[test]
     fn encoder_new_valid_dimensions() {
-        let enc = Encoder::new(64, 64, 50);
+        let enc = Encoder::new(64, 64, 50, 8);
         assert!(enc.is_ok());
     }
 
     #[test]
     fn encoder_new_128x128_valid() {
-        let enc = Encoder::new(128, 128, 50);
+        let enc = Encoder::new(128, 128, 50, 8);
         assert!(enc.is_ok());
     }
 
     #[test]
     fn encoder_new_invalid_dimensions() {
-        assert!(Encoder::new(101, 100, 50).is_err());
-        assert!(Encoder::new(0, 64, 50).is_err());
-        assert!(Encoder::new(3, 64, 50).is_err());
+        assert!(Encoder::new(101, 100, 50, 8).is_err());
+        assert!(Encoder::new(0, 64, 50, 8).is_err());
+        assert!(Encoder::new(3, 64, 50, 8).is_err());
     }
 
     #[test]
     fn encoder_new_accepts_multiple_of_4() {
-        assert!(Encoder::new(100, 100, 50).is_ok());
-        assert!(Encoder::new(1920, 1080, 50).is_ok());
-        assert!(Encoder::new(4, 4, 50).is_ok());
-        assert!(Encoder::new(640, 480, 50).is_ok());
+        assert!(Encoder::new(100, 100, 50, 8).is_ok());
+        assert!(Encoder::new(1920, 1080, 50, 8).is_ok());
+        assert!(Encoder::new(4, 4, 50, 8).is_ok());
+        assert!(Encoder::new(640, 480, 50, 8).is_ok());
     }
 
     #[test]
     fn encoder_new_rejects_non_multiple_of_4() {
-        assert!(Encoder::new(101, 100, 50).is_err());
-        assert!(Encoder::new(100, 3, 50).is_err());
-        assert!(Encoder::new(0, 100, 50).is_err());
-        assert!(Encoder::new(2, 2, 50).is_err());
+        assert!(Encoder::new(101, 100, 50, 8).is_err());
+        assert!(Encoder::new(100, 3, 50, 8).is_err());
+        assert!(Encoder::new(0, 100, 50, 8).is_err());
+        assert!(Encoder::new(2, 2, 50, 8).is_err());
     }
 
     #[test]
     fn encoder_width_height_return_original() {
-        let enc = Encoder::new(100, 100, 50).unwrap();
+        let enc = Encoder::new(100, 100, 50, 8).unwrap();
         assert_eq!(enc.width(), 100);
         assert_eq!(enc.height(), 100);
     }
 
     #[test]
     fn encoder_headers_returns_sequence_header_obu() {
-        let enc = Encoder::new(64, 64, 50).unwrap();
+        let enc = Encoder::new(64, 64, 50, 8).unwrap();
         let headers = enc.headers();
         assert!(!headers.is_empty());
         let obu_type = (headers[1] >> 2) & 0x1F;
@@ -1952,10 +1976,10 @@ mod tests {
 
     #[test]
     fn encoder_send_frame_produces_packet() {
-        let mut enc = Encoder::new(64, 64, 50).unwrap();
-        let y = vec![149u8; 64 * 64];
-        let u = vec![43u8; 32 * 32];
-        let v = vec![21u8; 32 * 32];
+        let mut enc = Encoder::new(64, 64, 50, 8).unwrap();
+        let y = vec![149u16; 64 * 64];
+        let u = vec![43u16; 32 * 32];
+        let v = vec![21u16; 32 * 32];
         enc.send_frame(&y, &u, &v).unwrap();
         let pkt = enc.receive_packet();
         assert!(pkt.is_some());
@@ -1966,16 +1990,16 @@ mod tests {
 
     #[test]
     fn encoder_receive_without_send_returns_none() {
-        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        let mut enc = Encoder::new(64, 64, 50, 8).unwrap();
         assert!(enc.receive_packet().is_none());
     }
 
     #[test]
     fn encoder_multi_frame_increments_frame_number() {
-        let mut enc = Encoder::new(64, 64, 50).unwrap();
-        let y = vec![128u8; 64 * 64];
-        let u = vec![128u8; 32 * 32];
-        let v = vec![128u8; 32 * 32];
+        let mut enc = Encoder::new(64, 64, 50, 8).unwrap();
+        let y = vec![128u16; 64 * 64];
+        let u = vec![128u16; 32 * 32];
+        let v = vec![128u16; 32 * 32];
 
         for expected in 0..3u64 {
             enc.send_frame(&y, &u, &v).unwrap();
@@ -1986,27 +2010,27 @@ mod tests {
 
     #[test]
     fn encoder_flush_is_noop() {
-        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        let mut enc = Encoder::new(64, 64, 50, 8).unwrap();
         enc.flush();
         assert!(enc.receive_packet().is_none());
     }
 
     #[test]
     fn encoder_rejects_wrong_plane_size() {
-        let mut enc = Encoder::new(64, 64, 50).unwrap();
-        let y = vec![128u8; 100];
-        let u = vec![128u8; 32 * 32];
-        let v = vec![128u8; 32 * 32];
+        let mut enc = Encoder::new(64, 64, 50, 8).unwrap();
+        let y = vec![128u16; 100];
+        let u = vec![128u16; 32 * 32];
+        let v = vec![128u16; 32 * 32];
         assert!(enc.send_frame(&y, &u, &v).is_err());
     }
 
     #[test]
     fn encoder_streaming_produces_valid_obu() {
-        let y = vec![149u8; 64 * 64];
-        let u = vec![43u8; 32 * 32];
-        let v = vec![21u8; 32 * 32];
+        let y = vec![149u16; 64 * 64];
+        let u = vec![43u16; 32 * 32];
+        let v = vec![21u16; 32 * 32];
 
-        let mut enc = Encoder::new(64, 64, 50).unwrap();
+        let mut enc = Encoder::new(64, 64, 50, 8).unwrap();
         enc.send_frame(&y, &u, &v).unwrap();
         let pkt = enc.receive_packet().unwrap();
         assert!(!pkt.data.is_empty());
@@ -2015,10 +2039,10 @@ mod tests {
 
     #[test]
     fn encoder_128x128_solid_color() {
-        let mut enc = Encoder::new(128, 128, 50).unwrap();
-        let y = vec![200u8; 128 * 128];
-        let u = vec![100u8; 64 * 64];
-        let v = vec![150u8; 64 * 64];
+        let mut enc = Encoder::new(128, 128, 50, 8).unwrap();
+        let y = vec![200u16; 128 * 128];
+        let u = vec![100u16; 64 * 64];
+        let v = vec![150u16; 64 * 64];
         enc.send_frame(&y, &u, &v).unwrap();
         let pkt = enc.receive_packet().unwrap();
         assert!(!pkt.data.is_empty());
@@ -2027,10 +2051,10 @@ mod tests {
 
     #[test]
     fn encoder_256x128_solid_color() {
-        let mut enc = Encoder::new(256, 128, 50).unwrap();
-        let y = vec![180u8; 256 * 128];
-        let u = vec![60u8; 128 * 64];
-        let v = vec![200u8; 128 * 64];
+        let mut enc = Encoder::new(256, 128, 50, 8).unwrap();
+        let y = vec![180u16; 256 * 128];
+        let u = vec![60u16; 128 * 64];
+        let v = vec![200u16; 128 * 64];
         enc.send_frame(&y, &u, &v).unwrap();
         let pkt = enc.receive_packet().unwrap();
         assert!(!pkt.data.is_empty());
@@ -2043,20 +2067,22 @@ mod tests {
             64,
             50,
             &[(
-                vec![149u8; 64 * 64],
-                vec![43u8; 32 * 32],
-                vec![21u8; 32 * 32],
+                vec![149u16; 64 * 64],
+                vec![43u16; 32 * 32],
+                vec![21u16; 32 * 32],
             )],
+            8,
         );
         let bs_128 = encode_video_yuv(
             128,
             128,
             50,
             &[(
-                vec![149u8; 128 * 128],
-                vec![43u8; 64 * 64],
-                vec![21u8; 64 * 64],
+                vec![149u16; 128 * 128],
+                vec![43u16; 64 * 64],
+                vec![21u16; 64 * 64],
             )],
+            8,
         );
         assert!(
             bs_128.len() > bs_64.len(),
@@ -2086,21 +2112,21 @@ mod tests {
 
     #[test]
     fn extract_subblock_full_frame() {
-        let plane: Vec<u8> = (0..16).collect();
+        let plane: Vec<u16> = (0..16).map(|x| x as u16).collect();
         let block = extract_subblock(&plane, 4, 0, 0, 4, 4);
         assert_eq!(block, plane);
     }
 
     #[test]
     fn extract_subblock_offset() {
-        let plane: Vec<u8> = (0..64).collect();
+        let plane: Vec<u16> = (0..64).map(|x| x as u16).collect();
         let block = extract_subblock(&plane, 8, 2, 1, 3, 2);
-        assert_eq!(block, vec![10, 11, 12, 18, 19, 20]);
+        assert_eq!(block, vec![10u16, 11, 12, 18, 19, 20]);
     }
 
     #[test]
     fn dequantize_coeff_roundtrip() {
-        let dequant = ac_qlookup(50);
+        let dequant = ac_qlookup(50, 8);
         let residual = 21i32;
         let dc_coeff = 128i64 * residual as i64;
         let level = quantize_coeff(dc_coeff, 2, dequant);
@@ -2112,7 +2138,7 @@ mod tests {
 
     #[test]
     fn dequantize_block_dc_only() {
-        let dequant = ac_qlookup(50);
+        let dequant = ac_qlookup(50, 8);
         let mut levels = [0i32; 1024];
         levels[0] = 524;
         let dqcoeffs = dequantize_block(&levels, 1, dequant, 2);
@@ -2122,25 +2148,25 @@ mod tests {
 
     #[test]
     fn reconstruct_block_basic() {
-        let mut recon = vec![0u8; 4];
+        let mut recon = vec![0u16; 4];
         let inv_residual = [10i32, 20, -5, 30];
-        reconstruct_block(&mut recon, 2, 0, 0, 2, &[128u8; 4], &inv_residual);
+        reconstruct_block(&mut recon, 2, 0, 0, 2, &[128u16; 4], &inv_residual, 8);
         assert_eq!(recon, vec![138, 148, 123, 158]);
     }
 
     #[test]
     fn reconstruct_block_clamps() {
-        let mut recon = vec![0u8; 4];
+        let mut recon = vec![0u16; 4];
         let inv_residual = [200i32, -200, 0, 0];
-        reconstruct_block(&mut recon, 2, 0, 0, 2, &[128u8; 4], &inv_residual);
+        reconstruct_block(&mut recon, 2, 0, 0, 2, &[128u16; 4], &inv_residual, 8);
         assert_eq!(recon[0], 255);
         assert_eq!(recon[1], 0);
     }
 
     #[test]
     fn compute_residual_block_custom_prediction() {
-        let pixels = vec![200u8; 4];
-        let residual = compute_residual_block(&pixels, &[150u8; 4]);
+        let pixels = vec![200u16; 4];
+        let residual = compute_residual_block(&pixels, &[150u16; 4]);
         assert!(residual.iter().all(|&r| r == 50));
     }
 
@@ -2148,10 +2174,10 @@ mod tests {
     fn encode_video_yuv_non_aligned() {
         let w = 100u32;
         let h = 100u32;
-        let y = vec![200u8; (w * h) as usize];
-        let u = vec![128u8; (w / 2 * h / 2) as usize];
-        let v = vec![128u8; (w / 2 * h / 2) as usize];
-        let bs = encode_video_yuv(w, h, 50, &[(y, u, v)]);
+        let y = vec![200u16; (w * h) as usize];
+        let u = vec![128u16; (w / 2 * h / 2) as usize];
+        let v = vec![128u16; (w / 2 * h / 2) as usize];
+        let bs = encode_video_yuv(w, h, 50, &[(y, u, v)], 8);
         assert!(!bs.is_empty());
     }
 
@@ -2171,15 +2197,15 @@ mod tests {
 
     #[test]
     fn pad_plane_no_padding_needed() {
-        let plane = vec![200u8; 64 * 64];
-        let padded = pad_plane(&plane, 64, 64, 64, 64);
+        let plane = vec![200u16; 64 * 64];
+        let padded = pad_plane(&plane, 64, 64, 64, 64, 8);
         assert_eq!(padded, plane);
     }
 
     #[test]
     fn pad_plane_pads_right_and_bottom() {
-        let plane = vec![200u8; 4 * 4];
-        let padded = pad_plane(&plane, 4, 4, 64, 64);
+        let plane = vec![200u16; 4 * 4];
+        let padded = pad_plane(&plane, 4, 4, 64, 64, 8);
         assert_eq!(padded.len(), 64 * 64);
         assert_eq!(padded[0], 200);
         assert_eq!(padded[3], 200);
@@ -2189,11 +2215,11 @@ mod tests {
 
     #[test]
     fn pad_plane_preserves_original_pixels() {
-        let mut plane = vec![0u8; 100 * 100];
+        let mut plane = vec![0u16; 100 * 100];
         for (i, pixel) in plane.iter_mut().enumerate() {
-            *pixel = (i % 256) as u8;
+            *pixel = (i % 256) as u16;
         }
-        let padded = pad_plane(&plane, 100, 100, 128, 128);
+        let padded = pad_plane(&plane, 100, 100, 128, 128, 8);
         for row in 0..100 {
             for col in 0..100 {
                 assert_eq!(
@@ -2218,7 +2244,7 @@ mod tests {
 
     #[test]
     fn ref_pixels_no_neighbors() {
-        let recon = vec![0u8; 64 * 64];
+        let recon = vec![0u16; 64 * 64];
         let refs = get_ref_pixels(&recon, 64, 0, 0, 32, 64, 64);
         assert!(refs.above.iter().all(|&v| v == 127));
         assert!(refs.left.iter().all(|&v| v == 129));
@@ -2229,7 +2255,7 @@ mod tests {
 
     #[test]
     fn ref_pixels_above_only() {
-        let mut recon = vec![0u8; 128 * 128];
+        let mut recon = vec![0u16; 128 * 128];
         for i in 0..64 {
             recon[63 * 128 + i] = 200;
         }
@@ -2243,7 +2269,7 @@ mod tests {
 
     #[test]
     fn ref_pixels_left_only() {
-        let mut recon = vec![0u8; 128 * 128];
+        let mut recon = vec![0u16; 128 * 128];
         for j in 0..64 {
             recon[j * 128 + 63] = 150;
         }
@@ -2257,7 +2283,7 @@ mod tests {
 
     #[test]
     fn ref_pixels_both_neighbors() {
-        let mut recon = vec![0u8; 128 * 128];
+        let mut recon = vec![0u16; 128 * 128];
         for i in 0..64 {
             recon[63 * 128 + 64 + i] = 200;
         }
@@ -2339,7 +2365,7 @@ mod tests {
 
     #[test]
     fn select_mode_flat_block_picks_dc() {
-        let pixels = vec![150u8; 32 * 32];
+        let pixels = vec![150u16; 32 * 32];
         let refs = RefPixels::new_test(vec![150; 32], vec![150; 32], 150, true, true, 150, 150);
         assert_eq!(select_intra_mode(&pixels, &refs, 32), IntraMode::DcPred);
     }
@@ -2395,21 +2421,21 @@ mod tests {
     #[test]
     fn mode_list_default_has_all_13_base_modes_in_set0() {
         let list = build_y_mode_list(None, None, true, false);
-        for i in 0..13 {
-            assert!(list[i] >= 0, "mode list position {} should be filled", i);
+        for (i, &val) in list.iter().enumerate().take(13) {
+            assert!(val >= 0, "mode list position {} should be filled", i);
         }
     }
 
     #[test]
     fn compute_sad_identical() {
-        let a = vec![100u8; 64];
+        let a = vec![100u16; 64];
         assert_eq!(compute_sad(&a, &a), 0);
     }
 
     #[test]
     fn compute_sad_known_value() {
-        let a = vec![100u8; 4];
-        let b = vec![110u8; 4];
+        let a = vec![100u16; 4];
+        let b = vec![110u16; 4];
         assert_eq!(compute_sad(&a, &b), 40);
     }
 

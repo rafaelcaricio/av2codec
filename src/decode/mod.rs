@@ -76,11 +76,12 @@ fn trace_point(tag: &str) -> Option<(usize, usize)> {
 }
 
 pub struct DecodedFrame {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+    pub y: Vec<u16>,
+    pub u: Vec<u16>,
+    pub v: Vec<u16>,
     pub width: u32,
     pub height: u32,
+    pub bit_depth: u32,
     pub frame_number: u64,
 }
 
@@ -108,9 +109,10 @@ impl Decoder {
                 continue;
             }
             let fp = frame::parse_frame_header(raw_obu.payload, &seq)?;
-            let dequant = crate::encode::ac_qlookup(fp.base_qindex);
+            let dequant = crate::encode::ac_qlookup(fp.base_qindex, seq.bit_depth);
             let uv_dequant = crate::encode::ac_qlookup(
                 (fp.base_qindex as i32 + fp.u_ac_delta_q).clamp(0, 255) as u8,
+                seq.bit_depth,
             );
             let sb_cols = (seq.width / 64) as usize;
             let sb_rows = (seq.height / 64) as usize;
@@ -229,6 +231,7 @@ impl Decoder {
                 v: v_plane,
                 width: seq.width,
                 height: seq.height,
+                bit_depth: 8,
                 frame_number,
             });
             frame_number += 1;
@@ -272,7 +275,7 @@ struct CflImplicitSample {
     side: &'static str,
     idx: usize,
     x_q3: i32,
-    y: u8,
+    y: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -377,13 +380,13 @@ fn clamp_index(index: isize, limit: usize) -> usize {
 }
 
 fn sample_plane(
-    plane: &[u8],
+    plane: &[u16],
     stride: usize,
     width: usize,
     height: usize,
     x: isize,
     y: isize,
-) -> u8 {
+) -> u16 {
     plane[clamp_index(y, height) * stride + clamp_index(x, width)]
 }
 
@@ -391,8 +394,9 @@ fn cfl_top_bottom_offsets(is_top_sb_boundary: bool) -> (isize, isize) {
     if is_top_sb_boundary { (1, 0) } else { (2, 1) }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cfl_store_luma_q3_420(
-    y_plane: &[u8],
+    y_plane: &[u16],
     y_w: usize,
     y_h: usize,
     chroma_x: usize,
@@ -442,8 +446,9 @@ fn cfl_store_luma_q3_420(
     recon_q3
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cfl_fetch_neighbor_luma_refs_420(
-    y_plane: &[u8],
+    y_plane: &[u16],
     y_w: usize,
     y_h: usize,
     chroma_x: usize,
@@ -457,7 +462,7 @@ fn cfl_fetch_neighbor_luma_refs_420(
     let uv_bh = chroma_height / 2;
     let have_top = chroma_y > 0;
     let have_left = chroma_x > 0;
-    let is_top_sb_boundary = chroma_y % sb_size == 0;
+    let is_top_sb_boundary = chroma_y.is_multiple_of(sb_size);
     let trace = trace_block_match("WAV2C_TRACE_CFL", chroma_x / 2, chroma_y / 2);
     let mut luma_top_q3 = vec![0i32; uv_bw];
     let mut luma_left_q3 = vec![0i32; uv_bh];
@@ -578,16 +583,16 @@ fn cfl_fetch_neighbor_luma_refs_420(
 }
 
 fn cfl_fetch_neighbor_chroma_refs(
-    chroma_plane: &[u8],
+    chroma_plane: &[u16],
     uv_w: usize,
     uv_h: usize,
     uv_bx: usize,
     uv_by: usize,
     uv_bw: usize,
     uv_bh: usize,
-) -> (Vec<u8>, Vec<u8>) {
-    let mut top = vec![0u8; uv_bw];
-    let mut left = vec![0u8; uv_bh];
+) -> (Vec<u16>, Vec<u16>) {
+    let mut top = vec![0u16; uv_bw];
+    let mut left = vec![0u16; uv_bh];
     let trace = trace_block_match("WAV2C_TRACE_CFL", uv_bx, uv_by);
 
     if uv_by > 0 {
@@ -605,8 +610,8 @@ fn cfl_fetch_neighbor_chroma_refs(
             }
             eprintln!("[WAV2C_CFL_FETCH_CHROMA_SRC_TOP] {:?}", src_top);
         }
-        for x in 0..uv_bw {
-            top[x] = sample_plane(
+        for (x, top_val) in top.iter_mut().enumerate() {
+            *top_val = sample_plane(
                 chroma_plane,
                 uv_w,
                 uv_w,
@@ -626,8 +631,8 @@ fn cfl_fetch_neighbor_chroma_refs(
     }
 
     if uv_bx > 0 {
-        for y in 0..uv_bh {
-            left[y] = sample_plane(
+        for (y, left_val) in left.iter_mut().enumerate() {
+            *left_val = sample_plane(
                 chroma_plane,
                 uv_w,
                 uv_w,
@@ -707,8 +712,8 @@ fn cfl_sample_counts(
 
 fn cfl_derive_implicit_alpha_q3(
     refs: &CflImplicitRefs,
-    chroma_top: &[u8],
-    chroma_left: &[u8],
+    chroma_top: &[u16],
+    chroma_left: &[u16],
     width: usize,
     height: usize,
 ) -> CflImplicitAlpha {
@@ -804,7 +809,7 @@ fn mhccp_pixel_is_ready(
     x: usize,
     y: usize,
 ) -> bool {
-    x < stride && y < frame_h && ready.map_or(true, |mask| mask[y * stride + x])
+    x < stride && y < frame_h && ready.is_none_or(|mask| mask[y * stride + x])
 }
 
 fn mhccp_count_available_horizontal(
@@ -858,8 +863,9 @@ fn mhccp_should_fill(
 }
 
 
+#[allow(clippy::too_many_arguments)]
 fn mhccp_sample_chroma_input(
-    chroma_plane: &[u8],
+    chroma_plane: &[u16],
     uv_w: usize,
     uv_h: usize,
     origin_uv_x: usize,
@@ -870,7 +876,7 @@ fn mhccp_sample_chroma_input(
     uv_by: usize,
     uv_bw: usize,
     uv_bh: usize,
-    dc_pred: &[u8],
+    dc_pred: &[u16],
 ) -> u16 {
     let abs_x = origin_uv_x as isize + sample_x;
     let abs_y = origin_uv_y as isize + sample_y;
@@ -881,9 +887,9 @@ fn mhccp_sample_chroma_input(
     {
         let local_x = (abs_x as usize) - uv_bx;
         let local_y = (abs_y as usize) - uv_by;
-        dc_pred[local_y * uv_bw + local_x] as u16
+        dc_pred[local_y * uv_bw + local_x]
     } else {
-        sample_plane(chroma_plane, uv_w, uv_w, uv_h, abs_x, abs_y) as u16
+        sample_plane(chroma_plane, uv_w, uv_w, uv_h, abs_x, abs_y)
     }
 }
 
@@ -1030,24 +1036,25 @@ fn mhccp_gauss_elimination(
     let mut c = [[0i32; MHCCP_NUM_PARAMS + 1]; MHCCP_NUM_PARAMS];
 
     for i in 0..num_eq {
-        for j in 0..num_eq {
-            c[i][j] = if j >= i { a[i][j] } else { a[j][i] };
+        for (j, c_val) in c[i][..num_eq].iter_mut().enumerate() {
+            *c_val = if j >= i { a[i][j] } else { a[j][i] };
         }
-        c[i][i] += reg as i32;
+        c[i][i] += reg;
         c[i][col] = y[i];
     }
 
     for i in 0..num_eq {
         let diag = c[i][i].abs().max(1) as u32;
         let (scale, _, shift) = mhccp_get_division_scale_shift(diag);
-        for j in (i + 1)..=num_eq {
-            c[i][j] = mul_fixed32_adapt(c[i][j], scale, shift);
+        for val in &mut c[i][(i + 1)..=num_eq] {
+            *val = mul_fixed32_adapt(*val, scale, shift);
         }
         for j in (i + 1)..num_eq {
             let scale_factor = c[j][i];
-            for k in (i + 1)..=num_eq {
-                let delta = mul_fixed32_adapt(scale_factor, c[i][k], MHCCP_DECIM_BITS);
-                c[j][k] -= delta;
+            let ci_row = c[i];
+            for (ck, ci_k) in c[j][(i + 1)..=num_eq].iter_mut().zip(ci_row[(i + 1)..=num_eq].iter()) {
+                let delta = mul_fixed32_adapt(scale_factor, *ci_k, MHCCP_DECIM_BITS);
+                *ck -= delta;
             }
         }
     }
@@ -1065,12 +1072,13 @@ fn mhccp_convolve(params: &[i32; MHCCP_NUM_PARAMS], vector: &[u16; MHCCP_NUM_PAR
     sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mhccp_build_ref_window(
-    y_plane: &[u8],
+    y_plane: &[u16],
     _y_ready: &[bool],
     y_w: usize,
     y_h: usize,
-    chroma_plane: &[u8],
+    chroma_plane: &[u16],
     chroma_ready: &[bool],
     uv_w: usize,
     uv_h: usize,
@@ -1078,7 +1086,7 @@ fn mhccp_build_ref_window(
     uv_by: usize,
     uv_bw: usize,
     uv_bh: usize,
-    dc_pred: &[u8],
+    dc_pred: &[u16],
     cfl_ds_filter_index: u8,
     sb_size: usize,
     plane_name: char,
@@ -1136,7 +1144,7 @@ fn mhccp_build_ref_window(
         .min(64)
         .min(uv_h.saturating_sub(origin_uv_y));
     let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
-    let is_top_sb_boundary = (uv_by * 2) % sb_size == 0;
+    let is_top_sb_boundary = (uv_by * 2).is_multiple_of(sb_size);
 
     let origin_lx = origin_uv_x * 2;
     let origin_ly = origin_uv_y * 2;
@@ -1395,16 +1403,16 @@ fn mhccp_derive_params(
     if matrix_shift > 0 {
         for i in 0..MHCCP_NUM_PARAMS {
             ty[i] <<= matrix_shift;
-            for j in i..MHCCP_NUM_PARAMS {
-                ata[i][j] <<= matrix_shift;
+            for val in &mut ata[i][i..MHCCP_NUM_PARAMS] {
+                *val <<= matrix_shift;
             }
         }
     } else if matrix_shift < 0 {
         let shift = -matrix_shift;
         for i in 0..MHCCP_NUM_PARAMS {
             ty[i] >>= shift;
-            for j in i..MHCCP_NUM_PARAMS {
-                ata[i][j] >>= shift;
+            for val in &mut ata[i][i..MHCCP_NUM_PARAMS] {
+                *val >>= shift;
             }
         }
     }
@@ -1435,6 +1443,7 @@ fn mhccp_derive_params(
     params
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mhccp_predict_plane(
     window: &MhccpRefWindow,
     uv_bw: usize,
@@ -1444,8 +1453,8 @@ fn mhccp_predict_plane(
     plane_name: char,
     uv_bx: usize,
     uv_by: usize,
-) -> Vec<u8> {
-    let mut pred = vec![128u8; uv_bw * uv_bh];
+) -> Vec<u16> {
+    let mut pred = vec![128u16; uv_bw * uv_bh];
     let mid = 1u16 << 7;
     let trace = trace_block_match("WAV2C_TRACE_MHCCP", uv_bx, uv_by);
 
@@ -1471,7 +1480,7 @@ fn mhccp_predict_plane(
             } else if mh_dir == 2 {
                 vector[0] = left;
             }
-            let value = mhccp_convolve(&params, &vector).clamp(0, 255) as u8;
+            let value = mhccp_convolve(&params, &vector).clamp(0, 255) as u16;
             pred[row * uv_bw + col] = value;
             if trace {
                 eprintln!(
@@ -1496,14 +1505,15 @@ fn mhccp_predict_plane(
     pred
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reconstruct_tu(
-    recon: &mut [u8],
+    recon: &mut [u16],
     stride: usize,
     tu_x: usize,
     tu_y: usize,
     tu_w: usize,
     tu_h: usize,
-    pred: &[u8],
+    pred: &[u16],
     pred_w: usize,
     pred_x_offset: usize,
     pred_y_offset: usize,
@@ -1513,12 +1523,13 @@ fn reconstruct_tu(
         for col in 0..tu_w {
             let pred_val = pred[(pred_y_offset + row) * pred_w + pred_x_offset + col] as i32;
             let res_val = residuals[row * tu_w + col];
-            let pixel = (pred_val + res_val).clamp(0, 255) as u8;
+            let pixel = (pred_val + res_val).clamp(0, 255) as u16;
             recon[(tu_y + row) * stride + tu_x + col] = pixel;
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn trace_uv_recon_tu(
     plane: usize,
     tu_x: usize,
@@ -1531,11 +1542,11 @@ fn trace_uv_recon_tu(
     levels: &[i32],
     dqcoeffs: &[i32],
     residuals: &[i32],
-    pred: &[u8],
+    pred: &[u16],
     pred_w: usize,
     pred_x_offset: usize,
     pred_y_offset: usize,
-    recon: &[u8],
+    recon: &[u16],
     recon_stride: usize,
 ) {
     if !trace_block_match("WAV2C_TRACE_UV_RECON", tu_x, tu_y) {
@@ -1557,11 +1568,11 @@ fn trace_uv_recon_tu(
     );
     eprintln!("[WAV2C_UV_RECON] plane={} dq={:?}", plane, dqcoeffs);
     for row in 0..tu_h {
-        let pred_row: Vec<u8> = (0..tu_w)
+        let pred_row: Vec<u16> = (0..tu_w)
             .map(|col| pred[(pred_y_offset + row) * pred_w + pred_x_offset + col])
             .collect();
         let res_row: Vec<i32> = (0..tu_w).map(|col| residuals[row * tu_w + col]).collect();
-        let recon_row: Vec<u8> = (0..tu_w)
+        let recon_row: Vec<u16> = (0..tu_w)
             .map(|col| recon[(tu_y + row) * recon_stride + tu_x + col])
             .collect();
         eprintln!(
@@ -1616,7 +1627,7 @@ fn neighbor_filter_types(filter_map: &[u8], stride: usize, x: usize, y: usize) -
 
 
 fn uv_mode_filter_type(mode: u8) -> u8 {
-    matches!(mode, 9 | 10 | 11) as u8
+    matches!(mode, 9..=11) as u8
 }
 
 const BLK_SIZE_LOG2_BAWP: [usize; 17] = [0, 0, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4];
@@ -1692,8 +1703,9 @@ fn derive_linear_parameters_beta(
     ((((sum_y as i64) << shift) - (sum_x as i64 * alpha as i64)) / count as i64) as i32
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_intrabc_morph_pred_luma(
-    plane: &[u8],
+    plane: &[u16],
     stride: usize,
     frame_w: usize,
     frame_h: usize,
@@ -1703,7 +1715,7 @@ fn apply_intrabc_morph_pred_luma(
     bh: usize,
     src_x: i32,
     src_y: i32,
-    pred: &mut [u8],
+    pred: &mut [u16],
 ) {
     if src_x < 0 || src_y < 0 || bx >= frame_w || by >= frame_h {
         return;
@@ -1802,7 +1814,7 @@ fn apply_intrabc_morph_pred_luma(
     for j in 0..bh {
         for i in 0..bw {
             let idx = j * bw + i;
-            let v = ((pred[idx] as i32 * alpha + beta) >> shift).clamp(0, 255) as u8;
+            let v = ((pred[idx] as i32 * alpha + beta) >> shift).clamp(0, 255) as u16;
             pred[idx] = v;
         }
     }
@@ -1814,7 +1826,7 @@ fn trace_uv_write(
     stage: &str,
     x: usize,
     y: usize,
-    value: u8,
+    value: u16,
     block: &tile::DecodedBlock,
 ) {
     if trace_block_match("WAV2C_TRACE_UV_WRITE", x, y) {
@@ -1845,6 +1857,7 @@ fn trace_uv_write(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reconstruct_partitioned_frame(
     blocks: &[tile::DecodedBlock],
     width: u32,
@@ -1856,14 +1869,14 @@ fn reconstruct_partitioned_frame(
     sb_size: usize,
     enable_ibp: bool,
     ccso_params: &frame::CcsoParams,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
     let w = width as usize;
     let h = height as usize;
     let uv_w = w / 2;
     let uv_h = h / 2;
-    let mut y_plane = vec![128u8; w * h];
-    let mut u_plane = vec![128u8; uv_w * uv_h];
-    let mut v_plane = vec![128u8; uv_w * uv_h];
+    let mut y_plane = vec![128u16; w * h];
+    let mut u_plane = vec![128u16; uv_w * uv_h];
+    let mut v_plane = vec![128u16; uv_w * uv_h];
     let mut y_ready = vec![false; w * h];
     let mut u_ready = vec![false; uv_w * uv_h];
     let mut v_ready = vec![false; uv_w * uv_h];
@@ -1872,8 +1885,8 @@ fn reconstruct_partitioned_frame(
     let mut mhccp_u_scratch = vec![0u16; MHCCP_BUF_SQUARE];
     let mut mhccp_v_scratch = vec![0u16; MHCCP_BUF_SQUARE];
 
-    let mi_cols = (w + 3) / 4;
-    let mi_rows = (h + 3) / 4;
+    let mi_cols = w.div_ceil(4);
+    let mi_rows = h.div_ceil(4);
     let mut joint_grid = vec![0u8; mi_cols * mi_rows];
 
     for (block_idx, block) in blocks.iter().enumerate() {
@@ -1947,7 +1960,7 @@ fn reconstruct_partitioned_frame(
             if block.is_intrabc {
                 let src_x = bx as i32 + block.bv_col / 8;
                 let src_y = by as i32 + block.bv_row / 8;
-                let mut y_pred = vec![128u8; bw * bh];
+                let mut y_pred = vec![128u16; bw * bh];
                 for r in 0..bh {
                     for c in 0..bw {
                         let sy = src_y + r as i32;
@@ -2005,11 +2018,11 @@ fn reconstruct_partitioned_frame(
                     }
                 }
             } else if !block.palette_y_map.is_empty() {
-                let mut y_pred = vec![128u8; bw * bh];
+                let mut y_pred = vec![128u16; bw * bh];
                 for r in 0..bh {
                     for c in 0..bw {
                         let color_idx = block.palette_y_map[r * bw + c] as usize;
-                        y_pred[r * bw + c] = block.palette_y_colors[color_idx] as u8;
+                        y_pred[r * bw + c] = block.palette_y_colors[color_idx];
                     }
                 }
                 for tu in block.y_tu.iter() {
@@ -2101,8 +2114,8 @@ fn reconstruct_partitioned_frame(
             let (u_pred, v_pred) = if block.is_intrabc {
                 let uv_src_x = uv_bx as i32 + block.bv_col / 16;
                 let uv_src_y = uv_by as i32 + block.bv_row / 16;
-                let mut u_pred = vec![128u8; uv_bw * uv_bh];
-                let mut v_pred = vec![128u8; uv_bw * uv_bh];
+                let mut u_pred = vec![128u16; uv_bw * uv_bh];
+                let mut v_pred = vec![128u16; uv_bw * uv_bh];
                 for r in 0..uv_bh {
                     for c in 0..uv_bw {
                         let sy = uv_src_y + r as i32;
@@ -2371,18 +2384,18 @@ fn reconstruct_partitioned_frame(
                         eprintln!("[WAV2C_CFL_AC] recon_q3={:?}", recon_q3);
                     }
 
-                    let mut u_cfl = vec![0u8; uv_bw * uv_bh];
-                    let mut v_cfl = vec![0u8; uv_bw * uv_bh];
+                    let mut u_cfl = vec![0u16; uv_bw * uv_bh];
+                    let mut v_cfl = vec![0u16; uv_bw * uv_bh];
                     for r in 0..uv_bh {
                         for c in 0..uv_bw {
                             let ac = recon_q3[r * uv_bw + c] - avg_q3;
                             let u_dc = u_dc_pred[r * uv_bw + c] as i32;
                             let u_scaled = round_power_of_two_signed(alpha_u_q3 * ac, 11);
-                            u_cfl[r * uv_bw + c] = (u_dc + u_scaled).clamp(0, 255) as u8;
+                            u_cfl[r * uv_bw + c] = (u_dc + u_scaled).clamp(0, 255) as u16;
 
                             let v_dc = v_dc_pred[r * uv_bw + c] as i32;
                             let v_scaled = round_power_of_two_signed(alpha_v_q3 * ac, 11);
-                            v_cfl[r * uv_bw + c] = (v_dc + v_scaled).clamp(0, 255) as u8;
+                            v_cfl[r * uv_bw + c] = (v_dc + v_scaled).clamp(0, 255) as u16;
                         }
                     }
                     if trace_cfl {
@@ -2681,8 +2694,7 @@ fn reconstruct_partitioned_frame(
                             uv_w,
                         );
                         if trace_point_in_region("WAV2C_TRACE_UV_WRITE", u_tx, u_ty, u_tu_w, u_tu_h)
-                        {
-                            if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                            && let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
                                 trace_uv_write(
                                     block_idx,
                                     1,
@@ -2693,7 +2705,6 @@ fn reconstruct_partitioned_frame(
                                     block,
                                 );
                             }
-                        }
                         mark_region_ready(&mut u_ready, uv_w, u_tx, u_ty, u_tu_w, u_tu_h);
                         mark_region_filter(
                             &mut uv_filter,
@@ -2764,8 +2775,7 @@ fn reconstruct_partitioned_frame(
                             uv_w,
                         );
                         if trace_point_in_region("WAV2C_TRACE_UV_WRITE", v_tx, v_ty, v_tu_w, v_tu_h)
-                        {
-                            if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                            && let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
                                 trace_uv_write(
                                     block_idx,
                                     2,
@@ -2776,7 +2786,6 @@ fn reconstruct_partitioned_frame(
                                     block,
                                 );
                             }
-                        }
                         mark_region_ready(&mut v_ready, uv_w, v_tx, v_ty, v_tu_w, v_tu_h);
                         mark_region_filter(
                             &mut uv_filter,
@@ -2800,8 +2809,8 @@ fn reconstruct_partitioned_frame(
                     u_plane[dst..dst + uv_bw].copy_from_slice(&u_pred[src..src + uv_bw]);
                     v_plane[dst..dst + uv_bw].copy_from_slice(&v_pred[src..src + uv_bw]);
                 }
-                if trace_point_in_region("WAV2C_TRACE_UV_WRITE", uv_bx, uv_by, uv_bw, uv_bh) {
-                    if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                if trace_point_in_region("WAV2C_TRACE_UV_WRITE", uv_bx, uv_by, uv_bw, uv_bh)
+                    && let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
                         trace_uv_write(
                             block_idx,
                             1,
@@ -2821,7 +2830,6 @@ fn reconstruct_partitioned_frame(
                             block,
                         );
                     }
-                }
                 mark_region_ready(&mut u_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
                 mark_region_ready(&mut v_ready, uv_w, uv_bx, uv_by, uv_bw, uv_bh);
                 mark_region_filter(
@@ -2904,8 +2912,8 @@ fn reconstruct_partitioned_frame(
                         uv_by + u_tu.row_offset,
                         u_tu_w,
                         u_tu_h,
-                    ) {
-                        if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                    )
+                        && let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
                             trace_uv_write(
                                 block_idx,
                                 1,
@@ -2916,7 +2924,6 @@ fn reconstruct_partitioned_frame(
                                 block,
                             );
                         }
-                    }
                     mark_region_ready(
                         &mut u_ready,
                         uv_w,
@@ -2975,8 +2982,8 @@ fn reconstruct_partitioned_frame(
                         uv_by + v_tu.row_offset,
                         v_tu_w,
                         v_tu_h,
-                    ) {
-                        if let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
+                    )
+                        && let Some((px, py)) = trace_point("WAV2C_TRACE_UV_WRITE") {
                             trace_uv_write(
                                 block_idx,
                                 2,
@@ -2987,7 +2994,6 @@ fn reconstruct_partitioned_frame(
                                 block,
                             );
                         }
-                    }
                     mark_region_ready(
                         &mut v_ready,
                         uv_w,
@@ -3023,13 +3029,13 @@ const CCSO_QUANT_SZ_LOCAL: [[i32; 4]; 4] = [
     [80, 112, 160, 256],
 ];
 
-fn build_ccso_extended_luma(y_plane: &[u8], width: usize, height: usize) -> (Vec<u16>, usize) {
+fn build_ccso_extended_luma(y_plane: &[u16], width: usize, height: usize) -> (Vec<u16>, usize) {
     let stride = width + (CCSO_PADDING_SIZE << 1);
     let mut ext = vec![0u16; (height + (CCSO_PADDING_SIZE << 1)) * stride];
     for y in 0..height {
         let dst = (y + CCSO_PADDING_SIZE) * stride + CCSO_PADDING_SIZE;
         for x in 0..width {
-            ext[dst + x] = y_plane[y * width + x] as u16;
+            ext[dst + x] = y_plane[y * width + x];
         }
     }
 
@@ -3102,7 +3108,7 @@ fn ccso_filter_class(
 fn apply_ccso_plane(
     ext_y: &[u16],
     ext_stride: usize,
-    dst: &mut [u8],
+    dst: &mut [u16],
     dst_width: usize,
     dst_height: usize,
     plane: usize,
@@ -3136,15 +3142,15 @@ fn apply_ccso_plane(
             };
             let lut_idx = (band << 4) + (cls0 << 2) + cls1;
             let filtered = dst[y * dst_width + x] as i32 + params.filter_offset[lut_idx] as i32;
-            dst[y * dst_width + x] = filtered.clamp(0, 255) as u8;
+            dst[y * dst_width + x] = filtered.clamp(0, 255) as u16;
         }
     }
 }
 
 fn apply_ccso_frame(
-    y_plane: &[u8],
-    u_plane: &mut [u8],
-    v_plane: &mut [u8],
+    y_plane: &[u16],
+    u_plane: &mut [u16],
+    v_plane: &mut [u16],
     width: usize,
     height: usize,
     ccso_params: &frame::CcsoParams,
@@ -3174,13 +3180,13 @@ fn apply_ccso_frame(
     );
 }
 
-fn gray_frame(width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+fn gray_frame(width: u32, height: u32) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
     let w = width as usize;
     let h = height as usize;
     (
-        vec![128u8; w * h],
-        vec![128u8; (w / 2) * (h / 2)],
-        vec![128u8; (w / 2) * (h / 2)],
+        vec![128u16; w * h],
+        vec![128u16; (w / 2) * (h / 2)],
+        vec![128u16; (w / 2) * (h / 2)],
     )
 }
 
@@ -3191,14 +3197,14 @@ fn reconstruct_frame(
     width: u32,
     height: u32,
     dequant: i32,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
     let w = width as usize;
     let h = height as usize;
     let uv_w = w / 2;
     let uv_h = h / 2;
-    let mut y_plane = vec![0u8; w * h];
-    let mut u_plane = vec![0u8; uv_w * uv_h];
-    let mut v_plane = vec![0u8; uv_w * uv_h];
+    let mut y_plane = vec![0u16; w * h];
+    let mut u_plane = vec![0u16; uv_w * uv_h];
+    let mut v_plane = vec![0u16; uv_w * uv_h];
 
     for sb_row in 0..sb_rows {
         for sb_col in 0..sb_cols {
@@ -3219,6 +3225,7 @@ fn reconstruct_frame(
                 64,
                 &y_pred_block,
                 &y_residuals,
+                8,
             );
 
             let uv_x = sb_col * 32;
@@ -3236,6 +3243,7 @@ fn reconstruct_frame(
                 32,
                 &u_pred_block,
                 &u_residuals,
+                8,
             );
 
             let v_pred_block =
@@ -3250,6 +3258,7 @@ fn reconstruct_frame(
                 32,
                 &v_pred_block,
                 &v_residuals,
+                8,
             );
         }
     }
@@ -3265,10 +3274,10 @@ mod tests {
 
     #[test]
     fn decode_solid_gray() {
-        let y = vec![128u8; 64 * 64];
-        let u = vec![128u8; 32 * 32];
-        let v = vec![128u8; 32 * 32];
-        let bs = encode_video_yuv(64, 64, 50, &[(y, u, v)]);
+        let y = vec![128u16; 64 * 64];
+        let u = vec![128u16; 32 * 32];
+        let v = vec![128u16; 32 * 32];
+        let bs = encode_video_yuv(64, 64, 50, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].width, 64);
@@ -3278,10 +3287,10 @@ mod tests {
 
     #[test]
     fn decode_solid_green() {
-        let y = vec![149u8; 64 * 64];
-        let u = vec![43u8; 32 * 32];
-        let v = vec![21u8; 32 * 32];
-        let bs = encode_video_yuv(64, 64, 50, &[(y, u, v)]);
+        let y = vec![149u16; 64 * 64];
+        let u = vec![43u16; 32 * 32];
+        let v = vec![21u16; 32 * 32];
+        let bs = encode_video_yuv(64, 64, 50, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         for (i, &p) in frames[0].y.iter().enumerate() {
@@ -3296,27 +3305,27 @@ mod tests {
 
     #[test]
     fn decode_multi_frame() {
-        let frames_in: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = (0..3)
+        let frames_in: Vec<(Vec<u16>, Vec<u16>, Vec<u16>)> = (0..3)
             .map(|i| {
                 let val = 100 + i * 20;
                 (
                     vec![val; 64 * 64],
-                    vec![128u8; 32 * 32],
-                    vec![128u8; 32 * 32],
+                    vec![128u16; 32 * 32],
+                    vec![128u16; 32 * 32],
                 )
             })
             .collect();
-        let bs = encode_video_yuv(64, 64, 50, &frames_in);
+        let bs = encode_video_yuv(64, 64, 50, &frames_in, 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 3);
     }
 
     #[test]
     fn decode_128x128() {
-        let y = vec![200u8; 128 * 128];
-        let u = vec![100u8; 64 * 64];
-        let v = vec![150u8; 64 * 64];
-        let bs = encode_video_yuv(128, 128, 50, &[(y, u, v)]);
+        let y = vec![200u16; 128 * 128];
+        let u = vec![100u16; 64 * 64];
+        let v = vec![150u16; 64 * 64];
+        let bs = encode_video_yuv(128, 128, 50, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].width, 128);
@@ -3325,16 +3334,16 @@ mod tests {
 
     #[test]
     fn decode_gradient_y() {
-        let mut y = vec![0u8; 128 * 128];
+        let mut y = vec![0u16; 128 * 128];
         for row in 0..128 {
-            let val = (row * 4).min(255) as u8;
+            let val = (row * 4).min(255) as u16;
             for col in 0..128 {
                 y[row * 128 + col] = val;
             }
         }
-        let u = vec![128u8; 64 * 64];
-        let v = vec![128u8; 64 * 64];
-        let bs = encode_video_yuv(128, 128, 50, &[(y.clone(), u, v)]);
+        let u = vec![128u16; 64 * 64];
+        let v = vec![128u16; 64 * 64];
+        let bs = encode_video_yuv(128, 128, 50, &[(y.clone(), u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         for row in 0..128 {
@@ -3355,10 +3364,10 @@ mod tests {
 
     #[test]
     fn decode_256x192() {
-        let y = vec![180u8; 256 * 192];
-        let u = vec![80u8; 128 * 96];
-        let v = vec![200u8; 128 * 96];
-        let bs = encode_video_yuv(256, 192, 50, &[(y, u, v)]);
+        let y = vec![180u16; 256 * 192];
+        let u = vec![80u16; 128 * 96];
+        let v = vec![200u16; 128 * 96];
+        let bs = encode_video_yuv(256, 192, 50, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].width, 256);
@@ -3375,10 +3384,10 @@ mod tests {
 
     #[test]
     fn decode_all_planes_exact() {
-        let y = vec![128u8; 64 * 64];
-        let u = vec![128u8; 32 * 32];
-        let v = vec![128u8; 32 * 32];
-        let bs = encode_video_yuv(64, 64, 50, &[(y, u, v)]);
+        let y = vec![128u16; 64 * 64];
+        let u = vec![128u16; 32 * 32];
+        let v = vec![128u16; 32 * 32];
+        let bs = encode_video_yuv(64, 64, 50, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         assert!(frames[0].y.iter().all(|&p| p == 128));
@@ -3388,18 +3397,18 @@ mod tests {
 
     #[test]
     fn decode_multi_frame_values() {
-        let y_values = [80u8, 128u8, 200u8];
-        let frames_in: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = y_values
+        let y_values = [80u16, 128u16, 200u16];
+        let frames_in: Vec<(Vec<u16>, Vec<u16>, Vec<u16>)> = y_values
             .iter()
             .map(|&val| {
                 (
                     vec![val; 64 * 64],
-                    vec![128u8; 32 * 32],
-                    vec![128u8; 32 * 32],
+                    vec![128u16; 32 * 32],
+                    vec![128u16; 32 * 32],
                 )
             })
             .collect();
-        let bs = encode_video_yuv(64, 64, 50, &frames_in);
+        let bs = encode_video_yuv(64, 64, 50, &frames_in, 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 3);
         for (idx, &expected_y) in y_values.iter().enumerate() {
@@ -3417,10 +3426,10 @@ mod tests {
 
     #[test]
     fn decode_low_qindex() {
-        let y = vec![100u8; 64 * 64];
-        let u = vec![60u8; 32 * 32];
-        let v = vec![220u8; 32 * 32];
-        let bs = encode_video_yuv(64, 64, 25, &[(y, u, v)]);
+        let y = vec![100u16; 64 * 64];
+        let u = vec![60u16; 32 * 32];
+        let v = vec![220u16; 32 * 32];
+        let bs = encode_video_yuv(64, 64, 25, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         for (i, &p) in frames[0].y.iter().enumerate() {
@@ -3435,10 +3444,10 @@ mod tests {
 
     #[test]
     fn roundtrip_cdf_adaptation_enabled() {
-        let y = vec![128u8; 64 * 64];
-        let u = vec![128u8; 32 * 32];
-        let v = vec![128u8; 32 * 32];
-        let bs = encode_video_yuv_with_cdf_update(64, 64, 50, &[(y.clone(), u.clone(), v.clone())]);
+        let y = vec![128u16; 64 * 64];
+        let u = vec![128u16; 32 * 32];
+        let v = vec![128u16; 32 * 32];
+        let bs = encode_video_yuv_with_cdf_update(64, 64, 50, &[(y.clone(), u.clone(), v.clone())], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         assert!(frames[0].y.iter().all(|&p| p == 128));
@@ -3448,10 +3457,10 @@ mod tests {
 
     #[test]
     fn roundtrip_cdf_adaptation_with_coeffs() {
-        let y = vec![200u8; 64 * 64];
-        let u = vec![100u8; 32 * 32];
-        let v = vec![150u8; 32 * 32];
-        let bs = encode_video_yuv_with_cdf_update(64, 64, 50, &[(y, u, v)]);
+        let y = vec![200u16; 64 * 64];
+        let u = vec![100u16; 32 * 32];
+        let v = vec![150u16; 32 * 32];
+        let bs = encode_video_yuv_with_cdf_update(64, 64, 50, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         for &p in &frames[0].y {
@@ -3465,10 +3474,10 @@ mod tests {
 
     #[test]
     fn roundtrip_cdf_adaptation_128x128() {
-        let y = vec![160u8; 128 * 128];
-        let u = vec![128u8; 64 * 64];
-        let v = vec![128u8; 64 * 64];
-        let bs = encode_video_yuv_with_cdf_update(128, 128, 50, &[(y, u, v)]);
+        let y = vec![160u16; 128 * 128];
+        let u = vec![128u16; 64 * 64];
+        let v = vec![128u16; 64 * 64];
+        let bs = encode_video_yuv_with_cdf_update(128, 128, 50, &[(y, u, v)], 8);
         let frames = Decoder::decode_all(&bs).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].width, 128);
@@ -3574,7 +3583,7 @@ mod tests {
         let obus = obu::parse_obus(&data);
         let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
         let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
-        let dequant = crate::encode::ac_qlookup(fp.base_qindex);
+        let dequant = crate::encode::ac_qlookup(fp.base_qindex, seq.bit_depth);
 
         let tile_cfg = tile::TileDecodeConfig {
             enable_cfl_intra: seq.enable_cfl_intra,
@@ -3615,6 +3624,7 @@ mod tests {
         );
         let uv_dequant = crate::encode::ac_qlookup(
             (fp.base_qindex as i32 + fp.u_ac_delta_q).clamp(0, 255) as u8,
+            seq.bit_depth,
         );
         let (y_plane, u_plane, v_plane) = reconstruct_partitioned_frame(
             &blocks,
@@ -3756,7 +3766,7 @@ mod tests {
             &fp.tile_data[..fp.tile_data.len().min(16)]
         );
         eprintln!("expected tile_data start: f6 ac 00 72 85 91 72 ff (from reference)");
-        let dequant = crate::encode::ac_qlookup(fp.base_qindex);
+        let dequant = crate::encode::ac_qlookup(fp.base_qindex, seq.bit_depth);
 
         let tile_cfg = tile::TileDecodeConfig {
             enable_cfl_intra: seq.enable_cfl_intra,
@@ -3859,6 +3869,7 @@ mod tests {
 
         let uv_dequant_128 = crate::encode::ac_qlookup(
             (fp.base_qindex as i32 + fp.u_ac_delta_q).clamp(0, 255) as u8,
+            seq.bit_depth,
         );
         let (y_plane, _u_plane, _v_plane) = reconstruct_partitioned_frame(
             &blocks,
@@ -3929,7 +3940,7 @@ mod tests {
             if block_psnr < 40.0 {
                 let sample_row = by;
                 let end_col = (bx + 8).min(bx + bw).min(w);
-                let our_samples: Vec<u8> =
+                let our_samples: Vec<u16> =
                     (bx..end_col).map(|c| y_plane[sample_row * w + c]).collect();
                 let ref_samples: Vec<u8> =
                     (bx..end_col).map(|c| ref_y[sample_row * w + c]).collect();
@@ -4019,7 +4030,7 @@ mod tests {
         );
         for row_y in [0, 8, 16, 32, 48, 64, 80, 96, 112] {
             if row_y < h {
-                let ours: Vec<u8> = (0..16.min(w)).map(|c| frame.y[row_y * w + c]).collect();
+                let ours: Vec<u16> = (0..16.min(w)).map(|c| frame.y[row_y * w + c]).collect();
                 let refs: Vec<u8> = (0..16.min(w)).map(|c| ref_y[row_y * w + c]).collect();
                 let row_mse: f64 = (0..w)
                     .map(|c| (frame.y[row_y * w + c] as f64 - ref_y[row_y * w + c] as f64).powi(2))
@@ -4035,7 +4046,7 @@ mod tests {
         let obus = obu::parse_obus(&data);
         let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
         let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
-        let dequant = crate::encode::ac_qlookup(fp.base_qindex);
+        let dequant = crate::encode::ac_qlookup(fp.base_qindex, seq.bit_depth);
         eprintln!(
             "SEQ: sb_size={} sdp={} cdef={} gdf={} rest={} ccso={} tcq={}",
             seq.sb_size,
@@ -4208,30 +4219,22 @@ mod tests {
         eprintln!(
             "[ROW63] ours[0..32]={:?}",
             &frame.y[63 * w..63 * w + 32]
-                .iter()
-                .map(|&v| v)
-                .collect::<Vec<u8>>()
+                .to_vec()
         );
         eprintln!(
             "[ROW63] ours[32..64]={:?}",
             &frame.y[63 * w + 32..63 * w + 64]
-                .iter()
-                .map(|&v| v)
-                .collect::<Vec<u8>>()
+                .to_vec()
         );
         eprintln!(
             "[ROW63] ref[0..32]={:?}",
             &ref_y[63 * w..63 * w + 32]
-                .iter()
-                .map(|&v| v)
-                .collect::<Vec<u8>>()
+                .to_vec()
         );
         eprintln!(
             "[ROW63] ref[32..64]={:?}",
             &ref_y[63 * w + 32..63 * w + 64]
-                .iter()
-                .map(|&v| v)
-                .collect::<Vec<u8>>()
+                .to_vec()
         );
         eprintln!("Y MSE={:.4}  U MSE={:.4}  V MSE={:.4}", y_mse, u_mse, v_mse);
 
@@ -4285,7 +4288,7 @@ mod tests {
         let obus = obu::parse_obus(&data);
         let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
         let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
-        let _dequant = crate::encode::ac_qlookup(fp.base_qindex);
+        let _dequant = crate::encode::ac_qlookup(fp.base_qindex, seq.bit_depth);
         let tile_cfg = tile::TileDecodeConfig {
             enable_cfl_intra: seq.enable_cfl_intra,
             enable_fsc: seq.enable_fsc,
@@ -4420,7 +4423,7 @@ mod tests {
                 eprintln!("    Sample pixels (first row of block):");
                 let r = by;
                 let end_c = (bx + bw).min(w).min(bx + 16);
-                let ours_row: Vec<u8> = (bx..end_c).map(|c| frame.y[r * w + c]).collect();
+                let ours_row: Vec<u16> = (bx..end_c).map(|c| frame.y[r * w + c]).collect();
                 let refs_row: Vec<u8> = (bx..end_c).map(|c| ref_y[r * w + c]).collect();
                 let diffs: Vec<i32> = (bx..end_c)
                     .map(|c| frame.y[r * w + c] as i32 - ref_y[r * w + c] as i32)
@@ -4430,7 +4433,7 @@ mod tests {
                 eprintln!("      diff: {:?}", diffs);
                 if bh > 1 && by + 1 < h {
                     let r2 = by + 1;
-                    let ours_row2: Vec<u8> = (bx..end_c).map(|c| frame.y[r2 * w + c]).collect();
+                    let ours_row2: Vec<u16> = (bx..end_c).map(|c| frame.y[r2 * w + c]).collect();
                     let refs_row2: Vec<u8> = (bx..end_c).map(|c| ref_y[r2 * w + c]).collect();
                     let diffs2: Vec<i32> = (bx..end_c)
                         .map(|c| frame.y[r2 * w + c] as i32 - ref_y[r2 * w + c] as i32)

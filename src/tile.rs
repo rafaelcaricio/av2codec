@@ -2,7 +2,7 @@ use crate::cdf_context::FrameCdfContext;
 use crate::cdf_tables::*;
 use crate::entropy::DaalaCoder;
 
-fn encode_sym(ec: &mut DaalaCoder, sym: usize, cdf: &mut Vec<u16>, update: bool) {
+fn encode_sym(ec: &mut DaalaCoder, sym: usize, cdf: &mut [u16], update: bool) {
     if update {
         ec.encode_symbol_mut(sym, cdf);
     } else {
@@ -274,7 +274,7 @@ fn encode_low_range(
     ec: &mut DaalaCoder,
     level: usize,
     base_levels: usize,
-    cdf: &mut Vec<u16>,
+    cdf: &mut [u16],
     update: bool,
 ) {
     if level > base_levels {
@@ -903,8 +903,8 @@ pub fn encode_tile_data_multi_sb(
 use crate::encode::EncodedSuperblock;
 
 fn do_split_ctx(above_part: &[u8], left_part: &[u8], bw_log2: usize, bh_log2: usize, bsize_group: usize) -> usize {
-    let shift_w = if bw_log2 > 1 { bw_log2 - 1 } else { 0 };
-    let shift_h = if bh_log2 > 1 { bh_log2 - 1 } else { 0 };
+    let shift_w = bw_log2.saturating_sub(1);
+    let shift_h = bh_log2.saturating_sub(1);
     let above_val = above_part.first().copied().unwrap_or(0);
     let left_val = left_part.first().copied().unwrap_or(0);
     let above_bit = (above_val >> shift_w) & 1;
@@ -913,8 +913,8 @@ fn do_split_ctx(above_part: &[u8], left_part: &[u8], bw_log2: usize, bh_log2: us
 }
 
 fn rect_type_ctx(above_part: &[u8], left_part: &[u8], bw_log2: usize, bh_log2: usize, bsize_rect_group: usize) -> usize {
-    let shift_w = if bw_log2 > 1 { bw_log2 - 1 } else { 0 };
-    let shift_h = if bh_log2 > 1 { bh_log2 - 1 } else { 0 };
+    let shift_w = bw_log2.saturating_sub(1);
+    let shift_h = bh_log2.saturating_sub(1);
     let above_val = above_part.first().copied().unwrap_or(0);
     let left_val = left_part.first().copied().unwrap_or(0);
     let above_bit = (above_val >> shift_w) & 1;
@@ -1350,6 +1350,7 @@ fn sq_split_ctx(above_part: &[u8], left_part: &[u8], bsize: usize) -> usize {
     (left_bit as usize) * 2 + (above_bit as usize)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_partition_and_coeffs(
     ec: &mut DaalaCoder,
     node: &PartitionNode,

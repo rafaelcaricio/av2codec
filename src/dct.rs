@@ -463,6 +463,7 @@ pub fn inverse_dct2_64x64_av2(coeffs: &[i32; 1024]) -> [i32; 4096] {
 const NEW_INV_SQRT2: i64 = 2896;
 const NEW_SQRT2_BITS: u32 = 12;
 
+#[allow(clippy::too_many_arguments)]
 pub fn inverse_transform_2d_rect(
     coeffs: &[i32],
     out_w: usize,

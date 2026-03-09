@@ -5,12 +5,13 @@ pub struct Y4mHeader {
     pub height: u32,
     pub framerate_num: u32,
     pub framerate_den: u32,
+    pub bit_depth: u32,
 }
 
 pub struct Y4mFrame {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+    pub y: Vec<u16>,
+    pub u: Vec<u16>,
+    pub v: Vec<u16>,
 }
 
 pub struct Y4mReader {
@@ -39,6 +40,7 @@ impl Y4mReader {
         let mut height: Option<u32> = None;
         let mut framerate_num: u32 = 30;
         let mut framerate_den: u32 = 1;
+        let mut bit_depth: u32 = 8;
 
         for token in header_line.split(' ').skip(1) {
             if token.is_empty() {
@@ -70,6 +72,15 @@ impl Y4mReader {
                             .map_err(|_| format!("Invalid framerate denominator: {}", token))?;
                     }
                 }
+                b'C' => {
+                    let cs = &token[1..];
+                    if cs == "420p10" {
+                        bit_depth = 10;
+                    } else if cs == "420" || cs == "420jpeg" || cs == "420mpeg2" || cs == "420paldv"
+                    {
+                        bit_depth = 8;
+                    }
+                }
                 _ => {}
             }
         }
@@ -82,6 +93,7 @@ impl Y4mReader {
             height,
             framerate_num,
             framerate_den,
+            bit_depth,
         };
 
         let remaining_offset = newline_pos + 1;
@@ -117,21 +129,50 @@ impl Y4mReader {
         let uv_width = w / 2;
         let uv_height = h / 2;
         let uv_size = uv_width * uv_height;
-        let total_frame_size = y_size + 2 * uv_size;
+        let bytes_per_sample = if self.header.bit_depth > 8 { 2 } else { 1 };
+        let y_byte_size = y_size * bytes_per_sample;
+        let uv_byte_size = uv_size * bytes_per_sample;
+        let total_frame_bytes = y_byte_size + 2 * uv_byte_size;
 
-        if frame_data_start + total_frame_size > self.data.len() {
+        if frame_data_start + total_frame_bytes > self.data.len() {
             return None;
         }
 
         let y_start = frame_data_start;
-        let u_start = y_start + y_size;
-        let v_start = u_start + uv_size;
-        let frame_end = v_start + uv_size;
+        let u_start = y_start + y_byte_size;
+        let v_start = u_start + uv_byte_size;
+        let frame_end = v_start + uv_byte_size;
 
-        let frame = Y4mFrame {
-            y: self.data[y_start..u_start].to_vec(),
-            u: self.data[u_start..v_start].to_vec(),
-            v: self.data[v_start..frame_end].to_vec(),
+        let frame = if self.header.bit_depth > 8 {
+            Y4mFrame {
+                y: self.data[y_start..u_start]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect(),
+                u: self.data[u_start..v_start]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect(),
+                v: self.data[v_start..frame_end]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect(),
+            }
+        } else {
+            Y4mFrame {
+                y: self.data[y_start..u_start]
+                    .iter()
+                    .map(|&b| b as u16)
+                    .collect(),
+                u: self.data[u_start..v_start]
+                    .iter()
+                    .map(|&b| b as u16)
+                    .collect(),
+                v: self.data[v_start..frame_end]
+                    .iter()
+                    .map(|&b| b as u16)
+                    .collect(),
+            }
         };
 
         self.offset = frame_end;

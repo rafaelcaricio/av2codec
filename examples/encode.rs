@@ -19,7 +19,7 @@ fn main() {
     let uv_size = (config.width / 2 * config.height / 2) as usize;
     let frame_size = y_size + 2 * uv_size;
 
-    let mut enc = Encoder::new(config.width, config.height, config.qindex).unwrap_or_else(|e| {
+    let mut enc = Encoder::new(config.width, config.height, config.qindex, 8).unwrap_or_else(|e| {
         eprintln!("Error creating encoder: {}", e);
         process::exit(1);
     });
@@ -40,11 +40,11 @@ fn main() {
             }
         }
 
-        let y = &frame_buf[..y_size];
-        let u = &frame_buf[y_size..y_size + uv_size];
-        let v = &frame_buf[y_size + uv_size..];
+        let y: Vec<u16> = frame_buf[..y_size].iter().map(|&b| b as u16).collect();
+        let u: Vec<u16> = frame_buf[y_size..y_size + uv_size].iter().map(|&b| b as u16).collect();
+        let v: Vec<u16> = frame_buf[y_size + uv_size..].iter().map(|&b| b as u16).collect();
 
-        enc.send_frame(y, u, v).unwrap_or_else(|e| {
+        enc.send_frame(&y, &u, &v).unwrap_or_else(|e| {
             eprintln!("Error encoding frame {}: {}", frame_count, e);
             process::exit(1);
         });

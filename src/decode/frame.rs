@@ -13,11 +13,11 @@ fn tile_log2(blk_size: u32, target: u32) -> u32 {
 fn parse_tile_info(r: &mut BitReader, width: u32, height: u32, sb_size: u32) {
     let _uniform_spacing = r.read_bit();
 
-    let mi_cols = (width + 3) / 4;
-    let mi_rows = (height + 3) / 4;
+    let mi_cols = width.div_ceil(4);
+    let mi_rows = height.div_ceil(4);
     let mib_size = sb_size / 4;
-    let sb_cols = (mi_cols + mib_size - 1) / mib_size;
-    let sb_rows = (mi_rows + mib_size - 1) / mib_size;
+    let sb_cols = mi_cols.div_ceil(mib_size);
+    let sb_rows = mi_rows.div_ceil(mib_size);
 
     let max_tile_width_sb = 4096 / sb_size;
     let max_tile_cols = 64u32;
@@ -523,8 +523,8 @@ fn parse_frame_header_sph0<'a>(
         if gdf_mode {
             let gdf_block_num = {
                 let gdf_block_size = seq.sb_size;
-                ((seq.width + gdf_block_size - 1) / gdf_block_size)
-                    * ((seq.height + gdf_block_size - 1) / gdf_block_size)
+                seq.width.div_ceil(gdf_block_size)
+                    * seq.height.div_ceil(gdf_block_size)
             };
             if gdf_block_num > 1 {
                 let _gdf_mode_inc = r.read_bit();
@@ -795,8 +795,8 @@ fn parse_frame_header_sph1<'a>(
         gdf_mode = 1;
         let gdf_block_num = {
             let gdf_block_size = seq.sb_size;
-            ((seq.width + gdf_block_size - 1) / gdf_block_size)
-                * ((seq.height + gdf_block_size - 1) / gdf_block_size)
+            seq.width.div_ceil(gdf_block_size)
+                * seq.height.div_ceil(gdf_block_size)
         };
         if gdf_block_num > 1 {
             gdf_mode += r.read_bit() as u32;
@@ -976,6 +976,7 @@ mod tests {
             enable_uneven_4way_partitions: false,
             enable_mhccp: false,
             enable_intra_bawp: false,
+            bit_depth: 8,
         }
     }
 

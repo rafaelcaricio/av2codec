@@ -41,6 +41,10 @@ fn psnr(original: &[u8], decoded: &[u8]) -> f64 {
     10.0 * (255.0_f64 * 255.0 / mse).log10()
 }
 
+fn u16_to_u8_vec(data: &[u16]) -> Vec<u8> {
+    data.iter().map(|&v| v as u8).collect()
+}
+
 fn encode_y4m_fixture(fixture_path: &str, out_path: &str, qindex: u8) {
     let status = Command::new("cargo")
         .args([
@@ -65,10 +69,10 @@ fn avmdec_decodes_solid_green_all_planes() {
         return;
     }
 
-    let y_plane = vec![149u8; 64 * 64];
-    let u_plane = vec![43u8; 32 * 32];
-    let v_plane = vec![21u8; 32 * 32];
-    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)]);
+    let y_plane = vec![149u16; 64 * 64];
+    let u_plane = vec![43u16; 32 * 32];
+    let v_plane = vec![21u16; 32 * 32];
+    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)], 8);
     fs::write("/tmp/av2codec_test_green.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec("/tmp/av2codec_test_green.obu", "/tmp/av2codec_test_green_out.yuv");
@@ -98,13 +102,13 @@ fn avmdec_decodes_solid_red_all_planes() {
         return;
     }
 
-    let y_val: u8 = 81;
-    let u_val: u8 = 90;
-    let v_val: u8 = 240;
+    let y_val: u16 = 81;
+    let u_val: u16 = 90;
+    let v_val: u16 = 240;
     let y_plane = vec![y_val; 64 * 64];
     let u_plane = vec![u_val; 32 * 32];
     let v_plane = vec![v_val; 32 * 32];
-    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)]);
+    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(y_plane, u_plane, v_plane)], 8);
     fs::write("/tmp/av2codec_test_red.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec("/tmp/av2codec_test_red.obu", "/tmp/av2codec_test_red_out.yuv");
@@ -155,13 +159,13 @@ fn avmdec_decodes_multi_frame_yuv() {
         return;
     }
 
-    let colors: [(u8, u8, u8); 3] = [(149, 43, 21), (81, 90, 240), (128, 128, 128)];
-    let frames: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = colors
+    let colors: [(u16, u16, u16); 3] = [(149, 43, 21), (81, 90, 240), (128, 128, 128)];
+    let frames: Vec<(Vec<u16>, Vec<u16>, Vec<u16>)> = colors
         .iter()
         .map(|&(y, u, v)| (vec![y; 64 * 64], vec![u; 32 * 32], vec![v; 32 * 32]))
         .collect();
 
-    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &frames);
+    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &frames, 8);
     fs::write("/tmp/av2codec_test_multi_yuv.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec(
@@ -369,11 +373,11 @@ fn avmdec_gradient_psnr() {
 
     let mut reader = av2codec::y4m::Y4mReader::open("tests/fixtures/gradient_64x64.y4m").unwrap();
     let frame = reader.next_frame().unwrap();
-    let original_y = frame.y.clone();
-    let original_u = frame.u.clone();
-    let original_v = frame.v.clone();
+    let original_y = u16_to_u8_vec(&frame.y);
+    let original_u = u16_to_u8_vec(&frame.u);
+    let original_v = u16_to_u8_vec(&frame.v);
 
-    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(frame.y, frame.u, frame.v)]);
+    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(frame.y, frame.u, frame.v)], 8);
     fs::write("/tmp/av2codec_test_gradient_psnr.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec(
@@ -410,10 +414,10 @@ fn avmdec_decodes_128x128_solid_green() {
         return;
     }
 
-    let y_plane = vec![149u8; 128 * 128];
-    let u_plane = vec![43u8; 64 * 64];
-    let v_plane = vec![21u8; 64 * 64];
-    let bs = av2codec::encode::encode_video_yuv(128, 128, 50, &[(y_plane, u_plane, v_plane)]);
+    let y_plane = vec![149u16; 128 * 128];
+    let u_plane = vec![43u16; 64 * 64];
+    let v_plane = vec![21u16; 64 * 64];
+    let bs = av2codec::encode::encode_video_yuv(128, 128, 50, &[(y_plane, u_plane, v_plane)], 8);
     fs::write("/tmp/av2codec_test_128x128_green.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec(
@@ -446,10 +450,10 @@ fn avmdec_decodes_256x128_solid_red() {
         return;
     }
 
-    let y_plane = vec![81u8; 256 * 128];
-    let u_plane = vec![90u8; 128 * 64];
-    let v_plane = vec![240u8; 128 * 64];
-    let bs = av2codec::encode::encode_video_yuv(256, 128, 50, &[(y_plane, u_plane, v_plane)]);
+    let y_plane = vec![81u16; 256 * 128];
+    let u_plane = vec![90u16; 128 * 64];
+    let v_plane = vec![240u16; 128 * 64];
+    let bs = av2codec::encode::encode_video_yuv(256, 128, 50, &[(y_plane, u_plane, v_plane)], 8);
     fs::write("/tmp/av2codec_test_256x128_red.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec(
@@ -526,14 +530,18 @@ fn avmdec_decodes_256x192_smptebars() {
     let uv_size = uv_w * uv_h;
     assert_eq!(raw.len(), y_size + 2 * uv_size);
 
-    let y_plane = raw[..y_size].to_vec();
-    let u_plane = raw[y_size..y_size + uv_size].to_vec();
-    let v_plane = raw[y_size + uv_size..].to_vec();
+    let y_plane_u8 = raw[..y_size].to_vec();
+    let u_plane_u8 = raw[y_size..y_size + uv_size].to_vec();
+    let v_plane_u8 = raw[y_size + uv_size..].to_vec();
+    let y_plane: Vec<u16> = y_plane_u8.iter().map(|&v| v as u16).collect();
+    let u_plane: Vec<u16> = u_plane_u8.iter().map(|&v| v as u16).collect();
+    let v_plane: Vec<u16> = v_plane_u8.iter().map(|&v| v as u16).collect();
     let bs = av2codec::encode::encode_video_yuv(
         w as u32,
         h as u32,
         50,
         &[(y_plane.clone(), u_plane.clone(), v_plane.clone())],
+        8,
     );
     fs::write("/tmp/av2codec_smptebars_256x192.obu", &bs).unwrap();
 
@@ -543,9 +551,9 @@ fn avmdec_decodes_256x192_smptebars() {
     );
     assert_eq!(decoded.len(), y_size + 2 * uv_size);
 
-    let y_psnr = psnr(&y_plane, &decoded[..y_size]);
-    let u_psnr = psnr(&u_plane, &decoded[y_size..y_size + uv_size]);
-    let v_psnr = psnr(&v_plane, &decoded[y_size + uv_size..]);
+    let y_psnr = psnr(&y_plane_u8, &decoded[..y_size]);
+    let u_psnr = psnr(&u_plane_u8, &decoded[y_size..y_size + uv_size]);
+    let v_psnr = psnr(&v_plane_u8, &decoded[y_size + uv_size..]);
 
     eprintln!(
         "SMPTE bars 256x192 PSNR: Y={:.1}dB U={:.1}dB V={:.1}dB",
@@ -589,14 +597,18 @@ fn avmdec_decodes_256x192_testsrc2() {
     let uv_size = uv_w * uv_h;
     assert_eq!(raw.len(), y_size + 2 * uv_size);
 
-    let y_plane = raw[..y_size].to_vec();
-    let u_plane = raw[y_size..y_size + uv_size].to_vec();
-    let v_plane = raw[y_size + uv_size..].to_vec();
+    let y_plane_u8 = raw[..y_size].to_vec();
+    let u_plane_u8 = raw[y_size..y_size + uv_size].to_vec();
+    let v_plane_u8 = raw[y_size + uv_size..].to_vec();
+    let y_plane: Vec<u16> = y_plane_u8.iter().map(|&v| v as u16).collect();
+    let u_plane: Vec<u16> = u_plane_u8.iter().map(|&v| v as u16).collect();
+    let v_plane: Vec<u16> = v_plane_u8.iter().map(|&v| v as u16).collect();
     let bs = av2codec::encode::encode_video_yuv(
         w as u32,
         h as u32,
         50,
         &[(y_plane.clone(), u_plane.clone(), v_plane.clone())],
+        8,
     );
     fs::write("/tmp/av2codec_testsrc2_256x192.obu", &bs).unwrap();
 
@@ -606,9 +618,9 @@ fn avmdec_decodes_256x192_testsrc2() {
     );
     assert_eq!(decoded.len(), y_size + 2 * uv_size);
 
-    let y_psnr = psnr(&y_plane, &decoded[..y_size]);
-    let u_psnr = psnr(&u_plane, &decoded[y_size..y_size + uv_size]);
-    let v_psnr = psnr(&v_plane, &decoded[y_size + uv_size..]);
+    let y_psnr = psnr(&y_plane_u8, &decoded[..y_size]);
+    let u_psnr = psnr(&u_plane_u8, &decoded[y_size..y_size + uv_size]);
+    let v_psnr = psnr(&v_plane_u8, &decoded[y_size + uv_size..]);
 
     eprintln!(
         "Testsrc2 256x192 PSNR: Y={:.1}dB U={:.1}dB V={:.1}dB",
@@ -628,11 +640,11 @@ fn avmdec_testsrc2_psnr() {
 
     let mut reader = av2codec::y4m::Y4mReader::open("tests/fixtures/testsrc2_64x64.y4m").unwrap();
     let frame = reader.next_frame().unwrap();
-    let original_y = frame.y.clone();
-    let original_u = frame.u.clone();
-    let original_v = frame.v.clone();
+    let original_y = u16_to_u8_vec(&frame.y);
+    let original_u = u16_to_u8_vec(&frame.u);
+    let original_v = u16_to_u8_vec(&frame.v);
 
-    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(frame.y, frame.u, frame.v)]);
+    let bs = av2codec::encode::encode_video_yuv(64, 64, 50, &[(frame.y, frame.u, frame.v)], 8);
     fs::write("/tmp/av2codec_test_testsrc2_psnr.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec(
@@ -691,15 +703,19 @@ fn avmdec_av2codec_decoder_agreement_multi_sb() {
     let h = 192usize;
     let y_size = w * h;
     let uv_size = (w / 2) * (h / 2);
-    let y_plane = raw[..y_size].to_vec();
-    let u_plane = raw[y_size..y_size + uv_size].to_vec();
-    let v_plane = raw[y_size + uv_size..].to_vec();
+    let y_plane_u8 = raw[..y_size].to_vec();
+    let u_plane_u8 = raw[y_size..y_size + uv_size].to_vec();
+    let v_plane_u8 = raw[y_size + uv_size..].to_vec();
+    let y_plane: Vec<u16> = y_plane_u8.iter().map(|&v| v as u16).collect();
+    let u_plane: Vec<u16> = u_plane_u8.iter().map(|&v| v as u16).collect();
+    let v_plane: Vec<u16> = v_plane_u8.iter().map(|&v| v as u16).collect();
 
     let bs = av2codec::encode::encode_video_yuv(
         w as u32,
         h as u32,
         50,
         &[(y_plane.clone(), u_plane.clone(), v_plane.clone())],
+        8,
     );
     fs::write("/tmp/av2codec_regression_testsrc2.obu", &bs).unwrap();
 
@@ -710,19 +726,19 @@ fn avmdec_av2codec_decoder_agreement_multi_sb() {
 
     let av2codec_frames = av2codec::Decoder::decode_all(&bs).expect("av2codec decoder failed");
     assert_eq!(av2codec_frames.len(), 1);
-    let av2codec_y = &av2codec_frames[0].y;
-    let av2codec_u = &av2codec_frames[0].u;
-    let av2codec_v = &av2codec_frames[0].v;
+    let av2codec_y = u16_to_u8_vec(&av2codec_frames[0].y);
+    let av2codec_u = u16_to_u8_vec(&av2codec_frames[0].u);
+    let av2codec_v = u16_to_u8_vec(&av2codec_frames[0].v);
 
     let avmdec_y = &avmdec_raw[..y_size];
     let avmdec_u = &avmdec_raw[y_size..y_size + uv_size];
     let avmdec_v = &avmdec_raw[y_size + uv_size..];
 
-    let y_psnr_avmdec = psnr(&y_plane, avmdec_y);
-    let y_psnr_av2codec = psnr(&y_plane, av2codec_y);
-    let decoder_y_psnr = psnr(avmdec_y, av2codec_y);
-    let decoder_u_psnr = psnr(avmdec_u, av2codec_u);
-    let decoder_v_psnr = psnr(avmdec_v, av2codec_v);
+    let y_psnr_avmdec = psnr(&y_plane_u8, avmdec_y);
+    let y_psnr_av2codec = psnr(&y_plane_u8, &av2codec_y);
+    let decoder_y_psnr = psnr(avmdec_y, &av2codec_y);
+    let decoder_u_psnr = psnr(avmdec_u, &av2codec_u);
+    let decoder_v_psnr = psnr(avmdec_v, &av2codec_v);
 
     eprintln!(
         "Regression test 256x192 testsrc2:\n  avmdec vs original Y PSNR: {:.1}dB\n  av2codec  vs original Y PSNR: {:.1}dB\n  avmdec vs av2codec Y PSNR: {:.1}dB  U: {:.1}dB  V: {:.1}dB",
@@ -758,7 +774,7 @@ fn avmdec_av2codec_decoder_agreement_solid_colors() {
         return;
     }
 
-    let colors: [(u8, u8, u8, &str); 3] = [
+    let colors: [(u16, u16, u16, &str); 3] = [
         (149, 43, 21, "green"),
         (81, 90, 240, "red"),
         (200, 100, 150, "mixed"),
@@ -768,7 +784,7 @@ fn avmdec_av2codec_decoder_agreement_solid_colors() {
         let y_plane = vec![y_val; 128 * 128];
         let u_plane = vec![u_val; 64 * 64];
         let v_plane = vec![v_val; 64 * 64];
-        let bs = av2codec::encode::encode_video_yuv(128, 128, 50, &[(y_plane, u_plane, v_plane)]);
+        let bs = av2codec::encode::encode_video_yuv(128, 128, 50, &[(y_plane, u_plane, v_plane)], 8);
 
         let obu_path = format!("/tmp/av2codec_regression_{}.obu", name);
         let yuv_path = format!("/tmp/av2codec_regression_{}_avmdec.yuv", name);
@@ -777,9 +793,9 @@ fn avmdec_av2codec_decoder_agreement_solid_colors() {
         let avmdec_raw = decode_with_avmdec(&obu_path, &yuv_path);
 
         let av2codec_frames = av2codec::Decoder::decode_all(&bs).unwrap();
-        let av2codec_y = &av2codec_frames[0].y;
-        let av2codec_u = &av2codec_frames[0].u;
-        let av2codec_v = &av2codec_frames[0].v;
+        let av2codec_y = u16_to_u8_vec(&av2codec_frames[0].y);
+        let av2codec_u = u16_to_u8_vec(&av2codec_frames[0].u);
+        let av2codec_v = u16_to_u8_vec(&av2codec_frames[0].v);
 
         let y_size = 128 * 128;
         let uv_size = 64 * 64;
@@ -788,9 +804,9 @@ fn avmdec_av2codec_decoder_agreement_solid_colors() {
         let avmdec_v = &avmdec_raw[y_size + uv_size..];
 
         for (plane_name, avmdec_plane, av2codec_plane, expected, size) in [
-            ("Y", avmdec_y, av2codec_y.as_slice(), y_val, y_size),
-            ("U", avmdec_u, av2codec_u.as_slice(), u_val, uv_size),
-            ("V", avmdec_v, av2codec_v.as_slice(), v_val, uv_size),
+            ("Y", avmdec_y, av2codec_y.as_slice(), y_val as u8, y_size),
+            ("U", avmdec_u, av2codec_u.as_slice(), u_val as u8, uv_size),
+            ("V", avmdec_v, av2codec_v.as_slice(), v_val as u8, uv_size),
         ] {
             for i in 0..size {
                 let avmdec_diff = (avmdec_plane[i] as i32 - expected as i32).abs();
@@ -833,11 +849,11 @@ fn avmdec_decodes_100x100_solid_red() {
 
     let w = 100u32;
     let h = 100u32;
-    let y_plane = vec![82u8; (w * h) as usize];
-    let u_plane = vec![90u8; (w / 2 * h / 2) as usize];
-    let v_plane = vec![240u8; (w / 2 * h / 2) as usize];
+    let y_plane = vec![82u16; (w * h) as usize];
+    let u_plane = vec![90u16; (w / 2 * h / 2) as usize];
+    let v_plane = vec![240u16; (w / 2 * h / 2) as usize];
 
-    let bs = av2codec::encode::encode_video_yuv(w, h, 50, &[(y_plane, u_plane, v_plane)]);
+    let bs = av2codec::encode::encode_video_yuv(w, h, 50, &[(y_plane, u_plane, v_plane)], 8);
     fs::write("/tmp/av2codec_test_100x100.obu", &bs).unwrap();
 
     let decoded = decode_with_avmdec(

@@ -148,6 +148,7 @@ pub fn build_y_intra_mode_list(
     let mut selected = [false; LUMA_MODE_COUNT];
     let mut idx = 0;
 
+    #[allow(clippy::needless_range_loop)]
     for i in 0..NON_DIRECTIONAL_MODES_COUNT {
         list[idx] = i as u8;
         selected[i] = true;
@@ -170,19 +171,18 @@ pub fn build_y_intra_mode_list(
             neighbor_joints[0] = neighbor_joints[1];
         }
 
-        for i in 0..dir_cnt {
-            let j = neighbor_joints[i];
-            if !selected[j] {
-                list[idx] = j as u8;
-                selected[j] = true;
+        for &nj in &neighbor_joints[..dir_cnt] {
+            if !selected[nj] {
+                list[idx] = nj as u8;
+                selected[nj] = true;
                 idx += 1;
             }
         }
 
         if is_large_block {
             for offset in 0..4usize {
-                for j_idx in 0..dir_cnt {
-                    let nj = neighbor_joints[j_idx] as i64;
+                for &nj_val in &neighbor_joints[..dir_cnt] {
+                    let nj = nj_val as i64;
                     let left_derived = ((nj - offset as i64 + 50).rem_euclid(56)) as usize
                         + NON_DIRECTIONAL_MODES_COUNT;
                     let right_derived = ((nj + offset as i64 - 4).rem_euclid(56)) as usize
@@ -234,10 +234,10 @@ pub fn decode_prediction_mode(joint: u8) -> (PredictionMode, i32) {
     }
 }
 
-const BASE_DC: u8 = 128;
-const DEFAULT_ABOVE: u8 = 127;
-const DEFAULT_LEFT: u8 = 129;
-const DEFAULT_TOP_LEFT: u8 = 128;
+const BASE_DC: u16 = 128;
+const DEFAULT_ABOVE: u16 = 127;
+const DEFAULT_LEFT: u16 = 129;
+const DEFAULT_TOP_LEFT: u16 = 128;
 
 const MRL_INDEX_TO_DELTA: [i32; 4] = [0, 1, -1, 0];
 
@@ -275,17 +275,18 @@ pub struct IntraPredictControl {
 }
 
 struct PreparedRefs {
-    above: Vec<u8>,
-    left: Vec<u8>,
-    top_left: u8,
+    above: Vec<u16>,
+    left: Vec<u16>,
+    top_left: u16,
     n_top_px: usize,
     _n_topright_px: usize,
     n_left_px: usize,
     _n_bottomleft_px: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn predict_intra(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -295,7 +296,7 @@ pub fn predict_intra(
     angle_delta: i32,
     mrl_index: u8,
     sb_y: usize,
-) -> Vec<u8> {
+) -> Vec<u16> {
     predict_intra_with_control_and_availability(
         recon,
         stride,
@@ -312,8 +313,9 @@ pub fn predict_intra(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn predict_intra_with_control(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -324,7 +326,7 @@ pub fn predict_intra_with_control(
     mrl_index: u8,
     sb_y: usize,
     control: IntraPredictControl,
-) -> Vec<u8> {
+) -> Vec<u16> {
     predict_intra_with_control_and_availability(
         recon,
         stride,
@@ -341,8 +343,9 @@ pub fn predict_intra_with_control(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn predict_intra_with_control_and_availability(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -354,7 +357,7 @@ pub fn predict_intra_with_control_and_availability(
     sb_y: usize,
     control: IntraPredictControl,
     availability: Option<&[bool]>,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let frame_h = recon.len() / stride;
     let has_above =
         y > 0 && count_available_horizontal(availability, stride, frame_h, x, y - 1, w) > 0;
@@ -435,8 +438,9 @@ fn wide_angle_mapping(p_angle: i32, w: usize, h: usize) -> i32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn predict_directional(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -453,7 +457,7 @@ fn predict_directional(
     left_filter_type: usize,
     use_idif: bool,
     availability: Option<&[bool]>,
-) -> Vec<u8> {
+) -> Vec<u16> {
     if p_angle == 90 && mrl_index == 0 {
         return predict_v(recon, stride, x, y, w, h, availability);
     }
@@ -534,8 +538,8 @@ fn predict_directional(
             vec![BASE_DC; w * h]
         };
 
-        if apply_ibp_blend {
-            if let Some(mode_index) = ibp_mode_index(p_angle) {
+        if apply_ibp_blend
+            && let Some(mode_index) = ibp_mode_index(p_angle) {
                 if use_idif && p_angle < 90 {
                     let refs_idif =
                         expand_directional_idif_refs(&refs.above, &refs.left, refs.top_left);
@@ -594,7 +598,6 @@ fn predict_directional(
                     );
                 }
             }
-        }
 
         return pred;
     }
@@ -628,8 +631,8 @@ fn predict_directional(
         vec![BASE_DC; w * h]
     };
 
-    if apply_ibp_blend {
-        if let Some(mode_index) = ibp_mode_index(p_angle) {
+    if apply_ibp_blend
+        && let Some(mode_index) = ibp_mode_index(p_angle) {
             if p_angle < 90 {
                 let second = predict_zone3_angle(
                     &left_ext,
@@ -650,7 +653,6 @@ fn predict_directional(
                 apply_ibp_directional_zone3(&mut pred, &second, w, h, mode_index, 270 - p_angle);
             }
         }
-    }
 
     pred
 }
@@ -676,7 +678,7 @@ fn pixel_is_available(
     x: usize,
     y: usize,
 ) -> bool {
-    x < stride && y < frame_h && availability.map_or(true, |ready| ready[y * stride + x])
+    x < stride && y < frame_h && availability.is_none_or(|ready| ready[y * stride + x])
 }
 
 fn count_available_horizontal(
@@ -717,8 +719,9 @@ fn count_available_vertical(
     count
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_intra_refs(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -815,8 +818,9 @@ fn prepare_intra_refs(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_directional_refs(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -914,6 +918,7 @@ fn prepare_directional_refs(
     }
 }
 
+#[allow(clippy::if_same_then_else)]
 fn intra_edge_filter_strength(bs0: usize, bs1: usize, delta: i32, filter_type: usize) -> usize {
     let d = delta.abs();
     let blk_wh = bs0 + bs1;
@@ -980,7 +985,7 @@ fn intra_edge_filter_strength(bs0: usize, bs1: usize, delta: i32, filter_type: u
     strength
 }
 
-fn filter_intra_edge(edge: &mut [u8], strength: usize) {
+fn filter_intra_edge(edge: &mut [u16], strength: usize) {
     if strength == 0 {
         return;
     }
@@ -995,7 +1000,7 @@ fn filter_intra_edge(edge: &mut [u8], strength: usize) {
             let idx = ((i as isize) - 2 + j as isize).clamp(0, edge.len() as isize - 1) as usize;
             sum += src[idx] as u32 * coeff;
         }
-        edge[i] = ((sum + 8) >> 4) as u8;
+        edge[i] = ((sum + 8) >> 4) as u16;
     }
 }
 
@@ -1035,7 +1040,7 @@ fn apply_directional_edge_filter(
     if need_above && need_left && w + h >= 24 && !refs.above.is_empty() && !refs.left.is_empty() {
         refs.top_left =
             ((refs.left[0] as u32 * 5 + refs.top_left as u32 * 6 + refs.above[0] as u32 * 5 + 8)
-                >> 4) as u8;
+                >> 4) as u16;
     }
 
     let ab_le = usize::from(need_above_left);
@@ -1104,8 +1109,8 @@ fn ibp_directional_weight(angle: i32, row_idx: usize, col_idx: usize) -> u32 {
 }
 
 fn apply_ibp_directional_zone1(
-    pred: &mut [u8],
-    second: &[u8],
+    pred: &mut [u16],
+    second: &[u16],
     w: usize,
     h: usize,
     _mode_index: usize,
@@ -1123,14 +1128,14 @@ fn apply_ibp_directional_zone1(
             pred[idx] = ((pred[idx] as u32 * weight
                 + second[idx] as u32 * (IBP_WEIGHT_MAX - weight)
                 + (1 << (IBP_WEIGHT_SHIFT - 1)))
-                >> IBP_WEIGHT_SHIFT) as u8;
+                >> IBP_WEIGHT_SHIFT) as u16;
         }
     }
 }
 
 fn apply_ibp_directional_zone3(
-    pred: &mut [u8],
-    second: &[u8],
+    pred: &mut [u16],
+    second: &[u16],
     w: usize,
     h: usize,
     _mode_index: usize,
@@ -1148,17 +1153,17 @@ fn apply_ibp_directional_zone3(
             pred[idx] = ((pred[idx] as u32 * weight
                 + second[idx] as u32 * (IBP_WEIGHT_MAX - weight)
                 + (1 << (IBP_WEIGHT_SHIFT - 1)))
-                >> IBP_WEIGHT_SHIFT) as u8;
+                >> IBP_WEIGHT_SHIFT) as u16;
         }
     }
 }
 
 fn apply_ibp_dc(
-    pred: &mut [u8],
+    pred: &mut [u16],
     w: usize,
     h: usize,
-    above: &[u8],
-    left: &[u8],
+    above: &[u16],
+    left: &[u16],
     has_above: bool,
     has_left: bool,
 ) {
@@ -1170,7 +1175,8 @@ fn apply_ibp_dc(
     }
 }
 
-fn apply_ibp_dc_left(pred: &mut [u8], w: usize, h: usize, left: &[u8]) {
+#[allow(clippy::needless_range_loop)]
+fn apply_ibp_dc_left(pred: &mut [u16], w: usize, h: usize, left: &[u16]) {
     let len = w >> 2;
     let weights = &IBP_WEIGHTS[IBP_SIZE_TO_WEIGHTS_INDEX[w >> 3]];
     for r in 0..h {
@@ -1179,12 +1185,13 @@ fn apply_ibp_dc_left(pred: &mut [u8], w: usize, h: usize, left: &[u8]) {
             pred[row_base + c] = ((left[r] as u32 * (IBP_WEIGHT_REF - weights[c] as u32)
                 + pred[row_base + c] as u32 * weights[c] as u32
                 + (1 << (IBP_WEIGHT_SHIFT - 1)))
-                >> IBP_WEIGHT_SHIFT) as u8;
+                >> IBP_WEIGHT_SHIFT) as u16;
         }
     }
 }
 
-fn apply_ibp_dc_top(pred: &mut [u8], w: usize, h: usize, above: &[u8]) {
+#[allow(clippy::needless_range_loop)]
+fn apply_ibp_dc_top(pred: &mut [u16], w: usize, h: usize, above: &[u16]) {
     let len = h >> 2;
     let weights = &IBP_WEIGHTS[IBP_SIZE_TO_WEIGHTS_INDEX[h >> 3]];
     for r in 0..len {
@@ -1193,12 +1200,13 @@ fn apply_ibp_dc_top(pred: &mut [u8], w: usize, h: usize, above: &[u8]) {
             pred[row_base + c] = ((above[c] as u32 * (IBP_WEIGHT_REF - weights[r] as u32)
                 + pred[row_base + c] as u32 * weights[r] as u32
                 + (1 << (IBP_WEIGHT_SHIFT - 1)))
-                >> IBP_WEIGHT_SHIFT) as u8;
+                >> IBP_WEIGHT_SHIFT) as u16;
         }
     }
 }
 
-fn apply_ibp_dc_both(pred: &mut [u8], w: usize, h: usize, above: &[u8], left: &[u8]) {
+#[allow(clippy::needless_range_loop)]
+fn apply_ibp_dc_both(pred: &mut [u16], w: usize, h: usize, above: &[u16], left: &[u16]) {
     let len_h = h >> 2;
     let len_w = w >> 2;
     let row_start = if w >= h { len_h } else { 0 };
@@ -1211,7 +1219,7 @@ fn apply_ibp_dc_both(pred: &mut [u8], w: usize, h: usize, above: &[u8], left: &[
             pred[row_base + c] = ((above[c] as u32 * (IBP_WEIGHT_REF - top_weights[r] as u32)
                 + pred[row_base + c] as u32 * top_weights[r] as u32
                 + (1 << (IBP_WEIGHT_SHIFT - 1)))
-                >> IBP_WEIGHT_SHIFT) as u8;
+                >> IBP_WEIGHT_SHIFT) as u16;
         }
     }
 
@@ -1222,13 +1230,14 @@ fn apply_ibp_dc_both(pred: &mut [u8], w: usize, h: usize, above: &[u8], left: &[
             pred[row_base + c] = ((left[r] as u32 * (IBP_WEIGHT_REF - left_weights[c] as u32)
                 + pred[row_base + c] as u32 * left_weights[c] as u32
                 + (1 << (IBP_WEIGHT_SHIFT - 1)))
-                >> IBP_WEIGHT_SHIFT) as u8;
+                >> IBP_WEIGHT_SHIFT) as u16;
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extended_ref_samples(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -1236,7 +1245,7 @@ fn extended_ref_samples(
     h: usize,
     has_above: bool,
     has_left: bool,
-) -> (Vec<u8>, Vec<u8>, u8) {
+) -> (Vec<u16>, Vec<u16>, u16) {
     let above_need = w + h;
     let left_need = h + w;
     let frame_h = recon.len() / stride;
@@ -1304,8 +1313,9 @@ fn extended_ref_samples(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extended_ref_samples_mrl(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -1315,7 +1325,7 @@ fn extended_ref_samples_mrl(
     has_left: bool,
     above_mrl: u8,
     left_mrl: u8,
-) -> (Vec<u8>, Vec<u8>, u8) {
+) -> (Vec<u16>, Vec<u16>, u16) {
     if above_mrl == 0 && left_mrl == 0 {
         return extended_ref_samples(recon, stride, x, y, w, h, has_above, has_left);
     }
@@ -1397,8 +1407,8 @@ fn extended_ref_samples_mrl(
     }
 }
 
-fn predict_v_mrl(above: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+fn predict_v_mrl(above: &[u16], w: usize, h: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     for r in 0..h {
         for c in 0..w {
             pred[r * w + c] = above[c];
@@ -1407,8 +1417,8 @@ fn predict_v_mrl(above: &[u8], w: usize, h: usize) -> Vec<u8> {
     pred
 }
 
-fn predict_h_mrl(left: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+fn predict_h_mrl(left: &[u16], w: usize, h: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     for r in 0..h {
         for c in 0..w {
             pred[r * w + c] = left[r];
@@ -1417,8 +1427,8 @@ fn predict_h_mrl(left: &[u8], w: usize, h: usize) -> Vec<u8> {
     pred
 }
 
-fn predict_zone1_angle(above: &[u8], w: usize, h: usize, dx: i32, mrl: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+fn predict_zone1_angle(above: &[u16], w: usize, h: usize, dx: i32, mrl: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     let max_base_x = (w + h) as i32 - 1 + (mrl as i32) * 2;
     let mut pos_x = dx * (1 + mrl as i32);
 
@@ -1441,7 +1451,7 @@ fn predict_zone1_angle(above: &[u8], w: usize, h: usize, dx: i32, mrl: usize) ->
             if b < max_base_x {
                 let val = above[b as usize] as u32 * (32 - shift)
                     + above[(b + 1) as usize] as u32 * shift;
-                pred[r * w + c] = ((val + 16) >> 5) as u8;
+                pred[r * w + c] = ((val + 16) >> 5) as u16;
             } else {
                 pred[r * w + c] = above[max_base_x as usize];
             }
@@ -1452,12 +1462,12 @@ fn predict_zone1_angle(above: &[u8], w: usize, h: usize, dx: i32, mrl: usize) ->
 }
 
 struct PreparedIdifRefs {
-    above: Vec<u8>,
-    left: Vec<u8>,
+    above: Vec<u16>,
+    left: Vec<u16>,
     prefix_len: usize,
 }
 
-fn expand_directional_idif_refs(above: &[u8], left: &[u8], top_left: u8) -> PreparedIdifRefs {
+fn expand_directional_idif_refs(above: &[u16], left: &[u16], top_left: u16) -> PreparedIdifRefs {
     let prefix_len = 2;
     let above_tail = above.last().copied().unwrap_or(top_left);
     let left_tail = left.last().copied().unwrap_or(top_left);
@@ -1479,24 +1489,24 @@ fn expand_directional_idif_refs(above: &[u8], left: &[u8], top_left: u8) -> Prep
     }
 }
 
-fn dr_interp_sample(refs: &[u8], base_idx: usize, shift: usize) -> u8 {
+fn dr_interp_sample(refs: &[u16], base_idx: usize, shift: usize) -> u16 {
     let filter = DR_INTERP_FILTER[shift];
     let val = filter[0] * refs[base_idx - 1] as i32
         + filter[1] * refs[base_idx] as i32
         + filter[2] * refs[base_idx + 1] as i32
         + filter[3] * refs[base_idx + 2] as i32;
-    round_power_of_two_signed(val, POWER_DR_INTERP_FILTER).clamp(0, 255) as u8
+    round_power_of_two_signed(val, POWER_DR_INTERP_FILTER).clamp(0, 255) as u16
 }
 
 fn predict_zone1_angle_idif(
-    above: &[u8],
+    above: &[u16],
     prefix_len: usize,
     w: usize,
     h: usize,
     dx: i32,
     mrl: usize,
-) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     let max_base_x = (w + h) as i32 - 1 + (mrl as i32) * 2;
     let mut pos_x = dx * (1 + mrl as i32);
 
@@ -1527,17 +1537,18 @@ fn predict_zone1_angle_idif(
     pred
 }
 
+#[allow(clippy::too_many_arguments, clippy::if_same_then_else)]
 fn predict_zone2_angle(
-    above: &[u8],
-    left: &[u8],
-    tl: u8,
+    above: &[u16],
+    left: &[u16],
+    tl: u16,
     w: usize,
     h: usize,
     dx: i32,
     dy: i32,
     mrl: usize,
-) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     let min_base_x = -(1 + mrl as i32);
     let min_base_y = -(1 + mrl as i32);
 
@@ -1557,7 +1568,7 @@ fn predict_zone2_angle(
                     )
                 };
                 let val = s0 * (32 - shift) + s1 * shift;
-                pred[r * w + c] = ((val + 16) >> 5) as u8;
+                pred[r * w + c] = ((val + 16) >> 5) as u16;
             } else {
                 let y = ((r as i32) << 6) - ((c as i32) + 1 + mrl as i32) * dy;
                 let base_y = y >> 6;
@@ -1574,24 +1585,25 @@ fn predict_zone2_angle(
                     )
                 };
                 let val = s0 * (32 - shift) + s1 * shift;
-                pred[r * w + c] = ((val + 16) >> 5) as u8;
+                pred[r * w + c] = ((val + 16) >> 5) as u16;
             }
         }
     }
     pred
 }
 
+#[allow(clippy::too_many_arguments)]
 fn predict_zone2_angle_idif(
-    above: &[u8],
-    left: &[u8],
+    above: &[u16],
+    left: &[u16],
     prefix_len: usize,
     w: usize,
     h: usize,
     dx: i32,
     dy: i32,
     mrl: usize,
-) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     let min_base = -1 - mrl as i32;
 
     for r in 0..h {
@@ -1614,8 +1626,8 @@ fn predict_zone2_angle_idif(
     pred
 }
 
-fn predict_zone3_angle(left: &[u8], w: usize, h: usize, dy: i32, mrl: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+fn predict_zone3_angle(left: &[u16], w: usize, h: usize, dy: i32, mrl: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     let max_base_y = (w + h) as i32 - 1 + (mrl as i32) * 2;
     let mut pos_y = dy * (1 + mrl as i32);
 
@@ -1628,7 +1640,7 @@ fn predict_zone3_angle(left: &[u8], w: usize, h: usize, dy: i32, mrl: usize) -> 
             if b < max_base_y {
                 let val =
                     left[b as usize] as u32 * (32 - shift) + left[(b + 1) as usize] as u32 * shift;
-                pred[r * w + c] = ((val + 16) >> 5) as u8;
+                pred[r * w + c] = ((val + 16) >> 5) as u16;
             } else {
                 for ri in r..h {
                     pred[ri * w + c] = left[max_base_y as usize];
@@ -1642,14 +1654,14 @@ fn predict_zone3_angle(left: &[u8], w: usize, h: usize, dy: i32, mrl: usize) -> 
 }
 
 fn predict_zone3_angle_idif(
-    left: &[u8],
+    left: &[u16],
     prefix_len: usize,
     w: usize,
     h: usize,
     dy: i32,
     mrl: usize,
-) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     let max_base_y = (w + h) as i32 - 1 + (mrl as i32) * 2;
     let mut pos_y = dy * (1 + mrl as i32);
 
@@ -1675,22 +1687,22 @@ fn predict_zone3_angle_idif(
 }
 
 fn predict_dc_from_refs(
-    above: &[u8],
-    left: &[u8],
+    above: &[u16],
+    left: &[u16],
     w: usize,
     h: usize,
     has_above: bool,
     has_left: bool,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let val = match (has_above, has_left) {
         (false, false) => BASE_DC,
         (true, false) => {
             let sum: u32 = above[..w].iter().map(|&value| value as u32).sum();
-            ((sum + w as u32 / 2) / w as u32) as u8
+            ((sum + w as u32 / 2) / w as u32) as u16
         }
         (false, true) => {
             let sum: u32 = left[..h].iter().map(|&value| value as u32).sum();
-            ((sum + h as u32 / 2) / h as u32) as u8
+            ((sum + h as u32 / 2) / h as u32) as u16
         }
         (true, true) => {
             let sum_above: u32 = above[..w].iter().map(|&value| value as u32).sum();
@@ -1698,11 +1710,11 @@ fn predict_dc_from_refs(
             let sum = (sum_above + sum_left) as i32;
             let count = (w + h) as u32;
             if w == h {
-                ((sum as u32 + count / 2) / count) as u8
+                ((sum as u32 + count / 2) / count) as u16
             } else {
                 let (scale, shift) = super::resolve_divisor_32(count);
                 let rounding = 1 << (shift - 1);
-                ((sum * scale as i32 + rounding) >> shift) as u8
+                ((sum * scale as i32 + rounding) >> shift) as u16
             }
         }
     };
@@ -1710,14 +1722,14 @@ fn predict_dc_from_refs(
 }
 
 fn predict_v(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
     w: usize,
     h: usize,
     availability: Option<&[bool]>,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let refs = prepare_intra_refs(
         recon,
         stride,
@@ -1731,8 +1743,8 @@ fn predict_v(
     predict_v_from_refs(&refs.above, w, h)
 }
 
-fn predict_v_from_refs(above: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+fn predict_v_from_refs(above: &[u16], w: usize, h: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     for row in 0..h {
         for col in 0..w {
             pred[row * w + col] = above[col];
@@ -1742,14 +1754,14 @@ fn predict_v_from_refs(above: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 
 fn predict_h(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
     w: usize,
     h: usize,
     availability: Option<&[bool]>,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let refs = prepare_intra_refs(
         recon,
         stride,
@@ -1763,8 +1775,8 @@ fn predict_h(
     predict_h_from_refs(&refs.left, w, h)
 }
 
-fn predict_h_from_refs(left: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+fn predict_h_from_refs(left: &[u16], w: usize, h: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     for row in 0..h {
         let left_val = left[row];
         for col in 0..w {
@@ -1775,14 +1787,14 @@ fn predict_h_from_refs(left: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 
 fn predict_paeth(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
     w: usize,
     h: usize,
     availability: Option<&[bool]>,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let refs = prepare_intra_refs(
         recon,
         stride,
@@ -1816,8 +1828,9 @@ fn blk_size_log2(size: usize) -> u32 {
     size.ilog2()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn predict_smooth(
-    recon: &[u8],
+    recon: &[u16],
     stride: usize,
     x: usize,
     y: usize,
@@ -1825,24 +1838,24 @@ fn predict_smooth(
     h: usize,
     mode: PredictionMode,
     availability: Option<&[bool]>,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let refs = prepare_intra_refs(recon, stride, x, y, w, h, mode, availability);
     predict_smooth_from_refs(&refs.above, &refs.left, w, h, mode)
 }
 
 fn predict_smooth_from_refs(
-    above: &[u8],
-    left: &[u8],
+    above: &[u16],
+    left: &[u16],
     w: usize,
     h: usize,
     mode: PredictionMode,
-) -> Vec<u8> {
+) -> Vec<u16> {
     let scale = round_power_of_two(
         blk_size_log2(h) as i32 - 2 + blk_size_log2(w) as i32 - 2,
         2,
     );
     let blend_max_log2 = blk_size_log2(32);
-    let mut pred = vec![0u8; w * h];
+    let mut pred = vec![0u16; w * h];
 
     match mode {
         PredictionMode::SmoothVPred => {
@@ -1854,7 +1867,7 @@ fn predict_smooth_from_refs(
                     let mut predv = below_pred
                         + divide_round((top - below_pred) * (h - 1 - row) as i32, blk_size_log2(h));
                     predv += divide_round((top - predv) * s_top, blend_max_log2 + 1);
-                    pred[row * w + col] = predv.clamp(0, 255) as u8;
+                    pred[row * w + col] = predv.clamp(0, 255) as u16;
                 }
             }
         }
@@ -1870,7 +1883,7 @@ fn predict_smooth_from_refs(
                             blk_size_log2(w),
                         );
                     predh += divide_round((left_value - predh) * s_left, blend_max_log2 + 1);
-                    pred[row * w + col] = predh.clamp(0, 255) as u8;
+                    pred[row * w + col] = predh.clamp(0, 255) as u16;
                 }
             }
         }
@@ -1892,7 +1905,7 @@ fn predict_smooth_from_refs(
                         );
                     predv += divide_round((top - predv) * s_top, blend_max_log2 + 1);
                     predh += divide_round((left_value - predh) * s_left, blend_max_log2 + 1);
-                    pred[row * w + col] = divide_round(predv + predh, 1).clamp(0, 255) as u8;
+                    pred[row * w + col] = divide_round(predv + predh, 1).clamp(0, 255) as u16;
                 }
             }
         }
@@ -1900,8 +1913,8 @@ fn predict_smooth_from_refs(
     pred
 }
 
-fn predict_paeth_from_refs(above: &[u8], left: &[u8], tl: u8, w: usize, h: usize) -> Vec<u8> {
-    let mut pred = vec![0u8; w * h];
+fn predict_paeth_from_refs(above: &[u16], left: &[u16], tl: u16, w: usize, h: usize) -> Vec<u16> {
+    let mut pred = vec![0u16; w * h];
     let top_left = tl as i32;
     for row in 0..h {
         for col in 0..w {
@@ -1912,9 +1925,9 @@ fn predict_paeth_from_refs(above: &[u8], left: &[u8], tl: u8, w: usize, h: usize
             let p_left = (p - lft).abs();
             let p_tl = (p - top_left).abs();
             pred[row * w + col] = if p_top <= p_left && p_top <= p_tl {
-                top as u8
+                top as u16
             } else if p_left <= p_tl {
-                lft as u8
+                lft as u16
             } else {
                 tl
             };
@@ -1960,42 +1973,42 @@ mod tests {
 
     #[test]
     fn dc_no_neighbors_gives_128() {
-        let recon = vec![0u8; 64 * 64];
+        let recon = vec![0u16; 64 * 64];
         let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::DcPred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 128));
     }
 
     #[test]
     fn d45_no_neighbors_gives_127() {
-        let recon = vec![0u8; 64 * 64];
+        let recon = vec![0u16; 64 * 64];
         let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::D45Pred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 127));
     }
 
     #[test]
     fn v_pred_no_neighbors_gives_127() {
-        let recon = vec![0u8; 64 * 64];
+        let recon = vec![0u16; 64 * 64];
         let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::VPred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 127));
     }
 
     #[test]
     fn h_pred_no_neighbors_gives_129() {
-        let recon = vec![0u8; 64 * 64];
+        let recon = vec![0u16; 64 * 64];
         let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::HPred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 129));
     }
 
     #[test]
     fn paeth_no_neighbors_gives_128() {
-        let recon = vec![0u8; 64 * 64];
+        let recon = vec![0u16; 64 * 64];
         let pred = predict_intra(&recon, 64, 0, 0, 64, 64, PredictionMode::PaethPred, 0, 0, 0);
         assert!(pred.iter().all(|&v| v == 128));
     }
 
     #[test]
     fn dc_with_above() {
-        let mut recon = vec![0u8; 64 * 64];
+        let mut recon = vec![0u16; 64 * 64];
         recon[..64].fill(200);
         let pred = predict_intra(&recon, 64, 0, 1, 64, 63, PredictionMode::DcPred, 0, 0, 0);
         assert_eq!(pred[0], 200);
@@ -2013,14 +2026,14 @@ mod tests {
 
     #[test]
     fn v_pred_with_above() {
-        let mut recon = vec![0u8; 128 * 128];
+        let mut recon = vec![0u16; 128 * 128];
         for (i, pixel) in recon[..64].iter_mut().enumerate() {
-            *pixel = 100 + i as u8;
+            *pixel = 100 + i as u16;
         }
         let pred = predict_intra(&recon, 128, 0, 1, 64, 64, PredictionMode::VPred, 0, 0, 0);
         for row in 0..64 {
             for col in 0..64 {
-                assert_eq!(pred[row * 64 + col], 100 + col as u8);
+                assert_eq!(pred[row * 64 + col], 100 + col as u16);
             }
         }
     }
@@ -2066,7 +2079,7 @@ mod tests {
 
     #[test]
     fn zone1_d45_uniform_above() {
-        let mut recon = vec![200u8; 128 * 128];
+        let mut recon = vec![200u16; 128 * 128];
         recon[..128].fill(100);
         let pred = predict_intra(&recon, 128, 0, 1, 8, 8, PredictionMode::D45Pred, 0, 0, 0);
         for &v in &pred {
@@ -2079,7 +2092,7 @@ mod tests {
 
     #[test]
     fn zone3_d203_uniform_left() {
-        let mut recon = vec![200u8; 128 * 128];
+        let mut recon = vec![200u16; 128 * 128];
         for r in 0..128 {
             recon[r * 128] = 100;
         }
@@ -2095,7 +2108,7 @@ mod tests {
     #[test]
     fn dc_ibp_blends_top_and_left_regions() {
         let stride = 16;
-        let mut recon = vec![0u8; stride * stride];
+        let mut recon = vec![0u16; stride * stride];
         recon[..stride].fill(64);
         for r in 0..stride {
             recon[r * stride] = 192;
@@ -2129,7 +2142,7 @@ mod tests {
     #[test]
     fn dc_ibp_skips_cfl_chroma() {
         let stride = 16;
-        let mut recon = vec![0u8; stride * stride];
+        let mut recon = vec![0u16; stride * stride];
         recon[..stride].fill(64);
         for r in 0..stride {
             recon[r * stride] = 192;
@@ -2162,9 +2175,10 @@ mod tests {
     #[test]
     fn directional_ibp_requires_even_delta_luma() {
         let stride = 16;
-        let mut recon = vec![0u8; stride * stride];
+        let mut recon = vec![0u16; stride * stride];
+        #[allow(clippy::needless_range_loop)]
         for c in 0..stride {
-            recon[c] = 32 + c as u8;
+            recon[c] = 32 + c as u16;
         }
         for r in 0..stride {
             recon[r * stride] = 160;

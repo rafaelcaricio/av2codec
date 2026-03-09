@@ -88,7 +88,13 @@ fn write_y4m(
     height: u32,
     frames: &[av2codec::DecodedFrame],
 ) -> io::Result<()> {
-    writeln!(w, "YUV4MPEG2 W{} H{} F30:1 Ip A1:1 C420", width, height)?;
+    let bit_depth = frames[0].bit_depth;
+    let colorspace = if bit_depth == 10 { "C420p10" } else { "C420" };
+    writeln!(
+        w,
+        "YUV4MPEG2 W{} H{} F30:1 Ip A1:1 {}",
+        width, height, colorspace
+    )?;
 
     let uv_width = (width / 2) as usize;
     let uv_height = (height / 2) as usize;
@@ -96,16 +102,38 @@ fn write_y4m(
     for frame in frames {
         w.write_all(b"FRAME\n")?;
 
-        for row in 0..height as usize {
-            w.write_all(&frame.y[row * width as usize..(row + 1) * width as usize])?;
-        }
-
-        for row in 0..uv_height {
-            w.write_all(&frame.u[row * uv_width..(row + 1) * uv_width])?;
-        }
-
-        for row in 0..uv_height {
-            w.write_all(&frame.v[row * uv_width..(row + 1) * uv_width])?;
+        if frame.bit_depth == 10 {
+            for row in 0..height as usize {
+                for &pixel in &frame.y[row * width as usize..(row + 1) * width as usize] {
+                    w.write_all(&pixel.to_le_bytes())?;
+                }
+            }
+            for row in 0..uv_height {
+                for &pixel in &frame.u[row * uv_width..(row + 1) * uv_width] {
+                    w.write_all(&pixel.to_le_bytes())?;
+                }
+            }
+            for row in 0..uv_height {
+                for &pixel in &frame.v[row * uv_width..(row + 1) * uv_width] {
+                    w.write_all(&pixel.to_le_bytes())?;
+                }
+            }
+        } else {
+            for row in 0..height as usize {
+                for &pixel in &frame.y[row * width as usize..(row + 1) * width as usize] {
+                    w.write_all(&[pixel as u8])?;
+                }
+            }
+            for row in 0..uv_height {
+                for &pixel in &frame.u[row * uv_width..(row + 1) * uv_width] {
+                    w.write_all(&[pixel as u8])?;
+                }
+            }
+            for row in 0..uv_height {
+                for &pixel in &frame.v[row * uv_width..(row + 1) * uv_width] {
+                    w.write_all(&[pixel as u8])?;
+                }
+            }
         }
     }
 

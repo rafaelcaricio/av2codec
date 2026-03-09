@@ -10,6 +10,7 @@ const DELTA_DCQUANT_MIN: i32 = DELTA_DCQUANT_MAX - (1 << DELTA_DCQUANT_BITS) + 1
 pub struct SequenceHeaderConfig {
     pub width: u32,
     pub height: u32,
+    pub bit_depth: u32,
 }
 
 pub fn write_sequence_header(config: &SequenceHeaderConfig) -> Vec<u8> {
@@ -36,7 +37,13 @@ pub fn write_sequence_header(config: &SequenceHeaderConfig) -> Vec<u8> {
     w.write_bit(false);
 
     w.write_uvlc(0);
-    w.write_uvlc(1);
+    let bitdepth_idx = match config.bit_depth {
+        10 => 0,
+        8 => 1,
+        12 => 2,
+        _ => 1,
+    };
+    w.write_uvlc(bitdepth_idx);
 
     w.write_bit(false);
     w.write_bit(false);
@@ -254,6 +261,7 @@ mod tests {
         let config = SequenceHeaderConfig {
             width: 64,
             height: 64,
+            bit_depth: 8,
         };
         let payload = write_sequence_header(&config);
         assert_eq!(payload[0] >> 7, 1, "First bit should be 1 (UVLC(0))");
@@ -264,6 +272,7 @@ mod tests {
         let config = SequenceHeaderConfig {
             width: 64,
             height: 64,
+            bit_depth: 8,
         };
         let payload = write_sequence_header(&config);
         let obu = ObuWriter::pack_obu(ObuType::SequenceHeader, &payload);

@@ -6,6 +6,7 @@ const SEQ_LEVEL_4_0: u32 = 8;
 pub struct SequenceParams {
     pub width: u32,
     pub height: u32,
+    pub bit_depth: u32,
     pub single_picture_header_flag: bool,
     pub sb_size: u32,
     pub enable_sdp: bool,
@@ -147,11 +148,18 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
 
     let chroma_format = r.read_uvlc();
     let monochrome = chroma_format == 1;
-    let _bitdepth_idx = r.read_uvlc();
+    let bitdepth_idx = r.read_uvlc();
+    let bit_depth = match bitdepth_idx {
+        0 => 10,
+        1 => 8,
+        2 => 12,
+        _ => 8,
+    };
     eprintln!(
-        "[SEQ_BITS] after chroma={} bitdepth_idx={}: bit_pos={}",
+        "[SEQ_BITS] after chroma={} bitdepth_idx={} bit_depth={}: bit_pos={}",
         chroma_format,
-        _bitdepth_idx,
+        bitdepth_idx,
+        bit_depth,
         r.total_bits_read()
     );
 
@@ -295,6 +303,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Result<SequenceParams, DecodeErr
     Ok(SequenceParams {
         width,
         height,
+        bit_depth,
         single_picture_header_flag: sph,
         sb_size,
         enable_sdp,
@@ -661,6 +670,7 @@ mod tests {
         let payload = write_sequence_header(&SequenceHeaderConfig {
             width: 64,
             height: 64,
+            bit_depth: 8,
         });
         let params = parse_sequence_header(&payload).unwrap();
         assert_eq!(params.width, 64);
@@ -676,6 +686,7 @@ mod tests {
         let payload = write_sequence_header(&SequenceHeaderConfig {
             width: 128,
             height: 128,
+            bit_depth: 8,
         });
         let params = parse_sequence_header(&payload).unwrap();
         assert_eq!(params.width, 128);
@@ -687,6 +698,7 @@ mod tests {
         let payload = write_sequence_header(&SequenceHeaderConfig {
             width: 256,
             height: 192,
+            bit_depth: 8,
         });
         let params = parse_sequence_header(&payload).unwrap();
         assert_eq!(params.width, 256);
@@ -698,6 +710,7 @@ mod tests {
         let payload = write_sequence_header(&SequenceHeaderConfig {
             width: 256,
             height: 256,
+            bit_depth: 8,
         });
         let params = parse_sequence_header(&payload).unwrap();
         assert_eq!(params.width, 256);
@@ -709,6 +722,7 @@ mod tests {
         let payload = write_sequence_header(&SequenceHeaderConfig {
             width: 1920,
             height: 1080,
+            bit_depth: 8,
         });
         let params = parse_sequence_header(&payload).unwrap();
         assert_eq!(params.width, 1920);
