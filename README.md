@@ -277,7 +277,10 @@ src/
   tile.rs             Tile data: partition, intra mode, coefficient coding
   entropy.rs          Daala arithmetic range coder (od_ec_enc port)
   scan.rs             Coefficient scan order tables
+  block.rs            Block sizes, TX sizes, partition constants
   cdf_tables.rs       Initial CDF tables for entropy coding
+  cdf_tables_qctx.rs  Q-context-indexed coefficient CDF tables
+  cdf_context.rs      Mutable CDF state for adaptation (FrameCdfContext)
   y4m.rs              Y4M file parser
   bin/
     av2codec.rs           Encoder CLI binary
@@ -291,12 +294,18 @@ src/
     frame.rs          Frame header decoder
     tile.rs           Tile coefficient decoder (base, BR, sign, HR)
     transform.rs      Dequantization and inverse DCT
+    predict.rs        Intra prediction modes (DC, directional, smooth, Paeth)
   bitstream/
     mod.rs            Bitstream module re-exports
     writer.rs         Bit-level writer (literals, UVLC, LEB128)
     obu.rs            OBU header and LEB128 size framing
     sequence.rs       Sequence header payload
     frame.rs          Frame header (CLK OBU) payload
+scripts/
+  compare_codec_matrix.py   Encoder/decoder comparison matrix with PSNR metrics
+  compare_decoders.sh       Shell helper for decoder comparison
+  codec_iteration.py        Iteration helper for codec development
+  extract_palette_cdfs.py   CDF extraction utility
 examples/
   encode.rs           Streaming API example (solid-color frames)
 tests/
@@ -304,6 +313,8 @@ tests/
   fixtures/               Y4M test inputs (solid colors, gradients, patterns)
 docs/
   plans/                  Design documents and implementation plans
+  baselines/              Reference decoder output baselines
+  reports/                Analysis and comparison reports
 ```
 
 ## Building the reference decoder
