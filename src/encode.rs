@@ -158,7 +158,7 @@ impl Encoder {
                 order_hint: self.order_hint,
                 enable_partitioning: false,
             },
-            true,
+            std::env::var("WAV2C_NO_CDF_UPDATE").is_err(),
         );
 
         let frame_number = self.order_hint as u64;
@@ -349,7 +349,7 @@ pub fn build_y_mode_list(
                     let nj_off = nj as isize - NON_DIRECTIONAL_MODES_COUNT as isize;
                     let left_derived = ((nj_off - i as isize + 55) % 56) as usize
                         + NON_DIRECTIONAL_MODES_COUNT;
-                    let right_derived = ((nj_off + i as isize) % 56) as usize
+                    let right_derived = ((nj_off + i as isize + 1) % 56) as usize
                         + NON_DIRECTIONAL_MODES_COUNT;
                     if !selected[left_derived] {
                         list[idx] = left_derived as i32;
@@ -548,20 +548,29 @@ impl RefPixels {
     }
 }
 
-fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> RefPixels {
+fn get_ref_pixels(
+    recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize,
+    right_limit: usize, bottom_limit: usize,
+) -> RefPixels {
     let frame_h = recon.len() / stride;
     let has_above = y > 0;
     let has_left = x > 0;
 
     let compute_above_right = |above: &[u8]| -> u8 {
-        if has_above && x + bsize < stride {
+        if has_above && x + bsize < right_limit && x + bsize < stride {
             recon[(y - 1) * stride + x + bsize]
         } else {
             above[bsize - 1]
         }
     };
 
-    let compute_below_left = |left: &[u8]| -> u8 { left[bsize - 1] };
+    let compute_below_left = |left: &[u8]| -> u8 {
+        if has_left && y + bsize < bottom_limit && y + bsize < frame_h {
+            recon[(y + bsize) * stride + x - 1]
+        } else {
+            left[bsize - 1]
+        }
+    };
 
     let build_above_ext = |above: &[u8]| -> Vec<u8> {
         let mut ext = vec![0u8; bsize + bsize];
@@ -569,7 +578,7 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
         if has_above {
             for i in 0..bsize {
                 let cx = x + bsize + i;
-                if cx < stride {
+                if cx < right_limit && cx < stride {
                     ext[bsize + i] = recon[(y - 1) * stride + cx];
                 } else {
                     ext[bsize + i] = above[bsize - 1];
@@ -590,7 +599,7 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
         if has_left {
             for j in 0..bsize {
                 let cy = y + bsize + j;
-                if cy < frame_h {
+                if cy < bottom_limit && cy < frame_h {
                     ext[bsize + j] = recon[cy * stride + x - 1];
                 } else {
                     ext[bsize + j] = left[bsize - 1];
@@ -701,7 +710,7 @@ fn get_ref_pixels(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize)
 }
 
 pub fn predict_dc(recon: &[u8], stride: usize, x: usize, y: usize, bsize: usize) -> u8 {
-    let refs = get_ref_pixels(recon, stride, x, y, bsize);
+    let refs = get_ref_pixels(recon, stride, x, y, bsize, stride, recon.len() / stride);
     match (refs.has_above, refs.has_left) {
         (false, false) => 128,
         (true, false) => {
@@ -895,6 +904,7 @@ fn predict_dr_z1(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
     let dx = get_dx(angle);
     let max_base_x = (bw + bh) - 1;
     let above = &refs.above_ext;
+    let tl = refs.top_left;
     let mut pred = vec![0u8; bw * bh];
     let mut x = dx;
     for r in 0..bh {
@@ -904,7 +914,7 @@ fn predict_dr_z1(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
             let b = base as usize + c;
             if b < max_base_x {
                 if use_idif {
-                    let p0 = if b == 0 { above[0] } else { above[b - 1] } as i32;
+                    let p0 = if b == 0 { tl as i32 } else { above[b - 1] as i32 };
                     let p1 = above[b] as i32;
                     let p2 = above[b + 1] as i32;
                     let p3 = if b + 2 <= max_base_x { above[b + 2] } else { above[max_base_x] } as i32;
@@ -924,15 +934,15 @@ fn predict_dr_z1(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
 fn get_above_z2(refs: &RefPixels, idx: isize, bw: usize) -> i32 {
     if idx < -1 { refs.top_left as i32 }
     else if idx == -1 { refs.top_left as i32 }
-    else if (idx as usize) < refs.above_ext.len() { refs.above_ext[idx as usize] as i32 }
-    else { refs.above_ext[refs.above_ext.len() - 1] as i32 }
+    else if (idx as usize) < bw { refs.above_ext[idx as usize] as i32 }
+    else { refs.above_ext[bw - 1] as i32 }
 }
 
 fn get_left_z2(refs: &RefPixels, idx: isize, bh: usize) -> i32 {
     if idx < -1 { refs.top_left as i32 }
     else if idx == -1 { refs.top_left as i32 }
-    else if (idx as usize) < refs.left_ext.len() { refs.left_ext[idx as usize] as i32 }
-    else { refs.left_ext[refs.left_ext.len() - 1] as i32 }
+    else if (idx as usize) < bh { refs.left_ext[idx as usize] as i32 }
+    else { refs.left_ext[bh - 1] as i32 }
 }
 
 fn predict_dr_z2(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: bool) -> Vec<u8> {
@@ -989,6 +999,7 @@ fn predict_dr_z3(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
     let dy = get_dy(angle);
     let max_base_y = (bw + bh) - 1;
     let left = &refs.left_ext;
+    let tl = refs.top_left;
     let mut pred = vec![0u8; bw * bh];
     let mut y = dy;
     for c in 0..bw {
@@ -998,7 +1009,7 @@ fn predict_dr_z3(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
             let b = base as usize + r;
             if b < max_base_y {
                 if use_idif {
-                    let p0 = if b == 0 { left[0] } else { left[b - 1] } as i32;
+                    let p0 = if b == 0 { tl as i32 } else { left[b - 1] as i32 };
                     let p1 = left[b] as i32;
                     let p2 = left[b + 1] as i32;
                     let p3 = if b + 2 <= max_base_y { left[b + 2] } else { left[max_base_y] } as i32;
@@ -1015,18 +1026,144 @@ fn predict_dr_z3(refs: &RefPixels, bw: usize, bh: usize, angle: u16, use_idif: b
     pred
 }
 
+fn edge_filter_strength(bs0: usize, bs1: usize, delta: i32, filter_type: usize) -> usize {
+    let d = delta.abs();
+    let blk_wh = bs0 + bs1;
+    let mut strength = 0;
+    if filter_type == 0 {
+        if blk_wh <= 8 {
+            if d >= 56 { strength = 1; }
+        } else if blk_wh <= 12 {
+            if d >= 40 { strength = 1; }
+        } else if blk_wh <= 16 {
+            if d >= 40 { strength = 1; }
+        } else if blk_wh <= 24 {
+            if d >= 8 { strength = 1; }
+            if d >= 16 { strength = 2; }
+            if d >= 32 { strength = 3; }
+        } else if blk_wh <= 32 {
+            if d >= 1 { strength = 1; }
+            if d >= 4 { strength = 2; }
+            if d >= 32 { strength = 3; }
+        } else if d >= 1 {
+            strength = 3;
+        }
+    } else {
+        if blk_wh <= 8 {
+            if d >= 40 { strength = 1; }
+            if d >= 64 { strength = 2; }
+        } else if blk_wh <= 16 {
+            if d >= 20 { strength = 1; }
+            if d >= 48 { strength = 2; }
+        } else if blk_wh <= 24 {
+            if d >= 4 { strength = 3; }
+        } else if d >= 1 {
+            strength = 3;
+        }
+    }
+    strength
+}
+
+fn filter_intra_edge(edge: &mut [u8], strength: usize) {
+    if strength == 0 {
+        return;
+    }
+    const KERNELS: [[u32; 5]; 3] = [[0, 4, 8, 4, 0], [0, 5, 6, 5, 0], [2, 4, 4, 4, 2]];
+    let kernel = KERNELS[strength - 1];
+    let src = edge.to_vec();
+    for i in 1..edge.len() {
+        let mut sum = 0u32;
+        for (j, coeff) in kernel.iter().enumerate() {
+            let idx = ((i as isize) - 2 + j as isize).clamp(0, edge.len() as isize - 1) as usize;
+            sum += src[idx] as u32 * coeff;
+        }
+        edge[i] = ((sum + 8) >> 4) as u8;
+    }
+}
+
+fn apply_edge_filter_for_directional(refs: &mut RefPixels, bsize: usize, p_angle: u16) {
+    if p_angle == 90 || p_angle == 180 {
+        return;
+    }
+    let w = bsize;
+    let h = bsize;
+    let (need_above, need_left) = if (p_angle as i32) < 90 {
+        (true, false)
+    } else if (p_angle as i32) < 180 {
+        (true, true)
+    } else {
+        (false, true)
+    };
+
+    let need_right = (p_angle as i32) < 90;
+    let need_bottom = (p_angle as i32) > 180;
+
+    if need_above && need_left && w + h >= 24 && !refs.above.is_empty() && !refs.left.is_empty() {
+        refs.top_left =
+            ((refs.left[0] as u32 * 5 + refs.top_left as u32 * 6 + refs.above[0] as u32 * 5 + 8)
+                >> 4) as u8;
+    }
+
+    let angle_above = p_angle as i32 - 90;
+    let angle_left = p_angle as i32 - 180;
+
+    if need_above && refs.has_above {
+        let strength = edge_filter_strength(w, h, angle_above, 0);
+        let n_top_px = w;
+        let len = n_top_px + 1 + if need_right { h } else { 0 };
+        let limit = len.min(refs.above_ext.len() + 1);
+        let mut edge = Vec::with_capacity(limit);
+        edge.push(refs.top_left);
+        let copy_len = (limit - 1).min(refs.above_ext.len());
+        edge.extend_from_slice(&refs.above_ext[..copy_len]);
+        filter_intra_edge(&mut edge, strength);
+        refs.top_left = edge[0];
+        refs.above[..w.min(copy_len)].copy_from_slice(&edge[1..1 + w.min(copy_len)]);
+        refs.above_ext[..copy_len].copy_from_slice(&edge[1..]);
+    }
+
+    if need_left && refs.has_left {
+        let strength = edge_filter_strength(h, w, angle_left, 0);
+        let n_left_px = h;
+        let len = n_left_px + 1 + if need_bottom { w } else { 0 };
+        let limit = len.min(refs.left_ext.len() + 1);
+        let mut edge = Vec::with_capacity(limit);
+        edge.push(refs.top_left);
+        let copy_len = (limit - 1).min(refs.left_ext.len());
+        edge.extend_from_slice(&refs.left_ext[..copy_len]);
+        filter_intra_edge(&mut edge, strength);
+        refs.top_left = edge[0];
+        refs.left[..h.min(copy_len)].copy_from_slice(&edge[1..1 + h.min(copy_len)]);
+        refs.left_ext[..copy_len].copy_from_slice(&edge[1..]);
+    }
+}
+
 fn predict_directional(refs: &RefPixels, bsize: usize, mode: IntraMode, is_luma: bool) -> Vec<u8> {
     let angle = mode.nominal_angle();
     if angle == 90 {
-        predict_v_block(refs, bsize)
-    } else if angle == 180 {
-        predict_h_block(refs, bsize)
-    } else if angle > 0 && angle < 90 {
-        predict_dr_z1(refs, bsize, bsize, angle, is_luma)
+        return predict_v_block(refs, bsize);
+    }
+    if angle == 180 {
+        return predict_h_block(refs, bsize);
+    }
+    let mut filtered_refs = RefPixels {
+        above: refs.above.clone(),
+        left: refs.left.clone(),
+        top_left: refs.top_left,
+        above_right: refs.above_right,
+        below_left: refs.below_left,
+        has_above: refs.has_above,
+        has_left: refs.has_left,
+        above_ext: refs.above_ext.clone(),
+        left_ext: refs.left_ext.clone(),
+    };
+    apply_edge_filter_for_directional(&mut filtered_refs, bsize, angle);
+    if angle > 0 && angle < 90 {
+        predict_dr_z1(&filtered_refs, bsize, bsize, angle, is_luma)
     } else if angle > 90 && angle < 180 {
-        predict_dr_z2(refs, bsize, bsize, angle, is_luma)
+        predict_dr_z2(&filtered_refs, bsize, bsize, angle, is_luma)
     } else {
-        predict_dr_z3(refs, bsize, bsize, angle, is_luma)
+        predict_dr_z3(&filtered_refs, bsize, bsize, angle, is_luma)
     }
 }
 
@@ -1055,7 +1192,7 @@ pub fn predict_intra_block(
     bsize: usize,
     mode: IntraMode,
 ) -> Vec<u8> {
-    let refs = get_ref_pixels(recon, stride, x, y, bsize);
+    let refs = get_ref_pixels(recon, stride, x, y, bsize, stride, recon.len() / stride);
     predict_block_plane(&refs, bsize, mode, true)
 }
 
@@ -1067,7 +1204,7 @@ pub fn predict_intra_block_uv(
     bsize: usize,
     mode: IntraMode,
 ) -> Vec<u8> {
-    let refs = get_ref_pixels(recon, stride, x, y, bsize);
+    let refs = get_ref_pixels(recon, stride, x, y, bsize, stride, recon.len() / stride);
     predict_block_plane(&refs, bsize, mode, false)
 }
 
@@ -1103,8 +1240,41 @@ const NONDIR_MODES: [IntraMode; 5] = [
     IntraMode::PaethPred,
 ];
 
+const ZONE1_AND_Z2_MODES: [IntraMode; 12] = [
+    IntraMode::DcPred,
+    IntraMode::SmoothPred,
+    IntraMode::SmoothVPred,
+    IntraMode::SmoothHPred,
+    IntraMode::PaethPred,
+    IntraMode::VPred,
+    IntraMode::HPred,
+    IntraMode::D45Pred,
+    IntraMode::D67Pred,
+    IntraMode::D135Pred,
+    IntraMode::D113Pred,
+    IntraMode::D157Pred,
+];
+
+const ZONE1_MODES: [IntraMode; 9] = [
+    IntraMode::DcPred,
+    IntraMode::SmoothPred,
+    IntraMode::SmoothVPred,
+    IntraMode::SmoothHPred,
+    IntraMode::PaethPred,
+    IntraMode::VPred,
+    IntraMode::HPred,
+    IntraMode::D45Pred,
+    IntraMode::D67Pred,
+];
+
+const VH_MODES: [IntraMode; 7] = [
+    IntraMode::DcPred, IntraMode::SmoothPred, IntraMode::SmoothVPred,
+    IntraMode::SmoothHPred, IntraMode::PaethPred,
+    IntraMode::VPred, IntraMode::HPred,
+];
+
 fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
-    select_intra_mode_from(pixels, refs, bsize, &ALL_INTRA_MODES, true)
+    select_intra_mode_from(pixels, refs, bsize, &VH_MODES, true)
 }
 
 fn select_intra_mode_nondir(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
@@ -1151,7 +1321,8 @@ fn encode_uv_subblock(
     dequant: i32,
     mode: IntraMode,
 ) -> (Vec<i32>, u16) {
-    let refs = get_ref_pixels(recon_uv, uv_w, ux, uy, uv_bsize);
+    let uv_h = recon_uv.len() / uv_w;
+    let refs = get_ref_pixels(recon_uv, uv_w, ux, uy, uv_bsize, uv_w, uv_h);
     let block = extract_subblock(uv_plane, uv_w, ux, uy, uv_bsize, uv_bsize);
     let pred = predict_block_plane(&refs, uv_bsize, mode, false);
     let residual = compute_residual_block(&block, &pred);
@@ -1244,11 +1415,21 @@ fn encode_block_var(
     bsize: usize,
     dequant: i32,
     forced_mode: Option<IntraMode>,
+    right_limit: usize,
+    bottom_limit: usize,
 ) -> EncodedBlock {
-    let refs = get_ref_pixels(recon, plane_w, x, y, bsize);
+    let refs = get_ref_pixels(recon, plane_w, x, y, bsize, right_limit, bottom_limit);
     let block = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
-    let mode = forced_mode.unwrap_or_else(|| select_intra_mode_nondir(&block, &refs, bsize));
+    let mode = forced_mode.unwrap_or_else(|| select_intra_mode(&block, &refs, bsize));
     let pred_block = predict_block(&refs, bsize, mode);
+    if std::env::var("WAV2C_DEBUG_BLOCKS").is_ok() {
+        eprintln!("BLOCK ({},{}) {}x{} mode={:?} above[0..4]={:?} left[0..4]={:?} ar={} bl={} pred[0..4]={:?}",
+            x, y, bsize, bsize, mode,
+            &refs.above[..4.min(refs.above.len())],
+            &refs.left[..4.min(refs.left.len())],
+            refs.above_right, refs.below_left,
+            &pred_block[..4.min(pred_block.len())]);
+    }
     let residual = compute_residual_block(&block, &pred_block);
 
     if bsize == 64 {
@@ -1348,12 +1529,19 @@ fn rd_cost(distortion: u64, rate_bits: u64, lambda: f64) -> f64 {
     distortion as f64 + lambda * rate_bits as f64
 }
 
-fn estimate_rate(eob: u16, _num_coeffs: usize) -> u64 {
-    if eob == 0 {
-        8
-    } else {
-        32 + (eob as u64) * 16
+fn estimate_block_rate(block: &EncodedBlock) -> u64 {
+    let mode_overhead = 160u64;
+    if block.eob == 0 {
+        return mode_overhead + 8;
     }
+    let eob = block.eob as u64;
+    let bits_per_coeff = match block.bsize {
+        32 => 8,
+        16 => 11,
+        _ => 14,
+    };
+    let coeff_bits = 48 + eob * bits_per_coeff;
+    mode_overhead + coeff_bits
 }
 
 fn encode_partition_rd(
@@ -1366,6 +1554,8 @@ fn encode_partition_rd(
     dequant: i32,
     lambda: f64,
     min_bsize: usize,
+    right_limit: usize,
+    bottom_limit: usize,
 ) -> Vec<EncodedBlock> {
 
     let original = extract_subblock(pixels, plane_w, x, y, bsize, bsize);
@@ -1379,13 +1569,9 @@ fn encode_partition_rd(
         buf
     };
 
-    let no_split = encode_block_var(pixels, plane_w, recon, x, y, bsize, dequant, None);
+    let no_split = encode_block_var(pixels, plane_w, recon, x, y, bsize, dequant, None, right_limit, bottom_limit);
     let recon_no_split = extract_subblock(recon, plane_w, x, y, bsize, bsize);
     let dist_no_split = compute_ssd(&original, &recon_no_split);
-    let num_coeffs = no_split.levels.len();
-    let rate_no_split = estimate_rate(no_split.eob, num_coeffs);
-
-    let cost_no_split = rd_cost(dist_no_split, rate_no_split, lambda);
 
     let half = bsize / 2;
     if half < min_bsize {
@@ -1399,27 +1585,32 @@ fn encode_partition_rd(
     }
 
     let mut split_blocks = Vec::new();
-    let positions = [(x, y), (x + half, y), (x, y + half), (x + half, y + half)];
-    for &(bx, by) in &positions {
-        let sub = encode_partition_rd(pixels, plane_w, recon, bx, by, half, dequant, lambda, min_bsize);
+    let sub_params: [(usize, usize, usize, usize); 4] = [
+        (x,      y,      right_limit,       bottom_limit),
+        (x+half, y,      right_limit,       y + half),
+        (x,      y+half, x + bsize,         bottom_limit),
+        (x+half, y+half, x + bsize,         y + bsize),
+    ];
+    for &(bx, by, rl, bl) in &sub_params {
+        let sub = encode_partition_rd(pixels, plane_w, recon, bx, by, half, dequant, lambda, min_bsize, rl, bl);
         split_blocks.extend(sub);
     }
 
     let recon_split = extract_subblock(recon, plane_w, x, y, bsize, bsize);
     let dist_split = compute_ssd(&original, &recon_split);
-    let partition_overhead = 16u64;
-    let rate_split: u64 = split_blocks.iter().map(|b| estimate_rate(b.eob, b.levels.len())).sum::<u64>() + partition_overhead;
-    let cost_split = rd_cost(dist_split, rate_split, lambda);
 
-    if cost_no_split <= cost_split {
+    let split_overhead = (bsize * bsize / 2) as u64;
+    let split_improves = dist_split + split_overhead < dist_no_split;
+
+    if split_improves {
+        split_blocks
+    } else {
         for r in 0..bsize {
             for c in 0..bsize {
                 recon[(y + r) * plane_w + x + c] = recon_no_split[r * bsize + c];
             }
         }
         vec![no_split]
-    } else {
-        split_blocks
     }
 }
 
@@ -1445,9 +1636,9 @@ fn encode_plane_block_64(
     y: usize,
     dequant: i32,
 ) -> ([i32; 1024], u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 64);
+    let refs = get_ref_pixels(recon, plane_w, x, y, 64, plane_w, recon.len() / plane_w);
     let y_block = extract_subblock(pixels, plane_w, x, y, 64, 64);
-    let mode = select_intra_mode_nondir(&y_block, &refs, 64);
+    let mode = select_intra_mode(&y_block, &refs, 64);
     let pred_block = predict_block(&refs, 64, mode);
 
     let residual = compute_residual_block(&y_block, &pred_block);
@@ -1484,7 +1675,7 @@ fn encode_plane_block_32_with_mode(
     dequant: i32,
     forced_mode: Option<IntraMode>,
 ) -> ([i32; 1024], u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 32);
+    let refs = get_ref_pixels(recon, plane_w, x, y, 32, plane_w, recon.len() / plane_w);
     let uv_block = extract_subblock(pixels, plane_w, x, y, 32, 32);
     let mode = forced_mode.unwrap_or_else(|| select_intra_mode_from(&uv_block, &refs, 32, &ALL_INTRA_MODES, false));
     let pred_block = predict_block_plane(&refs, 32, mode, false);
@@ -1538,7 +1729,7 @@ fn encode_plane_block_16(
     dequant: i32,
     forced_mode: Option<IntraMode>,
 ) -> (Vec<i32>, u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 16);
+    let refs = get_ref_pixels(recon, plane_w, x, y, 16, plane_w, recon.len() / plane_w);
     let block = extract_subblock(pixels, plane_w, x, y, 16, 16);
     let mode = forced_mode.unwrap_or_else(|| select_intra_mode_from(&block, &refs, 16, &ALL_INTRA_MODES, false));
     let pred_block = predict_block_plane(&refs, 16, mode, false);
@@ -1574,10 +1765,10 @@ fn encode_plane_block_32_y(
     y: usize,
     dequant: i32,
 ) -> (Vec<i32>, u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 32);
+    let refs = get_ref_pixels(recon, plane_w, x, y, 32, plane_w, recon.len() / plane_w);
     let block = extract_subblock(pixels, plane_w, x, y, 32, 32);
-    let mode = select_intra_mode_nondir(&block, &refs, 32);
-    let pred_block = predict_block_plane(&refs, 32, mode, true);
+    let mode = select_intra_mode(&block, &refs, 32);
+    let pred_block = predict_block(&refs, 32, mode);
 
     let residual = compute_residual_block(&block, &pred_block);
     let mut residual_arr = [0i32; 1024];
@@ -1627,8 +1818,20 @@ fn encode_frame_yuv(
                 let yx = sb_x + bx;
                 let yy = sb_y + by;
 
+                let right_limit = if yy == sb_y {
+                    if sb_y > 0 { w } else { yx + 32 }
+                } else {
+                    (sb_x + 64).min(w)
+                };
+                let bottom_limit = if yx == sb_x {
+                    if sb_x > 0 { (sb_y + 64).min(h) } else { yy + 32 }
+                } else {
+                    (sb_y + if by == 0 { 32 } else { 64 }).min(h)
+                };
+
                 let mut leaf_blocks = encode_partition_rd(
                     y_plane, w, &mut recon_y, yx, yy, 32, params.dequant, lambda, 8,
+                    right_limit, bottom_limit,
                 );
 
 
@@ -1656,6 +1859,13 @@ fn encode_frame_yuv(
                 y_blocks.extend(leaf_blocks);
             }
 
+            if std::env::var("WAV2C_DEBUG_BLOCKS").is_ok() {
+                eprintln!("SB({},{}) FINAL blocks:", sb_x, sb_y);
+                for b in &y_blocks {
+                    eprintln!("  FINAL ({},{}) {}x{} mode={:?}", b.x, b.y, b.bsize, b.bsize, b.mode);
+                }
+            }
+
             sbs.push(EncodedSuperblock {
                 y_blocks,
                 u_levels: [0i32; 1024],
@@ -1665,6 +1875,11 @@ fn encode_frame_yuv(
                 uv_mode: IntraMode::DcPred,
             });
         }
+    }
+
+    if let Ok(path) = std::env::var("WAV2C_DUMP_RECON") {
+        std::fs::write(&path, &recon_y).unwrap();
+        eprintln!("Dumped encoder recon Y ({} bytes) to {}", recon_y.len(), path);
     }
 
     let tile_data = tile::encode_tile_data_split4(sb_cols, sb_rows, &sbs, allow_cdf_update, params.base_qindex);
@@ -2395,7 +2610,7 @@ mod tests {
     #[test]
     fn ref_pixels_no_neighbors() {
         let recon = vec![0u8; 64 * 64];
-        let refs = get_ref_pixels(&recon, 64, 0, 0, 32);
+        let refs = get_ref_pixels(&recon, 64, 0, 0, 32, 64, 64);
         assert!(refs.above.iter().all(|&v| v == 127));
         assert!(refs.left.iter().all(|&v| v == 129));
         assert_eq!(refs.top_left, 128);
@@ -2409,7 +2624,7 @@ mod tests {
         for i in 0..64 {
             recon[63 * 128 + i] = 200;
         }
-        let refs = get_ref_pixels(&recon, 128, 0, 64, 64);
+        let refs = get_ref_pixels(&recon, 128, 0, 64, 64, 128, 128);
         assert!(refs.above.iter().all(|&v| v == 200));
         assert!(refs.left.iter().all(|&v| v == 200));
         assert_eq!(refs.top_left, 200);
@@ -2423,7 +2638,7 @@ mod tests {
         for j in 0..64 {
             recon[j * 128 + 63] = 150;
         }
-        let refs = get_ref_pixels(&recon, 128, 64, 0, 64);
+        let refs = get_ref_pixels(&recon, 128, 64, 0, 64, 128, 128);
         assert!(refs.left.iter().all(|&v| v == 150));
         assert!(refs.above.iter().all(|&v| v == 150));
         assert_eq!(refs.top_left, 150);
@@ -2441,7 +2656,7 @@ mod tests {
             recon[(64 + j) * 128 + 63] = 100;
         }
         recon[63 * 128 + 63] = 180;
-        let refs = get_ref_pixels(&recon, 128, 64, 64, 64);
+        let refs = get_ref_pixels(&recon, 128, 64, 64, 64, 128, 128);
         assert!(refs.above.iter().all(|&v| v == 200));
         assert!(refs.left.iter().all(|&v| v == 100));
         assert_eq!(refs.top_left, 180);
