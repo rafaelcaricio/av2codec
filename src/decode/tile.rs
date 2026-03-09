@@ -4,10 +4,8 @@ use crate::block::{
 use crate::cdf_context::FrameCdfContext;
 use crate::cdf_tables::*;
 use crate::decode::entropy::DaalaDecoder;
-use crate::scan::{DEFAULT_SCAN_32X32, TxClass, get_scan_for_tx, get_tx_class};
+use crate::scan::{TxClass, get_scan_for_tx, get_tx_class};
 use std::collections::{HashSet, VecDeque};
-
-const DO_SPLIT_ICDF: [u16; 2] = [12276, 0];
 const FIRST_MODE_COUNT: usize = 13;
 const SECOND_MODE_COUNT: usize = 16;
 const NON_DIRECTIONAL_MODES_COUNT: usize = 5;
@@ -401,17 +399,6 @@ impl Default for TileDecodeConfig {
 const COEFF_CONTEXT_BITS: u32 = 3;
 const COEFF_CONTEXT_MASK: u8 = (1 << COEFF_CONTEXT_BITS) - 1;
 
-pub struct DecodedSbCoeffs {
-    pub y_levels: [i32; 1024],
-    pub y_eob: u16,
-    pub u_levels: [i32; 1024],
-    pub u_eob: u16,
-    pub v_levels: [i32; 1024],
-    pub v_eob: u16,
-    pub y_mode: u8,
-    pub uv_mode: u8,
-}
-
 fn ceil_log2(n: u32) -> u32 {
     if n < 2 {
         return 0;
@@ -429,10 +416,6 @@ fn get_adaptive_param(ctx: usize) -> u32 {
 
 fn get_padded_idx(idx: usize, bwl: u32) -> usize {
     idx + ((idx >> bwl) << TX_PAD_HOR_LOG2)
-}
-
-fn is_lf_2d(row: usize, col: usize, plane: usize) -> bool {
-    is_lf(row, col, TxClass::TwoD, plane)
 }
 
 const LF_RC_LIM: usize = 2;
@@ -477,96 +460,12 @@ fn get_lower_levels_ctx_eob(bwl: u32, height: usize, scan_idx: usize) -> usize {
     3
 }
 
-fn get_lower_levels_ctx_lf_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
-    let pos = get_padded_idx(coeff_idx, bwl);
-    let stride = (1 << bwl) + TX_PAD_HOR;
-    let mag = (levels[pos + 1] as usize).min(5)
-        + (levels[pos + stride] as usize).min(5)
-        + (levels[pos + stride + 1] as usize).min(5)
-        + (levels[pos + 2] as usize).min(5)
-        + (levels[pos + 2 * stride] as usize).min(5);
-    let ctx = (mag + 1) >> 1;
-    let row = coeff_idx >> bwl;
-    let col = coeff_idx - (row << bwl);
-    if coeff_idx == 0 {
-        return ctx.min(8);
-    }
-    if row + col < 2 {
-        return ctx.min(6) + 9;
-    }
-    ctx.min(4) + 16
-}
-
-fn get_lower_levels_ctx_lf_2d_chroma(
-    levels: &[u8],
-    coeff_idx: usize,
-    bwl: u32,
-    plane: usize,
-) -> usize {
-    let pos = get_padded_idx(coeff_idx, bwl);
-    let stride = (1 << bwl) + TX_PAD_HOR;
-    let mag = (levels[pos + 1] as usize).min(5)
-        + (levels[pos + stride] as usize).min(5)
-        + (levels[pos + stride + 1] as usize).min(5);
-    let ctx = ((mag + 1) >> 1).min(3);
-    if plane == 1 { ctx } else { ctx + 4 }
-}
-
-fn get_lower_levels_ctx_2d(levels: &[u8], coeff_idx: usize, bwl: u32, plane: usize) -> usize {
-    let pos = get_padded_idx(coeff_idx, bwl);
-    let stride = (1 << bwl) + TX_PAD_HOR;
-    let mag = (levels[pos + 1] as usize).min(3)
-        + (levels[pos + stride] as usize).min(3)
-        + (levels[pos + stride + 1] as usize).min(3)
-        + (levels[pos + 2] as usize).min(3)
-        + (levels[pos + 2 * stride] as usize).min(3);
-    let ctx = ((mag + 1) >> 1).min(4);
-    if plane > 0 {
-        return ctx;
-    }
-    let row = coeff_idx >> bwl;
-    let col = coeff_idx - (row << bwl);
-    if row + col < 6 {
-        return ctx;
-    }
-    if row + col < 8 {
-        return ctx + 5;
-    }
-    ctx + 10
-}
-
-fn get_lower_levels_ctx_2d_chroma(
-    levels: &[u8],
-    coeff_idx: usize,
-    bwl: u32,
-    plane: usize,
-) -> usize {
-    let pos = get_padded_idx(coeff_idx, bwl);
-    let stride = (1 << bwl) + TX_PAD_HOR;
-    let mag = (levels[pos + 1] as usize).min(3)
-        + (levels[pos + stride] as usize).min(3)
-        + (levels[pos + stride + 1] as usize).min(3);
-    let ctx = ((mag + 1) >> 1).min(3);
-    if plane == 1 { ctx } else { ctx + 4 }
-}
-
 fn get_br_ctx_lf_eob(coeff_idx: usize, tx_class: TxClass) -> usize {
     if tx_class == TxClass::TwoD && coeff_idx == 0 {
         0
     } else {
         7
     }
-}
-
-fn get_br_lf_ctx_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
-    let row = coeff_idx >> bwl;
-    let col = coeff_idx - (row << bwl);
-    let stride = (1 << bwl) + TX_PAD_HOR;
-    let pos = row * stride + col;
-    let mag = (levels[pos + 1] as usize).min(MAX_VAL_BR_CTX as usize)
-        + (levels[pos + stride] as usize).min(MAX_VAL_BR_CTX as usize)
-        + (levels[pos + stride + 1] as usize).min(MAX_VAL_BR_CTX as usize);
-    ((mag + 1) >> 1).min(6) + 7
 }
 
 fn get_br_lf_ctx_dc_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
@@ -576,28 +475,6 @@ fn get_br_lf_ctx_dc_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
         + (levels[pos + stride] as usize).min(MAX_VAL_BR_CTX as usize)
         + (levels[pos + stride + 1] as usize).min(MAX_VAL_BR_CTX as usize);
     ((mag + 1) >> 1).min(6)
-}
-
-fn get_br_ctx_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
-    let row = coeff_idx >> bwl;
-    let col = coeff_idx - (row << bwl);
-    let stride = (1 << bwl) + TX_PAD_HOR;
-    let pos = row * stride + col;
-    let mag = (levels[pos + 1] as usize).min(MAX_VAL_BR_CTX as usize)
-        + (levels[pos + stride] as usize).min(MAX_VAL_BR_CTX as usize)
-        + (levels[pos + stride + 1] as usize).min(MAX_VAL_BR_CTX as usize);
-    ((mag + 1) >> 1).min(6)
-}
-
-fn get_br_ctx_2d_chroma(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
-    let row = coeff_idx >> bwl;
-    let col = coeff_idx - (row << bwl);
-    let stride = (1 << bwl) + TX_PAD_HOR;
-    let pos = row * stride + col;
-    let mag = (levels[pos + 1] as usize).min(MAX_VAL_BR_CTX as usize)
-        + (levels[pos + stride] as usize).min(MAX_VAL_BR_CTX as usize)
-        + (levels[pos + stride + 1] as usize).min(MAX_VAL_BR_CTX as usize);
-    ((mag + 1) >> 1).min(3)
 }
 
 const LF_SIG_COEF_CONTEXTS_2D: usize = 21;
@@ -968,46 +845,6 @@ fn decode_adaptive_hr(ec: &mut DaalaDecoder, hr_ctx: usize) -> usize {
     decode_truncated_rice(ec, m, k, cmax) as usize
 }
 
-fn decode_eob(
-    ec: &mut DaalaDecoder,
-    pl_ctx: usize,
-    mut cdf_ctx: Option<&mut FrameCdfContext>,
-) -> u16 {
-    let raw_token = if let Some(ref mut ctx) = cdf_ctx {
-        ec.decode_symbol_mut(&mut ctx.eob_multi_1024[pl_ctx])
-    } else {
-        ec.decode_symbol(&EOB_MULTI_1024_ICDF[pl_ctx])
-    };
-
-    let eob_token = if raw_token >= EOB_PT_INDEX_COUNT - 1 {
-        let extra_token = ec.decode_literal(2) as usize;
-        (EOB_PT_INDEX_COUNT - 1) + extra_token
-    } else {
-        raw_token
-    };
-
-    let eob_pt = eob_token + 1;
-    let eob_offset_bits = EOB_OFFSET_BITS[eob_pt] as u32;
-    let base = EOB_GROUP_START[eob_pt];
-
-    if eob_offset_bits > 0 {
-        let msb = if let Some(ref mut ctx) = cdf_ctx {
-            ec.decode_symbol_mut(&mut ctx.eob_extra) as u16
-        } else {
-            ec.decode_symbol(&EOB_EXTRA_ICDF) as u16
-        };
-        let rest = if eob_offset_bits > 1 {
-            ec.decode_literal(eob_offset_bits - 1) as u16
-        } else {
-            0
-        };
-        let extra = (msb << (eob_offset_bits - 1)) | rest;
-        base + extra
-    } else {
-        base
-    }
-}
-
 fn decode_low_range(
     ec: &mut DaalaDecoder,
     base_levels: usize,
@@ -1020,526 +857,6 @@ fn decode_low_range(
         ec.decode_symbol(static_cdf)
     };
     base_levels + 1 + br_sym
-}
-
-struct PlaneDecodeCtx<'a> {
-    plane: usize,
-    txs_ctx_idx: usize,
-    bwl: u32,
-    height: usize,
-    txb_skip_icdf: &'a [u16],
-    dc_sign_ctx: usize,
-    entropy_ctx: usize,
-    u_has_coeffs: bool,
-}
-
-fn decode_plane_full(
-    ec: &mut DaalaDecoder,
-    ctx: &PlaneDecodeCtx,
-    mut cdf_ctx: Option<&mut FrameCdfContext>,
-) -> ([i32; 1024], u16) {
-    let plane = ctx.plane;
-    let txs_ctx_idx = ctx.txs_ctx_idx;
-    let bwl = ctx.bwl;
-    let height = ctx.height;
-    let dc_sign_ctx = ctx.dc_sign_ctx;
-
-    let mut levels = [0i32; 1024];
-
-    let skip = if let Some(ref mut cdf) = cdf_ctx {
-        let txb_skip_cdf = match ctx.plane {
-            0 => &mut cdf.txb_skip_y[txs_ctx_idx][ctx.entropy_ctx],
-            1 => &mut cdf.txb_skip_y[txs_ctx_idx][ctx.entropy_ctx],
-            _ => {
-                if ctx.u_has_coeffs {
-                    &mut cdf.txb_skip_v_u_nz[ctx.entropy_ctx]
-                } else {
-                    &mut cdf.txb_skip_v[ctx.entropy_ctx]
-                }
-            }
-        };
-        ec.decode_symbol_mut(txb_skip_cdf)
-    } else {
-        ec.decode_symbol(ctx.txb_skip_icdf)
-    };
-    if skip == 1 {
-        return (levels, 0);
-    }
-
-    let pl_ctx = if plane == 0 { 0 } else { 2 };
-    let eob = decode_eob(ec, pl_ctx, cdf_ctx.as_deref_mut());
-
-    let width = 1usize << bwl;
-    let padded_stride = width + TX_PAD_HOR;
-    let padded_height = height + 2;
-    let mut levels_buf = vec![0u8; padded_stride * padded_height];
-
-    let mut abs_levels = vec![0usize; eob as usize];
-
-    let eob_scan_idx = (eob - 1) as usize;
-    let eob_pos = DEFAULT_SCAN_32X32[eob_scan_idx] as usize;
-    let eob_row = eob_pos >> bwl;
-    let eob_col = eob_pos - (eob_row << bwl);
-    let eob_lf = is_lf_2d(eob_row, eob_col, plane);
-
-    let coeff_ctx = get_lower_levels_ctx_eob(bwl, height, eob_scan_idx);
-
-    if plane == 0 {
-        if eob_lf {
-            let sym = if let Some(ref mut cdf) = cdf_ctx {
-                ec.decode_symbol_mut(&mut cdf.coeff_base_lf_eob_y[txs_ctx_idx][coeff_ctx])
-            } else {
-                ec.decode_symbol(&COEFF_BASE_LF_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx])
-            };
-            let base_value = sym + 1;
-            if base_value > LF_NUM_BASE_LEVELS {
-                let br_ctx = get_br_ctx_lf_eob(eob_pos, TxClass::TwoD);
-                abs_levels[eob_scan_idx] = decode_low_range(
-                    ec,
-                    LF_NUM_BASE_LEVELS,
-                    &COEFF_BR_LF_Y_ICDF[br_ctx],
-                    cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_lf_y[br_ctx]),
-                );
-            } else {
-                abs_levels[eob_scan_idx] = base_value;
-            }
-        } else {
-            let sym = if let Some(ref mut cdf) = cdf_ctx {
-                ec.decode_symbol_mut(&mut cdf.coeff_base_eob_y[txs_ctx_idx][coeff_ctx])
-            } else {
-                ec.decode_symbol(&COEFF_BASE_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx])
-            };
-            let base_value = sym + 1;
-            if base_value > NUM_BASE_LEVELS {
-                abs_levels[eob_scan_idx] = decode_low_range(
-                    ec,
-                    NUM_BASE_LEVELS,
-                    &COEFF_BR_Y_ICDF[0],
-                    cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_y[0]),
-                );
-            } else {
-                abs_levels[eob_scan_idx] = base_value;
-            }
-        }
-    } else if eob_lf {
-        let sym = if let Some(ref mut cdf) = cdf_ctx {
-            ec.decode_symbol_mut(&mut cdf.coeff_base_lf_eob_uv[coeff_ctx])
-        } else {
-            ec.decode_symbol(&COEFF_BASE_LF_EOB_UV_ICDF[coeff_ctx])
-        };
-        abs_levels[eob_scan_idx] = sym + 1;
-    } else {
-        let sym = if let Some(ref mut cdf) = cdf_ctx {
-            ec.decode_symbol_mut(&mut cdf.coeff_base_eob_uv[coeff_ctx])
-        } else {
-            ec.decode_symbol(&COEFF_BASE_EOB_UV_ICDF[coeff_ctx])
-        };
-        let base_value = sym + 1;
-        if base_value > NUM_BASE_LEVELS {
-            abs_levels[eob_scan_idx] = decode_low_range(
-                ec,
-                NUM_BASE_LEVELS,
-                &COEFF_BR_UV_ICDF[0],
-                cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_uv[0]),
-            );
-        } else {
-            abs_levels[eob_scan_idx] = base_value;
-        }
-    }
-
-    levels_buf[get_padded_idx(eob_pos, bwl)] =
-        stored_level(abs_levels[eob_scan_idx], eob_lf, plane);
-
-    if eob > 1 {
-        for c in (1..eob_scan_idx).rev() {
-            let pos = DEFAULT_SCAN_32X32[c] as usize;
-            let row = pos >> bwl;
-            let col = pos - (row << bwl);
-            let lf = is_lf_2d(row, col, plane);
-
-            if plane == 0 {
-                if lf {
-                    let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, pos, bwl);
-                    let sym = if let Some(ref mut cdf) = cdf_ctx {
-                        ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0])
-                    } else {
-                        ec.decode_symbol(&COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx])
-                    };
-                    if sym > LF_NUM_BASE_LEVELS {
-                        let br_ctx = get_br_lf_ctx_2d(&levels_buf, pos, bwl);
-                        abs_levels[c] = decode_low_range(
-                            ec,
-                            LF_NUM_BASE_LEVELS,
-                            &COEFF_BR_LF_Y_ICDF[br_ctx],
-                            cdf_ctx
-                                .as_deref_mut()
-                                .map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
-                        );
-                    } else {
-                        abs_levels[c] = sym;
-                    }
-                } else {
-                    let lctx = get_lower_levels_ctx_2d(&levels_buf, pos, bwl, plane);
-                    let sym = if let Some(ref mut cdf) = cdf_ctx {
-                        ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx][0])
-                    } else {
-                        ec.decode_symbol(&COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx])
-                    };
-                    if sym > NUM_BASE_LEVELS {
-                        let br_ctx = get_br_ctx_2d(&levels_buf, pos, bwl);
-                        abs_levels[c] = decode_low_range(
-                            ec,
-                            NUM_BASE_LEVELS,
-                            &COEFF_BR_Y_ICDF[br_ctx],
-                            cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_y[br_ctx]),
-                        );
-                    } else {
-                        abs_levels[c] = sym;
-                    }
-                }
-            } else if lf {
-                let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, pos, bwl, plane);
-                let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][0])
-                } else {
-                    ec.decode_symbol(&COEFF_BASE_LF_UV_ICDF[lctx])
-                };
-                abs_levels[c] = sym;
-            } else {
-                let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, pos, bwl, plane);
-                let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][0])
-                } else {
-                    ec.decode_symbol(&COEFF_BASE_UV_ICDF[lctx])
-                };
-                if sym > NUM_BASE_LEVELS {
-                    let br_ctx = get_br_ctx_2d_chroma(&levels_buf, pos, bwl);
-                    abs_levels[c] = decode_low_range(
-                        ec,
-                        NUM_BASE_LEVELS,
-                        &COEFF_BR_UV_ICDF[br_ctx],
-                        cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_uv[br_ctx]),
-                    );
-                } else {
-                    abs_levels[c] = sym;
-                }
-            }
-
-            levels_buf[get_padded_idx(pos, bwl)] = stored_level(abs_levels[c], lf, plane);
-        }
-
-        let dc_pos = DEFAULT_SCAN_32X32[0] as usize;
-        let dc_row = dc_pos >> bwl;
-        let dc_col = dc_pos - (dc_row << bwl);
-        let dc_lf = is_lf_2d(dc_row, dc_col, plane);
-
-        if plane == 0 {
-            if dc_lf {
-                let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, dc_pos, bwl);
-                let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0])
-                } else {
-                    ec.decode_symbol(&COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx])
-                };
-                if sym > LF_NUM_BASE_LEVELS {
-                    let br_ctx = get_br_lf_ctx_dc_2d(&levels_buf, dc_pos, bwl);
-                    abs_levels[0] = decode_low_range(
-                        ec,
-                        LF_NUM_BASE_LEVELS,
-                        &COEFF_BR_LF_Y_ICDF[br_ctx],
-                        cdf_ctx
-                            .as_deref_mut()
-                            .map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
-                    );
-                } else {
-                    abs_levels[0] = sym;
-                }
-            } else {
-                let lctx = get_lower_levels_ctx_2d(&levels_buf, dc_pos, bwl, plane);
-                let sym = if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx][0])
-                } else {
-                    ec.decode_symbol(&COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx])
-                };
-                if sym > NUM_BASE_LEVELS {
-                    let br_ctx = get_br_ctx_2d(&levels_buf, dc_pos, bwl);
-                    abs_levels[0] = decode_low_range(
-                        ec,
-                        NUM_BASE_LEVELS,
-                        &COEFF_BR_Y_ICDF[br_ctx],
-                        cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_y[br_ctx]),
-                    );
-                } else {
-                    abs_levels[0] = sym;
-                }
-            }
-        } else if dc_lf {
-            let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, dc_pos, bwl, plane);
-            let sym = if let Some(ref mut cdf) = cdf_ctx {
-                ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][0])
-            } else {
-                ec.decode_symbol(&COEFF_BASE_LF_UV_ICDF[lctx])
-            };
-            abs_levels[0] = sym;
-        } else {
-            let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, dc_pos, bwl, plane);
-            let sym = if let Some(ref mut cdf) = cdf_ctx {
-                ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][0])
-            } else {
-                ec.decode_symbol(&COEFF_BASE_UV_ICDF[lctx])
-            };
-            if sym > NUM_BASE_LEVELS {
-                let br_ctx = get_br_ctx_2d_chroma(&levels_buf, dc_pos, bwl);
-                abs_levels[0] = decode_low_range(
-                    ec,
-                    NUM_BASE_LEVELS,
-                    &COEFF_BR_UV_ICDF[br_ctx],
-                    cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_uv[br_ctx]),
-                );
-            } else {
-                abs_levels[0] = sym;
-            }
-        }
-
-        levels_buf[get_padded_idx(dc_pos, bwl)] = stored_level(abs_levels[0], dc_lf, plane);
-    }
-
-    let mut hr_avg = 0usize;
-    for c in (0..eob as usize).rev() {
-        let pos = DEFAULT_SCAN_32X32[c] as usize;
-        let abs_level = abs_levels[c];
-
-        if abs_level == 0 {
-            continue;
-        }
-
-        let row = pos >> bwl;
-        let col = pos - (row << bwl);
-        let is_dc_2d = c == 0;
-
-        let sign = if is_dc_2d {
-            if plane == 0 {
-                if let Some(ref mut cdf) = cdf_ctx {
-                    ec.decode_symbol_mut(&mut cdf.dc_sign_y[dc_sign_ctx])
-                } else {
-                    ec.decode_symbol(&DC_SIGN_Y_ICDF[dc_sign_ctx])
-                }
-            } else {
-                ec.decode_literal(1) as usize
-            }
-        } else {
-            ec.decode_literal(1) as usize
-        };
-
-        let lf = is_lf_2d(row, col, plane);
-        let max_br = if lf {
-            if plane == 0 {
-                LF_MAX_BASE_BR_RANGE
-            } else {
-                LF_NUM_BASE_LEVELS + 1
-            }
-        } else {
-            MAX_BASE_BR_RANGE
-        };
-
-        let final_level = if abs_level >= max_br {
-            let hr = decode_adaptive_hr(ec, hr_avg);
-            hr_avg = (hr_avg + hr) >> 1;
-            abs_level + hr
-        } else {
-            abs_level
-        };
-
-        levels[c] = if sign == 1 {
-            -(final_level as i32)
-        } else {
-            final_level as i32
-        };
-    }
-
-    (levels, eob)
-}
-
-pub fn decode_tile_data_multi_sb(
-    data: &[u8],
-    sb_cols: usize,
-    sb_rows: usize,
-    allow_update_cdf: bool,
-    base_qindex: u8,
-) -> Vec<DecodedSbCoeffs> {
-    let mut ec = DaalaDecoder::new(data);
-    let mut result = Vec::with_capacity(sb_cols * sb_rows);
-
-    let mut cdf_ctx = if allow_update_cdf {
-        Some(FrameCdfContext::new_with_qindex(base_qindex))
-    } else {
-        None
-    };
-
-    let mut above_y = vec![0u8; sb_cols * 16];
-    let mut above_u = vec![0u8; sb_cols * 8];
-    let mut above_v = vec![0u8; sb_cols * 8];
-    let mut above_joint = vec![0u8; sb_cols];
-    for sb_row in 0..sb_rows {
-        let mut left_y = [0u8; 16];
-        let mut left_u = [0u8; 8];
-        let mut left_v = [0u8; 8];
-        let mut left_joint_val: u8 = 0;
-
-        for sb_col in 0..sb_cols {
-            let partition = if let Some(ref mut ctx) = cdf_ctx {
-                ec.decode_symbol_mut(&mut ctx.do_split)
-            } else {
-                ec.decode_symbol(&DO_SPLIT_ICDF)
-            };
-            assert!(partition == 0, "flat-SB decode path requires PARTITION_NONE (do_split=0)");
-
-            let left_jv = left_joint_val;
-            let above_jv = if sb_row > 0 { above_joint[sb_col] } else { 0u8 };
-            let is_left_dir = (left_jv as usize) >= NON_DIRECTIONAL_MODES_COUNT;
-            let is_above_dir = (above_jv as usize) >= NON_DIRECTIONAL_MODES_COUNT;
-            let y_mode_idx_ctx = is_left_dir as usize + is_above_dir as usize;
-
-            let mode_idx = if let Some(ref mut ctx) = cdf_ctx {
-                let mode_set = ec.decode_symbol_mut(&mut ctx.y_mode_set);
-                if mode_set == 0 {
-                    let mut idx = ec.decode_symbol_mut(&mut ctx.y_mode_idx[y_mode_idx_ctx]);
-                    if idx == 7 {
-                        idx += ec.decode_symbol_mut(&mut ctx.y_mode_idx_offset[y_mode_idx_ctx]);
-                    }
-                    idx as u8
-                } else {
-                    let literal = ec.decode_literal(4) as usize;
-                    (FIRST_MODE_COUNT + (mode_set - 1) * SECOND_MODE_COUNT + literal) as u8
-                }
-            } else {
-                let mode_set = ec.decode_symbol(&Y_MODE_SET_ICDF);
-                if mode_set == 0 {
-                    let mut idx = ec.decode_symbol(&Y_MODE_IDX_ICDF[y_mode_idx_ctx]);
-                    if idx == 7 {
-                        idx += ec.decode_symbol(&Y_MODE_IDX_OFFSET_ICDF[y_mode_idx_ctx]);
-                    }
-                    idx as u8
-                } else {
-                    let literal = ec.decode_literal(4) as usize;
-                    (FIRST_MODE_COUNT + (mode_set - 1) * SECOND_MODE_COUNT + literal) as u8
-                }
-            };
-
-            let left_j_opt = if sb_col > 0 { Some(left_jv as usize) } else { None };
-            let above_j_opt = if sb_row > 0 { Some(above_jv as usize) } else { None };
-            let y_mode_list = crate::encode::build_y_mode_list(left_j_opt, above_j_opt, true, false);
-            let joint_y_mode = y_mode_list[mode_idx as usize] as u8;
-            let (y_mode, _angle_delta) = set_y_mode_and_delta_angle(joint_y_mode);
-
-            above_joint[sb_col] = joint_y_mode;
-            left_joint_val = joint_y_mode;
-
-            let uv_ctx = if is_directional_mode(y_mode) { 1 } else { 0 };
-            let uv_mode_list = crate::encode::build_uv_mode_list(crate::encode::IntraMode::from_av2(y_mode));
-            let uv_mode_idx = if let Some(ref mut ctx) = cdf_ctx {
-                let mut idx = ec.decode_symbol_mut(&mut ctx.uv_mode[uv_ctx]);
-                if idx == 7 {
-                    idx += ec.decode_literal(3) as usize;
-                }
-                idx
-            } else {
-                let mut idx = ec.decode_symbol(&UV_MODE_ICDF[uv_ctx]);
-                if idx == 7 {
-                    idx += ec.decode_literal(3) as usize;
-                }
-                idx
-            };
-            let uv_mode = uv_mode_list[uv_mode_idx.min(12)] as u8;
-
-            let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
-            let y_dc_sign_ctx = compute_dc_sign_ctx(y_above, &left_y);
-            let (y_levels, y_eob) = decode_plane_full(
-                &mut ec,
-                &PlaneDecodeCtx {
-                    plane: 0,
-                    txs_ctx_idx: 4,
-                    bwl: 5,
-                    height: 32,
-                    txb_skip_icdf: &TXB_SKIP_Y_ICDF[4][0],
-                    dc_sign_ctx: y_dc_sign_ctx,
-                    entropy_ctx: 0,
-                    u_has_coeffs: false,
-                },
-                cdf_ctx.as_mut(),
-            );
-
-            let y_cul = compute_cul_level(&y_levels, y_eob);
-            for v in &mut above_y[sb_col * 16..(sb_col + 1) * 16] {
-                *v = y_cul;
-            }
-            left_y.fill(y_cul);
-
-            let u_above = &above_u[sb_col * 8..(sb_col + 1) * 8];
-            let u_entropy_ctx = compute_entropy_ctx(u_above, &left_u);
-            let (u_levels, u_eob) = decode_plane_full(
-                &mut ec,
-                &PlaneDecodeCtx {
-                    plane: 1,
-                    txs_ctx_idx: 3,
-                    bwl: 5,
-                    height: 32,
-                    txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
-                    dc_sign_ctx: 0,
-                    entropy_ctx: u_entropy_ctx,
-                    u_has_coeffs: false,
-                },
-                cdf_ctx.as_mut(),
-            );
-
-            let u_cul = compute_cul_level(&u_levels, u_eob);
-            for v in &mut above_u[sb_col * 8..(sb_col + 1) * 8] {
-                *v = u_cul;
-            }
-            left_u.fill(u_cul);
-
-            let v_above = &above_v[sb_col * 8..(sb_col + 1) * 8];
-            let v_entropy_ctx = compute_entropy_ctx(v_above, &left_v);
-            let v_skip_icdf = if u_eob > 0 {
-                &TXB_SKIP_V_U_NONZERO_CTX_ICDF[v_entropy_ctx]
-            } else {
-                &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx]
-            };
-            let (v_levels, v_eob) = decode_plane_full(
-                &mut ec,
-                &PlaneDecodeCtx {
-                    plane: 2,
-                    txs_ctx_idx: 3,
-                    bwl: 5,
-                    height: 32,
-                    txb_skip_icdf: v_skip_icdf,
-                    dc_sign_ctx: 0,
-                    entropy_ctx: v_entropy_ctx,
-                    u_has_coeffs: u_eob > 0,
-                },
-                cdf_ctx.as_mut(),
-            );
-
-            let v_cul = compute_cul_level(&v_levels, v_eob);
-            for v in &mut above_v[sb_col * 8..(sb_col + 1) * 8] {
-                *v = v_cul;
-            }
-            left_v.fill(v_cul);
-
-            result.push(DecodedSbCoeffs {
-                y_levels,
-                y_eob,
-                u_levels,
-                u_eob,
-                v_levels,
-                v_eob,
-                y_mode,
-                uv_mode,
-            });
-        }
-    }
-
-    result
 }
 
 pub struct TuData {
@@ -6484,7 +5801,687 @@ pub fn decode_tile_data_partitioned_cfg(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::DEFAULT_SCAN_32X32;
     use crate::tile;
+
+    const DO_SPLIT_ICDF: [u16; 2] = [12276, 0];
+
+    fn is_lf_2d(row: usize, col: usize, plane: usize) -> bool {
+        is_lf(row, col, TxClass::TwoD, plane)
+    }
+
+    fn get_lower_levels_ctx_lf_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
+        let pos = get_padded_idx(coeff_idx, bwl);
+        let stride = (1 << bwl) + TX_PAD_HOR;
+        let mag = (levels[pos + 1] as usize).min(5)
+            + (levels[pos + stride] as usize).min(5)
+            + (levels[pos + stride + 1] as usize).min(5)
+            + (levels[pos + 2] as usize).min(5)
+            + (levels[pos + 2 * stride] as usize).min(5);
+        let ctx = (mag + 1) >> 1;
+        let row = coeff_idx >> bwl;
+        let col = coeff_idx - (row << bwl);
+        if coeff_idx == 0 {
+            return ctx.min(8);
+        }
+        if row + col < 2 {
+            return ctx.min(6) + 9;
+        }
+        ctx.min(4) + 16
+    }
+
+    fn get_lower_levels_ctx_lf_2d_chroma(
+        levels: &[u8],
+        coeff_idx: usize,
+        bwl: u32,
+        plane: usize,
+    ) -> usize {
+        let pos = get_padded_idx(coeff_idx, bwl);
+        let stride = (1 << bwl) + TX_PAD_HOR;
+        let mag = (levels[pos + 1] as usize).min(5)
+            + (levels[pos + stride] as usize).min(5)
+            + (levels[pos + stride + 1] as usize).min(5);
+        let ctx = ((mag + 1) >> 1).min(3);
+        if plane == 1 { ctx } else { ctx + 4 }
+    }
+
+    fn get_lower_levels_ctx_2d(levels: &[u8], coeff_idx: usize, bwl: u32, plane: usize) -> usize {
+        let pos = get_padded_idx(coeff_idx, bwl);
+        let stride = (1 << bwl) + TX_PAD_HOR;
+        let mag = (levels[pos + 1] as usize).min(3)
+            + (levels[pos + stride] as usize).min(3)
+            + (levels[pos + stride + 1] as usize).min(3)
+            + (levels[pos + 2] as usize).min(3)
+            + (levels[pos + 2 * stride] as usize).min(3);
+        let ctx = ((mag + 1) >> 1).min(4);
+        if plane > 0 {
+            return ctx;
+        }
+        let row = coeff_idx >> bwl;
+        let col = coeff_idx - (row << bwl);
+        if row + col < 6 {
+            return ctx;
+        }
+        if row + col < 8 {
+            return ctx + 5;
+        }
+        ctx + 10
+    }
+
+    fn get_lower_levels_ctx_2d_chroma(
+        levels: &[u8],
+        coeff_idx: usize,
+        bwl: u32,
+        plane: usize,
+    ) -> usize {
+        let pos = get_padded_idx(coeff_idx, bwl);
+        let stride = (1 << bwl) + TX_PAD_HOR;
+        let mag = (levels[pos + 1] as usize).min(3)
+            + (levels[pos + stride] as usize).min(3)
+            + (levels[pos + stride + 1] as usize).min(3);
+        let ctx = ((mag + 1) >> 1).min(3);
+        if plane == 1 { ctx } else { ctx + 4 }
+    }
+
+    fn get_br_lf_ctx_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
+        let row = coeff_idx >> bwl;
+        let col = coeff_idx - (row << bwl);
+        let stride = (1 << bwl) + TX_PAD_HOR;
+        let pos = row * stride + col;
+        let mag = (levels[pos + 1] as usize).min(MAX_VAL_BR_CTX as usize)
+            + (levels[pos + stride] as usize).min(MAX_VAL_BR_CTX as usize)
+            + (levels[pos + stride + 1] as usize).min(MAX_VAL_BR_CTX as usize);
+        ((mag + 1) >> 1).min(6) + 7
+    }
+
+    fn get_br_ctx_2d(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
+        let row = coeff_idx >> bwl;
+        let col = coeff_idx - (row << bwl);
+        let stride = (1 << bwl) + TX_PAD_HOR;
+        let pos = row * stride + col;
+        let mag = (levels[pos + 1] as usize).min(MAX_VAL_BR_CTX as usize)
+            + (levels[pos + stride] as usize).min(MAX_VAL_BR_CTX as usize)
+            + (levels[pos + stride + 1] as usize).min(MAX_VAL_BR_CTX as usize);
+        ((mag + 1) >> 1).min(6)
+    }
+
+    fn get_br_ctx_2d_chroma(levels: &[u8], coeff_idx: usize, bwl: u32) -> usize {
+        let row = coeff_idx >> bwl;
+        let col = coeff_idx - (row << bwl);
+        let stride = (1 << bwl) + TX_PAD_HOR;
+        let pos = row * stride + col;
+        let mag = (levels[pos + 1] as usize).min(MAX_VAL_BR_CTX as usize)
+            + (levels[pos + stride] as usize).min(MAX_VAL_BR_CTX as usize)
+            + (levels[pos + stride + 1] as usize).min(MAX_VAL_BR_CTX as usize);
+        ((mag + 1) >> 1).min(3)
+    }
+
+    fn decode_eob(
+        ec: &mut DaalaDecoder,
+        pl_ctx: usize,
+        mut cdf_ctx: Option<&mut FrameCdfContext>,
+    ) -> u16 {
+        let raw_token = if let Some(ref mut ctx) = cdf_ctx {
+            ec.decode_symbol_mut(&mut ctx.eob_multi_1024[pl_ctx])
+        } else {
+            ec.decode_symbol(&EOB_MULTI_1024_ICDF[pl_ctx])
+        };
+
+        let eob_token = if raw_token >= EOB_PT_INDEX_COUNT - 1 {
+            let extra_token = ec.decode_literal(2) as usize;
+            (EOB_PT_INDEX_COUNT - 1) + extra_token
+        } else {
+            raw_token
+        };
+
+        let eob_pt = eob_token + 1;
+        let eob_offset_bits = EOB_OFFSET_BITS[eob_pt] as u32;
+        let base = EOB_GROUP_START[eob_pt];
+
+        if eob_offset_bits > 0 {
+            let msb = if let Some(ref mut ctx) = cdf_ctx {
+                ec.decode_symbol_mut(&mut ctx.eob_extra) as u16
+            } else {
+                ec.decode_symbol(&EOB_EXTRA_ICDF) as u16
+            };
+            let rest = if eob_offset_bits > 1 {
+                ec.decode_literal(eob_offset_bits - 1) as u16
+            } else {
+                0
+            };
+            let extra = (msb << (eob_offset_bits - 1)) | rest;
+            base + extra
+        } else {
+            base
+        }
+    }
+
+    struct PlaneDecodeCtx<'a> {
+        plane: usize,
+        txs_ctx_idx: usize,
+        bwl: u32,
+        height: usize,
+        txb_skip_icdf: &'a [u16],
+        dc_sign_ctx: usize,
+        entropy_ctx: usize,
+        u_has_coeffs: bool,
+    }
+
+    fn decode_plane_full(
+        ec: &mut DaalaDecoder,
+        ctx: &PlaneDecodeCtx,
+        mut cdf_ctx: Option<&mut FrameCdfContext>,
+    ) -> ([i32; 1024], u16) {
+        let plane = ctx.plane;
+        let txs_ctx_idx = ctx.txs_ctx_idx;
+        let bwl = ctx.bwl;
+        let height = ctx.height;
+        let dc_sign_ctx = ctx.dc_sign_ctx;
+
+        let mut levels = [0i32; 1024];
+
+        let skip = if let Some(ref mut cdf) = cdf_ctx {
+            let txb_skip_cdf = match ctx.plane {
+                0 => &mut cdf.txb_skip_y[txs_ctx_idx][ctx.entropy_ctx],
+                1 => &mut cdf.txb_skip_y[txs_ctx_idx][ctx.entropy_ctx],
+                _ => {
+                    if ctx.u_has_coeffs {
+                        &mut cdf.txb_skip_v_u_nz[ctx.entropy_ctx]
+                    } else {
+                        &mut cdf.txb_skip_v[ctx.entropy_ctx]
+                    }
+                }
+            };
+            ec.decode_symbol_mut(txb_skip_cdf)
+        } else {
+            ec.decode_symbol(ctx.txb_skip_icdf)
+        };
+        if skip == 1 {
+            return (levels, 0);
+        }
+
+        let pl_ctx = if plane == 0 { 0 } else { 2 };
+        let eob = decode_eob(ec, pl_ctx, cdf_ctx.as_deref_mut());
+
+        let width = 1usize << bwl;
+        let padded_stride = width + TX_PAD_HOR;
+        let padded_height = height + 2;
+        let mut levels_buf = vec![0u8; padded_stride * padded_height];
+
+        let mut abs_levels = vec![0usize; eob as usize];
+
+        let eob_scan_idx = (eob - 1) as usize;
+        let eob_pos = DEFAULT_SCAN_32X32[eob_scan_idx] as usize;
+        let eob_row = eob_pos >> bwl;
+        let eob_col = eob_pos - (eob_row << bwl);
+        let eob_lf = is_lf_2d(eob_row, eob_col, plane);
+
+        let coeff_ctx = get_lower_levels_ctx_eob(bwl, height, eob_scan_idx);
+
+        if plane == 0 {
+            if eob_lf {
+                let sym = if let Some(ref mut cdf) = cdf_ctx {
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_eob_y[txs_ctx_idx][coeff_ctx])
+                } else {
+                    ec.decode_symbol(&COEFF_BASE_LF_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx])
+                };
+                let base_value = sym + 1;
+                if base_value > LF_NUM_BASE_LEVELS {
+                    let br_ctx = get_br_ctx_lf_eob(eob_pos, TxClass::TwoD);
+                    abs_levels[eob_scan_idx] = decode_low_range(
+                        ec,
+                        LF_NUM_BASE_LEVELS,
+                        &COEFF_BR_LF_Y_ICDF[br_ctx],
+                        cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_lf_y[br_ctx]),
+                    );
+                } else {
+                    abs_levels[eob_scan_idx] = base_value;
+                }
+            } else {
+                let sym = if let Some(ref mut cdf) = cdf_ctx {
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_eob_y[txs_ctx_idx][coeff_ctx])
+                } else {
+                    ec.decode_symbol(&COEFF_BASE_EOB_Y_ICDF[txs_ctx_idx][coeff_ctx])
+                };
+                let base_value = sym + 1;
+                if base_value > NUM_BASE_LEVELS {
+                    abs_levels[eob_scan_idx] = decode_low_range(
+                        ec,
+                        NUM_BASE_LEVELS,
+                        &COEFF_BR_Y_ICDF[0],
+                        cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_y[0]),
+                    );
+                } else {
+                    abs_levels[eob_scan_idx] = base_value;
+                }
+            }
+        } else if eob_lf {
+            let sym = if let Some(ref mut cdf) = cdf_ctx {
+                ec.decode_symbol_mut(&mut cdf.coeff_base_lf_eob_uv[coeff_ctx])
+            } else {
+                ec.decode_symbol(&COEFF_BASE_LF_EOB_UV_ICDF[coeff_ctx])
+            };
+            abs_levels[eob_scan_idx] = sym + 1;
+        } else {
+            let sym = if let Some(ref mut cdf) = cdf_ctx {
+                ec.decode_symbol_mut(&mut cdf.coeff_base_eob_uv[coeff_ctx])
+            } else {
+                ec.decode_symbol(&COEFF_BASE_EOB_UV_ICDF[coeff_ctx])
+            };
+            let base_value = sym + 1;
+            if base_value > NUM_BASE_LEVELS {
+                abs_levels[eob_scan_idx] = decode_low_range(
+                    ec,
+                    NUM_BASE_LEVELS,
+                    &COEFF_BR_UV_ICDF[0],
+                    cdf_ctx.as_deref_mut().map(|c| &mut c.coeff_br_uv[0]),
+                );
+            } else {
+                abs_levels[eob_scan_idx] = base_value;
+            }
+        }
+
+        levels_buf[get_padded_idx(eob_pos, bwl)] =
+            stored_level(abs_levels[eob_scan_idx], eob_lf, plane);
+
+        if eob > 1 {
+            for c in (1..eob_scan_idx).rev() {
+                let pos = DEFAULT_SCAN_32X32[c] as usize;
+                let row = pos >> bwl;
+                let col = pos - (row << bwl);
+                let lf = is_lf_2d(row, col, plane);
+
+                if plane == 0 {
+                    if lf {
+                        let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, pos, bwl);
+                        let sym = if let Some(ref mut cdf) = cdf_ctx {
+                            ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0])
+                        } else {
+                            ec.decode_symbol(&COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx])
+                        };
+                        if sym > LF_NUM_BASE_LEVELS {
+                            let br_ctx = get_br_lf_ctx_2d(&levels_buf, pos, bwl);
+                            abs_levels[c] = decode_low_range(
+                                ec,
+                                LF_NUM_BASE_LEVELS,
+                                &COEFF_BR_LF_Y_ICDF[br_ctx],
+                                cdf_ctx
+                                    .as_deref_mut()
+                                    .map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
+                            );
+                        } else {
+                            abs_levels[c] = sym;
+                        }
+                    } else {
+                        let lctx = get_lower_levels_ctx_2d(&levels_buf, pos, bwl, plane);
+                        let sym = if let Some(ref mut cdf) = cdf_ctx {
+                            ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx][0])
+                        } else {
+                            ec.decode_symbol(&COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx])
+                        };
+                        if sym > NUM_BASE_LEVELS {
+                            let br_ctx = get_br_ctx_2d(&levels_buf, pos, bwl);
+                            abs_levels[c] = decode_low_range(
+                                ec,
+                                NUM_BASE_LEVELS,
+                                &COEFF_BR_Y_ICDF[br_ctx],
+                                cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_y[br_ctx]),
+                            );
+                        } else {
+                            abs_levels[c] = sym;
+                        }
+                    }
+                } else if lf {
+                    let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, pos, bwl, plane);
+                    let sym = if let Some(ref mut cdf) = cdf_ctx {
+                        ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][0])
+                    } else {
+                        ec.decode_symbol(&COEFF_BASE_LF_UV_ICDF[lctx])
+                    };
+                    abs_levels[c] = sym;
+                } else {
+                    let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, pos, bwl, plane);
+                    let sym = if let Some(ref mut cdf) = cdf_ctx {
+                        ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][0])
+                    } else {
+                        ec.decode_symbol(&COEFF_BASE_UV_ICDF[lctx])
+                    };
+                    if sym > NUM_BASE_LEVELS {
+                        let br_ctx = get_br_ctx_2d_chroma(&levels_buf, pos, bwl);
+                        abs_levels[c] = decode_low_range(
+                            ec,
+                            NUM_BASE_LEVELS,
+                            &COEFF_BR_UV_ICDF[br_ctx],
+                            cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_uv[br_ctx]),
+                        );
+                    } else {
+                        abs_levels[c] = sym;
+                    }
+                }
+
+                levels_buf[get_padded_idx(pos, bwl)] = stored_level(abs_levels[c], lf, plane);
+            }
+
+            let dc_pos = DEFAULT_SCAN_32X32[0] as usize;
+            let dc_row = dc_pos >> bwl;
+            let dc_col = dc_pos - (dc_row << bwl);
+            let dc_lf = is_lf_2d(dc_row, dc_col, plane);
+
+            if plane == 0 {
+                if dc_lf {
+                    let lctx = get_lower_levels_ctx_lf_2d(&levels_buf, dc_pos, bwl);
+                    let sym = if let Some(ref mut cdf) = cdf_ctx {
+                        ec.decode_symbol_mut(&mut cdf.coeff_base_lf_y[txs_ctx_idx][lctx][0])
+                    } else {
+                        ec.decode_symbol(&COEFF_BASE_LF_Y_ICDF[txs_ctx_idx][lctx])
+                    };
+                    if sym > LF_NUM_BASE_LEVELS {
+                        let br_ctx = get_br_lf_ctx_dc_2d(&levels_buf, dc_pos, bwl);
+                        abs_levels[0] = decode_low_range(
+                            ec,
+                            LF_NUM_BASE_LEVELS,
+                            &COEFF_BR_LF_Y_ICDF[br_ctx],
+                            cdf_ctx
+                                .as_deref_mut()
+                                .map(|cd| &mut cd.coeff_br_lf_y[br_ctx]),
+                        );
+                    } else {
+                        abs_levels[0] = sym;
+                    }
+                } else {
+                    let lctx = get_lower_levels_ctx_2d(&levels_buf, dc_pos, bwl, plane);
+                    let sym = if let Some(ref mut cdf) = cdf_ctx {
+                        ec.decode_symbol_mut(&mut cdf.coeff_base_y[txs_ctx_idx][lctx][0])
+                    } else {
+                        ec.decode_symbol(&COEFF_BASE_Y_ICDF[txs_ctx_idx][lctx])
+                    };
+                    if sym > NUM_BASE_LEVELS {
+                        let br_ctx = get_br_ctx_2d(&levels_buf, dc_pos, bwl);
+                        abs_levels[0] = decode_low_range(
+                            ec,
+                            NUM_BASE_LEVELS,
+                            &COEFF_BR_Y_ICDF[br_ctx],
+                            cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_y[br_ctx]),
+                        );
+                    } else {
+                        abs_levels[0] = sym;
+                    }
+                }
+            } else if dc_lf {
+                let lctx = get_lower_levels_ctx_lf_2d_chroma(&levels_buf, dc_pos, bwl, plane);
+                let sym = if let Some(ref mut cdf) = cdf_ctx {
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_lf_uv[lctx][0])
+                } else {
+                    ec.decode_symbol(&COEFF_BASE_LF_UV_ICDF[lctx])
+                };
+                abs_levels[0] = sym;
+            } else {
+                let lctx = get_lower_levels_ctx_2d_chroma(&levels_buf, dc_pos, bwl, plane);
+                let sym = if let Some(ref mut cdf) = cdf_ctx {
+                    ec.decode_symbol_mut(&mut cdf.coeff_base_uv[lctx][0])
+                } else {
+                    ec.decode_symbol(&COEFF_BASE_UV_ICDF[lctx])
+                };
+                if sym > NUM_BASE_LEVELS {
+                    let br_ctx = get_br_ctx_2d_chroma(&levels_buf, dc_pos, bwl);
+                    abs_levels[0] = decode_low_range(
+                        ec,
+                        NUM_BASE_LEVELS,
+                        &COEFF_BR_UV_ICDF[br_ctx],
+                        cdf_ctx.as_deref_mut().map(|cd| &mut cd.coeff_br_uv[br_ctx]),
+                    );
+                } else {
+                    abs_levels[0] = sym;
+                }
+            }
+
+            levels_buf[get_padded_idx(dc_pos, bwl)] = stored_level(abs_levels[0], dc_lf, plane);
+        }
+
+        let mut hr_avg = 0usize;
+        for c in (0..eob as usize).rev() {
+            let pos = DEFAULT_SCAN_32X32[c] as usize;
+            let abs_level = abs_levels[c];
+
+            if abs_level == 0 {
+                continue;
+            }
+
+            let row = pos >> bwl;
+            let col = pos - (row << bwl);
+            let is_dc_2d = c == 0;
+
+            let sign = if is_dc_2d {
+                if plane == 0 {
+                    if let Some(ref mut cdf) = cdf_ctx {
+                        ec.decode_symbol_mut(&mut cdf.dc_sign_y[dc_sign_ctx])
+                    } else {
+                        ec.decode_symbol(&DC_SIGN_Y_ICDF[dc_sign_ctx])
+                    }
+                } else {
+                    ec.decode_literal(1) as usize
+                }
+            } else {
+                ec.decode_literal(1) as usize
+            };
+
+            let lf = is_lf_2d(row, col, plane);
+            let max_br = if lf {
+                if plane == 0 {
+                    LF_MAX_BASE_BR_RANGE
+                } else {
+                    LF_NUM_BASE_LEVELS + 1
+                }
+            } else {
+                MAX_BASE_BR_RANGE
+            };
+
+            let final_level = if abs_level >= max_br {
+                let hr = decode_adaptive_hr(ec, hr_avg);
+                hr_avg = (hr_avg + hr) >> 1;
+                abs_level + hr
+            } else {
+                abs_level
+            };
+
+            levels[c] = if sign == 1 {
+                -(final_level as i32)
+            } else {
+                final_level as i32
+            };
+        }
+
+        (levels, eob)
+    }
+
+    struct DecodedSbCoeffs {
+        y_levels: [i32; 1024],
+        y_eob: u16,
+        u_levels: [i32; 1024],
+        u_eob: u16,
+        v_levels: [i32; 1024],
+        v_eob: u16,
+    }
+
+    fn decode_tile_data_multi_sb(
+        data: &[u8],
+        sb_cols: usize,
+        sb_rows: usize,
+        allow_update_cdf: bool,
+        base_qindex: u8,
+    ) -> Vec<DecodedSbCoeffs> {
+        let mut ec = DaalaDecoder::new(data);
+        let mut result = Vec::with_capacity(sb_cols * sb_rows);
+
+        let mut cdf_ctx = if allow_update_cdf {
+            Some(FrameCdfContext::new_with_qindex(base_qindex))
+        } else {
+            None
+        };
+
+        let mut above_y = vec![0u8; sb_cols * 16];
+        let mut above_u = vec![0u8; sb_cols * 8];
+        let mut above_v = vec![0u8; sb_cols * 8];
+        let mut above_joint = vec![0u8; sb_cols];
+        for sb_row in 0..sb_rows {
+            let mut left_y = [0u8; 16];
+            let mut left_u = [0u8; 8];
+            let mut left_v = [0u8; 8];
+            let mut left_joint_val: u8 = 0;
+
+            for sb_col in 0..sb_cols {
+                let partition = if let Some(ref mut ctx) = cdf_ctx {
+                    ec.decode_symbol_mut(&mut ctx.do_split)
+                } else {
+                    ec.decode_symbol(&DO_SPLIT_ICDF)
+                };
+                assert!(partition == 0, "flat-SB decode path requires PARTITION_NONE (do_split=0)");
+
+                let left_jv = left_joint_val;
+                let above_jv = if sb_row > 0 { above_joint[sb_col] } else { 0u8 };
+                let is_left_dir = (left_jv as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+                let is_above_dir = (above_jv as usize) >= NON_DIRECTIONAL_MODES_COUNT;
+                let y_mode_idx_ctx = is_left_dir as usize + is_above_dir as usize;
+
+                let mode_idx = if let Some(ref mut ctx) = cdf_ctx {
+                    let mode_set = ec.decode_symbol_mut(&mut ctx.y_mode_set);
+                    if mode_set == 0 {
+                        let mut idx = ec.decode_symbol_mut(&mut ctx.y_mode_idx[y_mode_idx_ctx]);
+                        if idx == 7 {
+                            idx += ec.decode_symbol_mut(&mut ctx.y_mode_idx_offset[y_mode_idx_ctx]);
+                        }
+                        idx as u8
+                    } else {
+                        let literal = ec.decode_literal(4) as usize;
+                        (FIRST_MODE_COUNT + (mode_set - 1) * SECOND_MODE_COUNT + literal) as u8
+                    }
+                } else {
+                    let mode_set = ec.decode_symbol(&Y_MODE_SET_ICDF);
+                    if mode_set == 0 {
+                        let mut idx = ec.decode_symbol(&Y_MODE_IDX_ICDF[y_mode_idx_ctx]);
+                        if idx == 7 {
+                            idx += ec.decode_symbol(&Y_MODE_IDX_OFFSET_ICDF[y_mode_idx_ctx]);
+                        }
+                        idx as u8
+                    } else {
+                        let literal = ec.decode_literal(4) as usize;
+                        (FIRST_MODE_COUNT + (mode_set - 1) * SECOND_MODE_COUNT + literal) as u8
+                    }
+                };
+
+                let left_j_opt = if sb_col > 0 { Some(left_jv as usize) } else { None };
+                let above_j_opt = if sb_row > 0 { Some(above_jv as usize) } else { None };
+                let y_mode_list = crate::encode::build_y_mode_list(left_j_opt, above_j_opt, true, false);
+                let joint_y_mode = y_mode_list[mode_idx as usize] as u8;
+                let (y_mode, _angle_delta) = set_y_mode_and_delta_angle(joint_y_mode);
+
+                above_joint[sb_col] = joint_y_mode;
+                left_joint_val = joint_y_mode;
+
+                let uv_ctx = if is_directional_mode(y_mode) { 1 } else { 0 };
+                let uv_mode_list = crate::encode::build_uv_mode_list(crate::encode::IntraMode::from_av2(y_mode));
+                let uv_mode_idx = if let Some(ref mut ctx) = cdf_ctx {
+                    let mut idx = ec.decode_symbol_mut(&mut ctx.uv_mode[uv_ctx]);
+                    if idx == 7 {
+                        idx += ec.decode_literal(3) as usize;
+                    }
+                    idx
+                } else {
+                    let mut idx = ec.decode_symbol(&UV_MODE_ICDF[uv_ctx]);
+                    if idx == 7 {
+                        idx += ec.decode_literal(3) as usize;
+                    }
+                    idx
+                };
+                let _uv_mode = uv_mode_list[uv_mode_idx.min(12)] as u8;
+
+                let y_above = &above_y[sb_col * 16..(sb_col + 1) * 16];
+                let y_dc_sign_ctx = compute_dc_sign_ctx(y_above, &left_y);
+                let (y_levels, y_eob) = decode_plane_full(
+                    &mut ec,
+                    &PlaneDecodeCtx {
+                        plane: 0,
+                        txs_ctx_idx: 4,
+                        bwl: 5,
+                        height: 32,
+                        txb_skip_icdf: &TXB_SKIP_Y_ICDF[4][0],
+                        dc_sign_ctx: y_dc_sign_ctx,
+                        entropy_ctx: 0,
+                        u_has_coeffs: false,
+                    },
+                    cdf_ctx.as_mut(),
+                );
+
+                let y_cul = compute_cul_level(&y_levels, y_eob);
+                for v in &mut above_y[sb_col * 16..(sb_col + 1) * 16] {
+                    *v = y_cul;
+                }
+                left_y.fill(y_cul);
+
+                let u_above = &above_u[sb_col * 8..(sb_col + 1) * 8];
+                let u_entropy_ctx = compute_entropy_ctx(u_above, &left_u);
+                let (u_levels, u_eob) = decode_plane_full(
+                    &mut ec,
+                    &PlaneDecodeCtx {
+                        plane: 1,
+                        txs_ctx_idx: 3,
+                        bwl: 5,
+                        height: 32,
+                        txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
+                        dc_sign_ctx: 0,
+                        entropy_ctx: u_entropy_ctx,
+                        u_has_coeffs: false,
+                    },
+                    cdf_ctx.as_mut(),
+                );
+
+                let u_cul = compute_cul_level(&u_levels, u_eob);
+                for v in &mut above_u[sb_col * 8..(sb_col + 1) * 8] {
+                    *v = u_cul;
+                }
+                left_u.fill(u_cul);
+
+                let v_above = &above_v[sb_col * 8..(sb_col + 1) * 8];
+                let v_entropy_ctx = compute_entropy_ctx(v_above, &left_v);
+                let v_skip_icdf = if u_eob > 0 {
+                    &TXB_SKIP_V_U_NONZERO_CTX_ICDF[v_entropy_ctx]
+                } else {
+                    &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx]
+                };
+                let (v_levels, v_eob) = decode_plane_full(
+                    &mut ec,
+                    &PlaneDecodeCtx {
+                        plane: 2,
+                        txs_ctx_idx: 3,
+                        bwl: 5,
+                        height: 32,
+                        txb_skip_icdf: v_skip_icdf,
+                        dc_sign_ctx: 0,
+                        entropy_ctx: v_entropy_ctx,
+                        u_has_coeffs: u_eob > 0,
+                    },
+                    cdf_ctx.as_mut(),
+                );
+
+                let v_cul = compute_cul_level(&v_levels, v_eob);
+                for v in &mut above_v[sb_col * 8..(sb_col + 1) * 8] {
+                    *v = v_cul;
+                }
+                left_v.fill(v_cul);
+
+                result.push(DecodedSbCoeffs {
+                    y_levels,
+                    y_eob,
+                    u_levels,
+                    u_eob,
+                    v_levels,
+                    v_eob,
+                });
+            }
+        }
+
+        result
+    }
 
     #[test]
     fn roundtrip_all_zero() {
