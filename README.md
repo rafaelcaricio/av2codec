@@ -27,14 +27,15 @@ avmdec --i420 -o decoded.yuv output.obu
 #### Encoding
 
 ```
-av2codec <input.y4m> <output.obu> [--qindex N]
+av2codec <input.y4m> <output.obu> [--qindex N] [--bit-depth 8|10]
 ```
 
 | Argument | Description |
 |---|---|
-| `input.y4m` | Input video in Y4M format (8-bit 4:2:0 I420) |
+| `input.y4m` | Input video in Y4M format (8-bit I420 or 10-bit I420p10) |
 | `output.obu` | Output AV2 bitstream (OBU format) |
 | `--qindex N` | Base quantizer index, 0-255 (default: 50) |
+| `--bit-depth 8\|10` | Output bit depth (default: 8; auto-set to 10 for 10-bit input) |
 
 #### Decoding
 
@@ -54,7 +55,7 @@ av2codec_decode <input.obu> [-o <output.y4m>]
 ```rust
 use av2codec::Encoder;
 
-let mut enc = Encoder::new(640, 480, 50)?;
+let mut enc = Encoder::new(640, 480, 50, 8)?;  // 8-bit; use 10 for 10-bit
 let mut output = enc.headers();
 
 for frame in frames {
@@ -86,22 +87,23 @@ for frame in &frames {
         frame.v.len(),
     );
 
-    // Access raw pixel planes directly
+    // Access raw pixel planes directly (u16: 0-255 for 8-bit, 0-1023 for 10-bit)
     let y_pixel = frame.y[0];      // top-left luma pixel
     let u_pixel = frame.u[0];      // top-left Cb pixel (half resolution)
     let v_pixel = frame.v[0];      // top-left Cr pixel (half resolution)
 }
 ```
 
-The `DecodedFrame` struct provides direct access to the decoded YUV 4:2:0 planes:
+The `DecodedFrame` struct provides direct access to the decoded YUV 4:2:0 planes (stored as `u16` to support both 8-bit and 10-bit content):
 
 | Field | Type | Description |
 |---|---|---|
-| `y` | `Vec<u8>` | Luma plane (width x height) |
-| `u` | `Vec<u8>` | Cb chroma plane (width/2 x height/2) |
-| `v` | `Vec<u8>` | Cr chroma plane (width/2 x height/2) |
+| `y` | `Vec<u16>` | Luma plane (width x height) |
+| `u` | `Vec<u16>` | Cb chroma plane (width/2 x height/2) |
+| `v` | `Vec<u16>` | Cr chroma plane (width/2 x height/2) |
 | `width` | `u32` | Frame width in pixels |
 | `height` | `u32` | Frame height in pixels |
+| `bit_depth` | `u32` | Bit depth (8 or 10) |
 | `frame_number` | `u64` | Sequential frame index (0-based) |
 
 #### Encode-decode roundtrip
@@ -110,7 +112,7 @@ The `DecodedFrame` struct provides direct access to the decoded YUV 4:2:0 planes
 use av2codec::{Encoder, Decoder};
 
 // Encode
-let mut enc = Encoder::new(128, 128, 50).unwrap();
+let mut enc = Encoder::new(128, 128, 50, 8).unwrap();
 let mut bitstream = enc.headers();
 
 let y = vec![149u8; 128 * 128];
@@ -147,7 +149,7 @@ The encoding pipeline for each frame:
 
 1. Read YUV 4:2:0 pixel data (Y, U, V planes)
 2. Adaptive block partitioning with RD optimization (8x8 to 32x32)
-3. Select best intra prediction mode per block (DC, V, H, Smooth, Smooth_V, Smooth_H, Paeth)
+3. Select best intra prediction mode per block (all 13 AV2 modes including directional)
 4. Compute residual against the selected prediction
 5. Forward 2D DCT
 6. Quantization using AV2 dequant tables
@@ -160,23 +162,24 @@ The decoding pipeline reverses these steps:
 2. Decode entropy-coded coefficients using Daala arithmetic range decoder
 3. Dequantize coefficient levels
 4. Inverse 2D DCT to reconstruct residuals
-5. Apply intra prediction and add residuals, clamp to [0, 255]
+5. Apply intra prediction and add residuals, clamp to valid range
 
 A sequence header OBU is prepended once at the start of the bitstream.
 
 ## Current capabilities
 
-- Profile 0, 8-bit, 4:2:0 (YCbCr)
+- Profile 0, 4:2:0 (YCbCr), **8-bit and 10-bit** encoding
 - All-intra encoding (every frame is a keyframe)
 - Adaptive block partitioning with RD optimization (8x8 to 32x32)
-- Intra prediction: DC, V, H, Smooth, Smooth_V, Smooth_H, Paeth (best mode selected per block)
+- All 13 AV2 intra prediction modes: DC, V, H, D45, D135, D113, D157, D203, D67, Smooth, Smooth_V, Smooth_H, Paeth (best mode selected per block via RD)
 - Full DC + AC coefficient coding with forward/inverse DCT
+- CDF adaptation engine (encoder and decoder maintain synchronized CDF state)
 - Multi-frame video encoding (each frame as a CLK OBU)
 - **Pure Rust decoder** — decodes any AV2-compliant bitstream, not just av2codec-produced ones
 - Spec-compliant sequence header parsing (both `single_picture_header_flag=0` and `=1`)
 - Streaming encoder API (`send_frame` / `receive_packet`)
 - Batch encoding API (`encode_video_yuv`) and decoding API (`Decoder::decode_all`)
-- Y4M input parsing and output writing
+- Y4M input parsing and output writing (8-bit I420 and 10-bit I420p10)
 - Daala-derived arithmetic range coder/decoder for entropy coding
 - OBU bitstream packaging with LEB128 size framing
 
@@ -184,12 +187,12 @@ A sequence header OBU is prepended once at the start of the bitstream.
 
 - Input dimensions must be multiples of 4 (internally padded to superblock-aligned)
 - Fixed QP only (no rate control)
-- 8-bit 4:2:0 only
+- 8-bit and 10-bit 4:2:0 only (no 4:2:2 or 4:4:4)
 - No deblocking filters (CDEF/GDF) — expect visible block boundaries at higher quantization
 
 ## Testing
 
-Unit tests (238 tests across all modules):
+Unit tests (326 tests across all modules):
 
 ```sh
 cargo test
@@ -337,9 +340,10 @@ make -j$(nproc) avmdec
 | 2 | AC coefficient support | Done |
 | 3 | Pure Rust decoder | Done |
 | — | Spec-compliant sequence header parsing | Done |
-| — | Intra prediction modes (DC, V, H, Smooth, Paeth) | Done |
+| — | All 13 intra prediction modes (DC, directional, Smooth, Paeth) | Done |
 | — | CDF adaptation engine | Done |
 | — | Adaptive block partitioning (8-32px) with RD optimization | Done |
+| — | 10-bit encoding and decoding | Done |
 
 ## License
 
