@@ -3187,7 +3187,7 @@ impl ModeInfoGrid {
 
         let mut neighbors = [None, None];
         let mut push_idx = 0usize;
-        let mut push = |slot: Option<usize>, out: &mut [Option<usize>; 2], idx: &mut usize| {
+        let push = |slot: Option<usize>, out: &mut [Option<usize>; 2], idx: &mut usize| {
             if slot.is_some() && *idx < 2 {
                 out[*idx] = slot;
                 *idx += 1;
@@ -3979,7 +3979,7 @@ fn read_intrabc_rest(
         3
     };
 
-    let (mut bv_row, mut bv_col) = if intrabc_mode == 0 {
+    let (bv_row, bv_col) = if intrabc_mode == 0 {
         let (row_mag, col_mag) = read_mv_delta(ec, bv_precision, cdf);
         ec.trace_state(&format!(
             "ibc_mv_mag=({},{}) block=({},{})",
@@ -4225,7 +4225,7 @@ fn decode_leaf_block(
         if x / 4 == 16 && y / 4 == 4 {
             let mi_x = x / 4;
             let mi_y = y / 4;
-            let mi_w = width / 4;
+            let _mi_w = width / 4;
             let mi_h = height / 4;
             let left_row = (mi_y + mi_h - 1).min(mi.mi_rows - 1);
             let left_col = mi_x - 1;

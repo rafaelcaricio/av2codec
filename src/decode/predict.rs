@@ -279,9 +279,9 @@ struct PreparedRefs {
     left: Vec<u8>,
     top_left: u8,
     n_top_px: usize,
-    n_topright_px: usize,
+    _n_topright_px: usize,
     n_left_px: usize,
-    n_bottomleft_px: usize,
+    _n_bottomleft_px: usize,
 }
 
 pub fn predict_intra(
@@ -809,9 +809,9 @@ fn prepare_intra_refs(
         left,
         top_left,
         n_top_px,
-        n_topright_px,
+        _n_topright_px: n_topright_px,
         n_left_px,
-        n_bottomleft_px,
+        _n_bottomleft_px: n_bottomleft_px,
     }
 }
 
@@ -908,9 +908,9 @@ fn prepare_directional_refs(
         left,
         top_left,
         n_top_px,
-        n_topright_px,
+        _n_topright_px: n_topright_px,
         n_left_px,
-        n_bottomleft_px,
+        _n_bottomleft_px: n_bottomleft_px,
     }
 }
 
@@ -1838,7 +1838,7 @@ fn predict_smooth_from_refs(
     mode: PredictionMode,
 ) -> Vec<u8> {
     let scale = round_power_of_two(
-        (blk_size_log2(h) as i32 - 2 + blk_size_log2(w) as i32 - 2),
+        blk_size_log2(h) as i32 - 2 + blk_size_log2(w) as i32 - 2,
         2,
     );
     let blend_max_log2 = blk_size_log2(32);

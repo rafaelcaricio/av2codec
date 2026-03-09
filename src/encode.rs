@@ -156,7 +156,6 @@ impl Encoder {
                 dequant: self.dequant,
                 base_qindex: self.base_qindex,
                 order_hint: self.order_hint,
-                enable_partitioning: false,
             },
             true,
         );
@@ -221,7 +220,6 @@ struct FrameEncodeParams {
     dequant: i32,
     base_qindex: u8,
     order_hint: u32,
-    enable_partitioning: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -285,8 +283,6 @@ impl IntraMode {
 }
 
 const NON_DIRECTIONAL_MODES_COUNT: usize = 5;
-const TOTAL_ANGLE_DELTA_COUNT: usize = 7;
-const MAX_ANGLE_DELTA: usize = 3;
 const LUMA_MODE_COUNT: usize = 61;
 
 const DEFAULT_MODE_LIST_Y: [usize; 56] = [
@@ -439,10 +435,6 @@ const MODE_TO_ANGLE_MAP: [u16; 13] = [
     0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0,
 ];
 
-const REORDERED_Y_MODE: [u8; 13] = [
-    0, 9, 10, 11, 12, 3, 8, 1, 5, 4, 6, 2, 7,
-];
-
 const REORDERED_Y_MODE_INV: [usize; 13] = {
     let mut inv = [0usize; 13];
     let reord: [u8; 13] = [0, 9, 10, 11, 12, 3, 8, 1, 5, 4, 6, 2, 7];
@@ -484,25 +476,6 @@ fn get_dy(angle: u16) -> i32 {
         DR_INTRA_DERIVATIVE[(270 - angle) as usize]
     } else {
         1
-    }
-}
-
-const SMOOTH_WEIGHTS_32: [u16; 32] = [
-    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74, 66, 59, 52, 45,
-    39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
-];
-
-const SMOOTH_WEIGHTS_64: [u16; 64] = [
-    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150, 144, 138, 133,
-    127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69, 65, 61, 57, 54, 50, 47, 44, 41, 38,
-    35, 32, 29, 27, 25, 22, 20, 18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
-];
-
-fn smooth_weights(bsize: usize) -> &'static [u16] {
-    match bsize {
-        32 => &SMOOTH_WEIGHTS_32,
-        64 => &SMOOTH_WEIGHTS_64,
-        _ => panic!("unsupported block size for smooth weights: {}", bsize),
     }
 }
 
@@ -1208,22 +1181,6 @@ pub fn predict_intra_block_uv(
     predict_block_plane(&refs, bsize, mode, false)
 }
 
-const ALL_INTRA_MODES: [IntraMode; 13] = [
-    IntraMode::DcPred,
-    IntraMode::VPred,
-    IntraMode::HPred,
-    IntraMode::D45Pred,
-    IntraMode::D135Pred,
-    IntraMode::D113Pred,
-    IntraMode::D157Pred,
-    IntraMode::D203Pred,
-    IntraMode::D67Pred,
-    IntraMode::SmoothPred,
-    IntraMode::SmoothVPred,
-    IntraMode::SmoothHPred,
-    IntraMode::PaethPred,
-];
-
 fn compute_sad(pixels: &[u8], pred: &[u8]) -> u64 {
     pixels
         .iter()
@@ -1231,41 +1188,6 @@ fn compute_sad(pixels: &[u8], pred: &[u8]) -> u64 {
         .map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64)
         .sum()
 }
-
-const NONDIR_MODES: [IntraMode; 5] = [
-    IntraMode::DcPred,
-    IntraMode::SmoothPred,
-    IntraMode::SmoothVPred,
-    IntraMode::SmoothHPred,
-    IntraMode::PaethPred,
-];
-
-const ZONE1_AND_Z2_MODES: [IntraMode; 12] = [
-    IntraMode::DcPred,
-    IntraMode::SmoothPred,
-    IntraMode::SmoothVPred,
-    IntraMode::SmoothHPred,
-    IntraMode::PaethPred,
-    IntraMode::VPred,
-    IntraMode::HPred,
-    IntraMode::D45Pred,
-    IntraMode::D67Pred,
-    IntraMode::D135Pred,
-    IntraMode::D113Pred,
-    IntraMode::D157Pred,
-];
-
-const ZONE1_MODES: [IntraMode; 9] = [
-    IntraMode::DcPred,
-    IntraMode::SmoothPred,
-    IntraMode::SmoothVPred,
-    IntraMode::SmoothHPred,
-    IntraMode::PaethPred,
-    IntraMode::VPred,
-    IntraMode::HPred,
-    IntraMode::D45Pred,
-    IntraMode::D67Pred,
-];
 
 const VH_MODES: [IntraMode; 7] = [
     IntraMode::DcPred, IntraMode::SmoothPred, IntraMode::SmoothVPred,
@@ -1275,10 +1197,6 @@ const VH_MODES: [IntraMode; 7] = [
 
 fn select_intra_mode(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
     select_intra_mode_from(pixels, refs, bsize, &VH_MODES, true)
-}
-
-fn select_intra_mode_nondir(pixels: &[u8], refs: &RefPixels, bsize: usize) -> IntraMode {
-    select_intra_mode_from(pixels, refs, bsize, &NONDIR_MODES, true)
 }
 
 fn select_intra_mode_from(pixels: &[u8], refs: &RefPixels, bsize: usize, modes: &[IntraMode], is_luma: bool) -> IntraMode {
@@ -1517,25 +1435,6 @@ fn compute_ssd(a: &[u8], b: &[u8]) -> u64 {
     }).sum()
 }
 
-fn rd_cost(distortion: u64, rate_bits: u64, lambda: f64) -> f64 {
-    distortion as f64 + lambda * rate_bits as f64
-}
-
-fn estimate_block_rate(block: &EncodedBlock) -> u64 {
-    let mode_overhead = 160u64;
-    if block.eob == 0 {
-        return mode_overhead + 8;
-    }
-    let eob = block.eob as u64;
-    let bits_per_coeff = match block.bsize {
-        32 => 8,
-        16 => 11,
-        _ => 14,
-    };
-    let coeff_bits = 48 + eob * bits_per_coeff;
-    mode_overhead + coeff_bits
-}
-
 fn encode_partition_rd(
     pixels: &[u8],
     plane_w: usize,
@@ -1620,71 +1519,6 @@ fn downsample_64_to_32(residual: &[i32; 4096]) -> [i32; 1024] {
     out
 }
 
-fn encode_plane_block_64(
-    pixels: &[u8],
-    plane_w: usize,
-    recon: &mut [u8],
-    x: usize,
-    y: usize,
-    dequant: i32,
-) -> ([i32; 1024], u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 64, plane_w, recon.len() / plane_w);
-    let y_block = extract_subblock(pixels, plane_w, x, y, 64, 64);
-    let mode = select_intra_mode(&y_block, &refs, 64);
-    let pred_block = predict_block(&refs, 64, mode);
-
-    let residual = compute_residual_block(&y_block, &pred_block);
-    let mut residual_arr = [0i32; 4096];
-    residual_arr.copy_from_slice(&residual);
-    let residual_32 = downsample_64_to_32(&residual_arr);
-    let dct_coeffs = dct::forward_dct2_32x32(&residual_32);
-    let (levels, eob) = quantize_block(&dct_coeffs, dequant, 2);
-
-    let dqcoeffs = dequantize_block(&levels, eob, dequant, 2);
-    let inv_residual = dct::inverse_dct2_64x64_av2(&dqcoeffs);
-    reconstruct_block(recon, plane_w, x, y, 64, &pred_block, &inv_residual);
-
-    (levels, eob, mode)
-}
-
-fn encode_plane_block_32(
-    pixels: &[u8],
-    plane_w: usize,
-    recon: &mut [u8],
-    x: usize,
-    y: usize,
-    dequant: i32,
-) -> ([i32; 1024], u16, IntraMode) {
-    encode_plane_block_32_with_mode(pixels, plane_w, recon, x, y, dequant, None)
-}
-
-fn encode_plane_block_32_with_mode(
-    pixels: &[u8],
-    plane_w: usize,
-    recon: &mut [u8],
-    x: usize,
-    y: usize,
-    dequant: i32,
-    forced_mode: Option<IntraMode>,
-) -> ([i32; 1024], u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 32, plane_w, recon.len() / plane_w);
-    let uv_block = extract_subblock(pixels, plane_w, x, y, 32, 32);
-    let mode = forced_mode.unwrap_or_else(|| select_intra_mode_from(&uv_block, &refs, 32, &ALL_INTRA_MODES, false));
-    let pred_block = predict_block_plane(&refs, 32, mode, false);
-
-    let residual = compute_residual_block(&uv_block, &pred_block);
-    let mut residual_arr = [0i32; 1024];
-    residual_arr.copy_from_slice(&residual);
-    let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
-    let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
-
-    let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
-    let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
-    reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual);
-
-    (levels, eob, mode)
-}
-
 pub struct EncodedSuperblock {
     pub y_blocks: Vec<EncodedBlock>,
     pub u_levels: [i32; 1024],
@@ -1697,82 +1531,6 @@ pub struct EncodedSuperblock {
 fn qindex_to_lambda(qindex: u8) -> f64 {
     let q = ac_qlookup(qindex) as f64;
     0.04 * q * q
-}
-
-fn encode_plane_block_32_vec(
-    pixels: &[u8],
-    plane_w: usize,
-    recon: &mut [u8],
-    x: usize,
-    y: usize,
-    dequant: i32,
-    forced_mode: Option<IntraMode>,
-) -> (Vec<i32>, u16, IntraMode) {
-    let (levels_arr, eob, mode) = encode_plane_block_32_with_mode(pixels, plane_w, recon, x, y, dequant, forced_mode);
-    (levels_arr.to_vec(), eob, mode)
-}
-
-fn encode_plane_block_16(
-    pixels: &[u8],
-    plane_w: usize,
-    recon: &mut [u8],
-    x: usize,
-    y: usize,
-    dequant: i32,
-    forced_mode: Option<IntraMode>,
-) -> (Vec<i32>, u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 16, plane_w, recon.len() / plane_w);
-    let block = extract_subblock(pixels, plane_w, x, y, 16, 16);
-    let mode = forced_mode.unwrap_or_else(|| select_intra_mode_from(&block, &refs, 16, &ALL_INTRA_MODES, false));
-    let pred_block = predict_block_plane(&refs, 16, mode, false);
-
-    let residual = compute_residual_block(&block, &pred_block);
-    let mut residual_arr = [0i32; 256];
-    residual_arr.copy_from_slice(&residual);
-    let dct_coeffs = dct::forward_dct2_16x16(&residual_arr);
-    let scan = &crate::scan::DEFAULT_SCAN_16X16;
-    let mut levels = vec![0i32; 256];
-    let mut eob = 0u16;
-    for scan_idx in 0..256 {
-        let coeff_idx = scan[scan_idx] as usize;
-        let level = quantize_coeff(dct_coeffs[coeff_idx] as i64, 0, dequant);
-        levels[scan_idx] = level;
-        if level != 0 { eob = scan_idx as u16 + 1; }
-    }
-    let mut dqcoeffs = [0i32; 256];
-    for scan_idx in 0..eob as usize {
-        let coeff_idx = scan[scan_idx] as usize;
-        dqcoeffs[coeff_idx] = dequantize_coeff(levels[scan_idx], 0, dequant);
-    }
-    let inv_residual = dct::inverse_dct2_16x16(&dqcoeffs);
-    reconstruct_block(recon, plane_w, x, y, 16, &pred_block, &inv_residual.to_vec());
-    (levels, eob, mode)
-}
-
-fn encode_plane_block_32_y(
-    pixels: &[u8],
-    plane_w: usize,
-    recon: &mut [u8],
-    x: usize,
-    y: usize,
-    dequant: i32,
-) -> (Vec<i32>, u16, IntraMode) {
-    let refs = get_ref_pixels(recon, plane_w, x, y, 32, plane_w, recon.len() / plane_w);
-    let block = extract_subblock(pixels, plane_w, x, y, 32, 32);
-    let mode = select_intra_mode(&block, &refs, 32);
-    let pred_block = predict_block(&refs, 32, mode);
-
-    let residual = compute_residual_block(&block, &pred_block);
-    let mut residual_arr = [0i32; 1024];
-    residual_arr.copy_from_slice(&residual);
-    let dct_coeffs = dct::forward_dct2_32x32(&residual_arr);
-    let (levels, eob) = quantize_block(&dct_coeffs, dequant, 1);
-
-    let dqcoeffs = dequantize_block(&levels, eob, dequant, 1);
-    let inv_residual = dct::inverse_dct2_32x32(&dqcoeffs);
-    reconstruct_block(recon, plane_w, x, y, 32, &pred_block, &inv_residual);
-
-    (levels.to_vec(), eob, mode)
 }
 
 fn encode_frame_yuv(
@@ -1947,7 +1705,6 @@ pub fn encode_video_yuv(
                 dequant,
                 base_qindex,
                 order_hint: i as u32,
-                enable_partitioning: false,
             },
             true,
         );
@@ -1993,7 +1750,6 @@ pub fn encode_video_yuv_with_cdf_update(
                 dequant,
                 base_qindex,
                 order_hint: i as u32,
-                enable_partitioning: false,
             },
             true,
         );
@@ -2573,18 +2329,6 @@ mod tests {
         assert_eq!(IntraMode::SmoothVPred as u8, 10);
         assert_eq!(IntraMode::SmoothHPred as u8, 11);
         assert_eq!(IntraMode::PaethPred as u8, 12);
-    }
-
-    #[test]
-    fn smooth_weights_32_endpoints() {
-        assert_eq!(SMOOTH_WEIGHTS_32[0], 255);
-        assert_eq!(SMOOTH_WEIGHTS_32[31], 8);
-    }
-
-    #[test]
-    fn smooth_weights_64_endpoints() {
-        assert_eq!(SMOOTH_WEIGHTS_64[0], 255);
-        assert_eq!(SMOOTH_WEIGHTS_64[63], 4);
     }
 
     #[test]

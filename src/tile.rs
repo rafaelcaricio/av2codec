@@ -80,14 +80,6 @@ fn encode_eob_var_size(
     }
 }
 
-const DO_SPLIT_ICDF: [u16; 2] = [12276, 0];
-const Y_MODE_SET_ICDF: [u16; 4] = [3905, 1746, 1044, 0];
-const Y_MODE_IDX_ICDF: [u16; 8] = [17593, 12693, 11040, 8670, 6363, 5113, 3908, 0];
-const UV_MODE_ICDF: [u16; 8] = [23405, 11811, 9903, 8015, 6357, 4785, 2340, 0];
-const TXB_SKIP_U_ICDF: [u16; 2] = [31468, 0];
-const TXB_SKIP_V_ICDF: [u16; 2] = [31329, 0];
-const TXB_SKIP_V_U_NONZERO_ICDF: [u16; 2] = [25120, 0];
-
 const ADAPTIVE_TABLE: [usize; 5] = [4, 8, 16, 32, 64];
 
 fn get_adaptive_param(ctx: usize) -> u32 {
@@ -292,58 +284,6 @@ fn encode_low_range(
     }
 }
 
-fn encode_eob(
-    ec: &mut DaalaCoder,
-    eob: u16,
-    pl_ctx: usize,
-    mut cdf_ctx: Option<&mut FrameCdfContext>,
-) {
-    let eob_icdf = &EOB_MULTI_1024_ICDF[pl_ctx];
-
-    let mut eob_pt = 0usize;
-    for i in (0..EOB_GROUP_START.len()).rev() {
-        if eob >= EOB_GROUP_START[i] {
-            if i == 0 && eob == 0 {
-                continue;
-            }
-            eob_pt = i;
-            break;
-        }
-    }
-
-    let eob_token = eob_pt - 1;
-    if eob_token < EOB_PT_INDEX_COUNT - 1 {
-        if let Some(ref mut ctx) = cdf_ctx {
-            ec.encode_symbol_mut(eob_token, &mut ctx.eob_multi_1024[pl_ctx]);
-        } else {
-            ec.encode_symbol(eob_token, eob_icdf);
-        }
-    } else {
-        if let Some(ref mut ctx) = cdf_ctx {
-            ec.encode_symbol_mut(EOB_PT_INDEX_COUNT - 1, &mut ctx.eob_multi_1024[pl_ctx]);
-        } else {
-            ec.encode_symbol(EOB_PT_INDEX_COUNT - 1, eob_icdf);
-        }
-        let extra_token = eob_token - (EOB_PT_INDEX_COUNT - 1);
-        ec.encode_literal(extra_token as u32, 2);
-    }
-
-    let eob_offset_bits = EOB_OFFSET_BITS[eob_pt] as u32;
-    if eob_offset_bits > 0 {
-        let extra = eob - EOB_GROUP_START[eob_pt];
-        let msb = (extra >> (eob_offset_bits - 1)) & 1;
-        if let Some(ref mut ctx) = cdf_ctx {
-            ec.encode_symbol_mut(msb as usize, &mut ctx.eob_extra);
-        } else {
-            ec.encode_symbol(msb as usize, &EOB_EXTRA_ICDF);
-        }
-        if eob_offset_bits > 1 {
-            let rest = extra & ((1 << (eob_offset_bits - 1)) - 1);
-            ec.encode_literal(rest as u32, eob_offset_bits - 1);
-        }
-    }
-}
-
 fn stored_level(abs_level: usize, lf: bool, plane: usize) -> u8 {
     let max = if lf {
         if plane == 0 {
@@ -385,13 +325,12 @@ struct PlaneCoeffs<'a> {
     eob: u16,
 }
 
-struct PlaneEncodeCtx<'a> {
+struct PlaneEncodeCtx {
     plane: usize,
     txs_ctx_idx: usize,
     bwl: u32,
     height: usize,
     num_coeffs: usize,
-    txb_skip_icdf: &'a [u16],
     dc_sign_ctx: usize,
     entropy_ctx: usize,
     u_has_coeffs: bool,
@@ -671,7 +610,7 @@ pub fn encode_tile_data_with_coeffs(
             bwl: 5,
             height: 32,
             num_coeffs: 1024,
-            txb_skip_icdf: &TXB_SKIP_Y_ICDF[4][0],
+
             dc_sign_ctx: 0,
             entropy_ctx: 0,
             u_has_coeffs: false,
@@ -694,7 +633,7 @@ pub fn encode_tile_data_with_coeffs(
             bwl: 5,
             height: 32,
             num_coeffs: 1024,
-            txb_skip_icdf: &TXB_SKIP_U_ICDF,
+
             dc_sign_ctx: 0,
             entropy_ctx: 0,
             u_has_coeffs: false,
@@ -717,7 +656,7 @@ pub fn encode_tile_data_with_coeffs(
             bwl: 5,
             height: 32,
             num_coeffs: 1024,
-            txb_skip_icdf: &TXB_SKIP_V_ICDF,
+
             dc_sign_ctx: 0,
             entropy_ctx: 0,
             u_has_coeffs: u_eob > 0,
@@ -880,7 +819,7 @@ pub fn encode_tile_data_multi_sb(
                     bwl: 5,
                     height: 32,
                     num_coeffs: 1024,
-                    txb_skip_icdf: &TXB_SKIP_Y_ICDF[4][0],
+        
                     dc_sign_ctx: y_dc_sign_ctx,
                     entropy_ctx: 0,
                     u_has_coeffs: false,
@@ -911,7 +850,6 @@ pub fn encode_tile_data_multi_sb(
                     bwl: 5,
                     height: 32,
                     num_coeffs: 1024,
-                    txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
                     dc_sign_ctx: 0,
                     entropy_ctx: u_entropy_ctx,
                     u_has_coeffs: false,
@@ -942,7 +880,6 @@ pub fn encode_tile_data_multi_sb(
                     bwl: 5,
                     height: 32,
                     num_coeffs: 1024,
-                    txb_skip_icdf: &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx],
                     dc_sign_ctx: 0,
                     entropy_ctx: v_entropy_ctx,
                     u_has_coeffs: sb.u_eob > 0,
@@ -1102,7 +1039,6 @@ fn encode_leaf_block(
     let y_coeffs = PlaneCoeffs { levels: &block.levels, eob: block.eob };
     encode_plane_full(ec, &y_coeffs, &PlaneEncodeCtx {
         plane: 0, txs_ctx_idx: y_txs_ctx, bwl: y_bwl, height: y_h, num_coeffs: y_nc,
-        txb_skip_icdf: &TXB_SKIP_Y_ICDF[y_txs_ctx][y_entropy_ctx],
         dc_sign_ctx: y_dc_sign_ctx, entropy_ctx: y_entropy_ctx, u_has_coeffs: false,
         tx_size_sqr: y_tx_size_sqr,
     }, cdf, update);
@@ -1125,7 +1061,6 @@ fn encode_leaf_block(
     let u_coeffs = PlaneCoeffs { levels: &block.u_levels, eob: block.u_eob };
     encode_plane_full(ec, &u_coeffs, &PlaneEncodeCtx {
         plane: 1, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
-        txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
         dc_sign_ctx: 0, entropy_ctx: u_entropy_ctx, u_has_coeffs: false,
         tx_size_sqr: uv_tx_size_sqr,
     }, cdf, update);
@@ -1141,7 +1076,6 @@ fn encode_leaf_block(
     let v_coeffs = PlaneCoeffs { levels: &block.v_levels, eob: block.v_eob };
     encode_plane_full(ec, &v_coeffs, &PlaneEncodeCtx {
         plane: 2, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
-        txb_skip_icdf: &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx],
         dc_sign_ctx: 0, entropy_ctx: v_entropy_ctx, u_has_coeffs: block.u_eob > 0,
         tx_size_sqr: uv_tx_size_sqr,
     }, cdf, update);
@@ -1188,7 +1122,6 @@ fn encode_sq_part(
     } else {
         assert!(bsize >= 16, "cannot split block smaller than 16x16");
         let half = bsize / 2;
-        let mi_half = half / 4;
 
         let bw_log2 = mi_log2(bsize);
         let group = split_group(bsize, bsize);
@@ -1467,7 +1400,6 @@ fn encode_partition_and_coeffs(
             let coeffs = PlaneCoeffs { levels: &block.levels, eob: block.eob };
             encode_plane_full(ec, &coeffs, &PlaneEncodeCtx {
                 plane: 0, txs_ctx_idx: txs_ctx, bwl, height: h, num_coeffs: nc,
-                txb_skip_icdf: &TXB_SKIP_Y_ICDF[txs_ctx][0],
                 dc_sign_ctx: y_dc_sign_ctx, entropy_ctx: 0, u_has_coeffs: false,
                 tx_size_sqr: y_tx_sqr,
             }, cdf, update);
@@ -1477,7 +1409,6 @@ fn encode_partition_and_coeffs(
             let u_coeffs = PlaneCoeffs { levels: &block.u_levels, eob: block.u_eob };
             encode_plane_full(ec, &u_coeffs, &PlaneEncodeCtx {
                 plane: 1, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
-                txb_skip_icdf: &TXB_SKIP_U_CTX_ICDF[u_entropy_ctx],
                 dc_sign_ctx: 0, entropy_ctx: u_entropy_ctx, u_has_coeffs: false,
                 tx_size_sqr: uv_tx_sqr,
             }, cdf, update);
@@ -1486,7 +1417,6 @@ fn encode_partition_and_coeffs(
             let v_coeffs = PlaneCoeffs { levels: &block.v_levels, eob: block.v_eob };
             encode_plane_full(ec, &v_coeffs, &PlaneEncodeCtx {
                 plane: 2, txs_ctx_idx: uv_txs_ctx, bwl: uv_bwl, height: uv_h, num_coeffs: uv_nc,
-                txb_skip_icdf: &TXB_SKIP_V_CTX_ICDF[v_entropy_ctx],
                 dc_sign_ctx: 0, entropy_ctx: v_entropy_ctx, u_has_coeffs: block.u_eob > 0,
                 tx_size_sqr: uv_tx_sqr,
             }, cdf, update);
@@ -1505,15 +1435,6 @@ fn encode_partition_and_coeffs(
                 let child_left = if i % 2 == 0 { left_part } else { &empty };
                 encode_partition_and_coeffs(ec, child, blocks, half, child_above, child_left, above_y, left_y, above_u, left_u, above_v, left_v, cdf, update);
             }
-        }
-    }
-}
-
-fn collect_leaves(node: &PartitionNode, out: &mut Vec<usize>) {
-    match node {
-        PartitionNode::Leaf(idx) => out.push(*idx),
-        PartitionNode::Split(children) => {
-            for child in children { collect_leaves(child, out); }
         }
     }
 }
@@ -1783,24 +1704,6 @@ mod tests {
         let data =
             encode_tile_data_with_coeffs(&levels, 1, &[0i32; 1024], 0, &[0i32; 1024], 0, 0, 0);
         assert!(!data.is_empty());
-    }
-
-    #[test]
-    fn encode_eob_position_1() {
-        let mut ec = DaalaCoder::new();
-        encode_eob(&mut ec, 1, 0, None);
-        let data = ec.done();
-        assert!(!data.is_empty());
-    }
-
-    #[test]
-    fn encode_eob_various_positions() {
-        for eob in [1, 2, 3, 5, 9, 17, 33, 100] {
-            let mut ec = DaalaCoder::new();
-            encode_eob(&mut ec, eob, 0, None);
-            let data = ec.done();
-            assert!(!data.is_empty(), "eob={} produced empty data", eob);
-        }
     }
 
     #[test]

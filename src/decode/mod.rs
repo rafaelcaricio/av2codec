@@ -245,20 +245,6 @@ fn round_power_of_two_signed(value: i32, n: u32) -> i32 {
     }
 }
 
-fn predict_dc_rect(recon: &[u8], stride: usize, x: usize, y: usize, w: usize, h: usize) -> Vec<u8> {
-    predict::predict_intra(
-        recon,
-        stride,
-        x,
-        y,
-        w,
-        h,
-        predict::PredictionMode::DcPred,
-        0,
-        0,
-        0,
-    )
-}
 
 const NUM_REF_SAM_CFL: usize = 8;
 const DIV_LUT_BITS: i32 = 7;
@@ -871,29 +857,6 @@ fn mhccp_should_fill(
         || (row >= above_lines + height && col >= left_lines))
 }
 
-fn mhccp_sample_region(
-    plane: &[u8],
-    stride: usize,
-    width: usize,
-    height: usize,
-    origin_x: usize,
-    origin_y: usize,
-    region_w: usize,
-    region_h: usize,
-    local_x: isize,
-    local_y: isize,
-) -> u8 {
-    let x = local_x.clamp(0, region_w.saturating_sub(1) as isize) as usize;
-    let y = local_y.clamp(0, region_h.saturating_sub(1) as isize) as usize;
-    sample_plane(
-        plane,
-        stride,
-        width,
-        height,
-        (origin_x + x) as isize,
-        (origin_y + y) as isize,
-    )
-}
 
 fn mhccp_sample_chroma_input(
     chroma_plane: &[u8],
@@ -1178,7 +1141,7 @@ fn mhccp_build_ref_window(
     let origin_lx = origin_uv_x * 2;
     let origin_ly = origin_uv_y * 2;
     let luma_above_lines = above_lines * 2;
-    let luma_left_lines = left_lines * 2;
+    let _luma_left_lines = left_lines * 2;
     let luma_ref_width = ref_width * 2;
     let luma_ref_height = ref_height * 2;
     let luma_width = uv_bw * 2;
@@ -1651,14 +1614,6 @@ fn neighbor_filter_types(filter_map: &[u8], stride: usize, x: usize, y: usize) -
     (above, left)
 }
 
-fn intra_filter_type(mode: predict::PredictionMode) -> u8 {
-    matches!(
-        mode,
-        predict::PredictionMode::SmoothPred
-            | predict::PredictionMode::SmoothVPred
-            | predict::PredictionMode::SmoothHPred
-    ) as u8
-}
 
 fn uv_mode_filter_type(mode: u8) -> u8 {
     matches!(mode, 9 | 10 | 11) as u8
@@ -2516,7 +2471,7 @@ fn reconstruct_partitioned_frame(
                         let u_tu = &block.u_tu[0];
                         let v_tu = &block.v_tu[0];
 
-                        let mut u_dq = transform::dequantize_only(
+                        let u_dq = transform::dequantize_only(
                             &u_tu.levels,
                             u_tu.eob,
                             uv_dequant,
@@ -2524,7 +2479,7 @@ fn reconstruct_partitioned_frame(
                             u_tu.tx_type,
                             tcq_mode,
                         );
-                        let mut v_dq = transform::dequantize_only(
+                        let v_dq = transform::dequantize_only(
                             &v_tu.levels,
                             v_tu.eob,
                             uv_dequant,
@@ -4319,7 +4274,7 @@ mod tests {
         let obus = obu::parse_obus(&data);
         let seq = sequence::parse_sequence_header(obus[0].payload).unwrap();
         let fp = frame::parse_frame_header(obus[1].payload, &seq).unwrap();
-        let dequant = crate::encode::ac_qlookup(fp.base_qindex);
+        let _dequant = crate::encode::ac_qlookup(fp.base_qindex);
         let tile_cfg = tile::TileDecodeConfig {
             enable_cfl_intra: seq.enable_cfl_intra,
             enable_fsc: seq.enable_fsc,
@@ -4358,8 +4313,8 @@ mod tests {
         );
 
         let mode_name = |joint: u8| -> &str {
-            let (mode, delta) = predict::decode_prediction_mode(joint);
-            match mode {
+            let (_mode, _delta) = predict::decode_prediction_mode(joint);
+            match _mode {
                 predict::PredictionMode::DcPred => "DC",
                 predict::PredictionMode::VPred => "V",
                 predict::PredictionMode::HPred => "H",
@@ -4385,7 +4340,7 @@ mod tests {
             let mut block_mse_sum = 0.0f64;
             let mut block_count = 0usize;
             let mut block_max_err = 0i32;
-            let mut block_max_pos = (0usize, 0usize);
+            let mut _block_max_pos = (0usize, 0usize);
 
             for r in by..(by + bh).min(h) {
                 for c in bx..(bx + bw).min(w) {
@@ -4396,7 +4351,7 @@ mod tests {
                     block_count += 1;
                     if diff > block_max_err {
                         block_max_err = diff;
-                        block_max_pos = (c, r);
+                        _block_max_pos = (c, r);
                     }
                 }
             }
@@ -4424,7 +4379,7 @@ mod tests {
             let by = block.y;
             let bw = block.width;
             let bh = block.height;
-            let (mode, angle_delta) = predict::decode_prediction_mode(block.joint_y_mode);
+            let (_mode, angle_delta) = predict::decode_prediction_mode(block.joint_y_mode);
             let y_eob: u32 = block.y_tu.iter().map(|t| t.eob as u32).sum();
             let is_palette = !block.palette_y_map.is_empty();
             let block_psnr = if block_mse > 0.0 {
