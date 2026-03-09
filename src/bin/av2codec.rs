@@ -1,13 +1,13 @@
 use std::fs;
 use std::process;
-use wav2c::encode;
-use wav2c::y4m::Y4mReader;
+use av2codec::encode;
+use av2codec::y4m::Y4mReader;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 3 {
-        eprintln!("Usage: wav2c <input.y4m> <output.obu> [--qindex N]");
+        eprintln!("Usage: av2codec <input.y4m> <output.obu> [--qindex N]");
         process::exit(1);
     }
 

@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 pub mod bitstream;
 pub mod block;
 pub mod cdf_context;

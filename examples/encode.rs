@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::process;
 
-use wav2c::Encoder;
+use av2codec::Encoder;
 
 struct Config {
     output_path: String,

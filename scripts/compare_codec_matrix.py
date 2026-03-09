@@ -29,8 +29,8 @@ class Toolchain:
     project_dir: Path
     avmenc: Path
     avmdec: Path
-    wav2c: Path
-    wav2c_decode: Path
+    av2codec: Path
+    av2codec_decode: Path
     profile: str
 
 
@@ -72,15 +72,15 @@ class FrameData:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Encode one prepared frame with avmenc and wav2c, decode both bitstreams with avmdec and wav2c_decode, render a labeled matrix, and emit numeric metrics."
+        description="Encode one prepared frame with avmenc and av2codec, decode both bitstreams with avmdec and av2codec_decode, render a labeled matrix, and emit numeric metrics."
     )
     parser.add_argument("input", type=Path, help="Input image, video, or Y4M path")
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        default=Path("/tmp/wav2c_codec_matrix.png"),
-        help="Output PNG path (default: /tmp/wav2c_codec_matrix.png)",
+        default=Path("/tmp/av2codec_codec_matrix.png"),
+        help="Output PNG path (default: /tmp/av2codec_codec_matrix.png)",
     )
     parser.add_argument(
         "-s",
@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
         "--quality",
         type=int,
         default=30,
-        help="Quality value applied to avmenc --qp and wav2c --qindex (default: 30)",
+        help="Quality value applied to avmenc --qp and av2codec --qindex (default: 30)",
     )
     parser.add_argument(
         "--cpu-used",
@@ -116,7 +116,7 @@ def parse_args() -> argparse.Namespace:
         "--profile",
         choices=("debug", "release"),
         default="debug",
-        help="Cargo profile for wav2c binaries (default: debug)",
+        help="Cargo profile for av2codec binaries (default: debug)",
     )
     parser.add_argument(
         "--workdir",
@@ -300,46 +300,46 @@ def run_iteration(
         ensure_binaries_exist(toolchain)
         print(f"[build] skipped ({toolchain.profile})")
     else:
-        build_wav2c(toolchain.project_dir, toolchain.profile)
+        build_av2codec(toolchain.project_dir, toolchain.profile)
 
     latest_dir = work_area.root / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
 
-    wav2c_obu = latest_dir / "wav2c.obu"
-    avmenc_wav2c_y4m = latest_dir / "avmenc__wav2c.y4m"
-    wav2c_avmdec_y4m = latest_dir / "wav2c__avmdec.y4m"
-    wav2c_wav2c_y4m = latest_dir / "wav2c__wav2c.y4m"
-    avmenc_wav2c_png = latest_dir / "avmenc__wav2c.png"
-    wav2c_avmdec_png = latest_dir / "wav2c__avmdec.png"
-    wav2c_wav2c_png = latest_dir / "wav2c__wav2c.png"
+    av2codec_obu = latest_dir / "av2codec.obu"
+    avmenc_av2codec_y4m = latest_dir / "avmenc__av2codec.y4m"
+    av2codec_avmdec_y4m = latest_dir / "av2codec__avmdec.y4m"
+    av2codec_av2codec_y4m = latest_dir / "av2codec__av2codec.y4m"
+    avmenc_av2codec_png = latest_dir / "avmenc__av2codec.png"
+    av2codec_avmdec_png = latest_dir / "av2codec__avmdec.png"
+    av2codec_av2codec_png = latest_dir / "av2codec__av2codec.png"
 
-    print("[encode] wav2c")
+    print("[encode] av2codec")
     run_command(
         [
-            str(toolchain.wav2c),
+            str(toolchain.av2codec),
             str(reference.input_y4m),
-            str(wav2c_obu),
+            str(av2codec_obu),
             "--qindex",
             str(args.quality),
         ],
-        log_path=latest_dir / "wav2c_encode.log",
+        log_path=latest_dir / "av2codec_encode.log",
     )
 
     decode_jobs = [
         (
-            "avmenc -> wav2c",
-            [str(toolchain.wav2c_decode), str(reference.avmenc_obu), "-o", str(avmenc_wav2c_y4m)],
-            latest_dir / "avmenc__wav2c.log",
+            "avmenc -> av2codec",
+            [str(toolchain.av2codec_decode), str(reference.avmenc_obu), "-o", str(avmenc_av2codec_y4m)],
+            latest_dir / "avmenc__av2codec.log",
         ),
         (
-            "wav2c -> avmdec",
-            [str(toolchain.avmdec), str(wav2c_obu), "-o", str(wav2c_avmdec_y4m)],
-            latest_dir / "wav2c__avmdec.log",
+            "av2codec -> avmdec",
+            [str(toolchain.avmdec), str(av2codec_obu), "-o", str(av2codec_avmdec_y4m)],
+            latest_dir / "av2codec__avmdec.log",
         ),
         (
-            "wav2c -> wav2c",
-            [str(toolchain.wav2c_decode), str(wav2c_obu), "-o", str(wav2c_wav2c_y4m)],
-            latest_dir / "wav2c__wav2c.log",
+            "av2codec -> av2codec",
+            [str(toolchain.av2codec_decode), str(av2codec_obu), "-o", str(av2codec_av2codec_y4m)],
+            latest_dir / "av2codec__av2codec.log",
         ),
     ]
     print("[decode] running 3 decode checks")
@@ -348,16 +348,16 @@ def run_iteration(
         run_command(command, log_path=log_path)
 
     print("[render] converting outputs to png")
-    convert_y4m_to_png(avmenc_wav2c_y4m, avmenc_wav2c_png)
-    convert_y4m_to_png(wav2c_avmdec_y4m, wav2c_avmdec_png)
-    convert_y4m_to_png(wav2c_wav2c_y4m, wav2c_wav2c_png)
+    convert_y4m_to_png(avmenc_av2codec_y4m, avmenc_av2codec_png)
+    convert_y4m_to_png(av2codec_avmdec_y4m, av2codec_avmdec_png)
+    convert_y4m_to_png(av2codec_av2codec_y4m, av2codec_av2codec_png)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_json_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_text_path.parent.mkdir(parents=True, exist_ok=True)
 
     avmenc_size = reference.avmenc_obu.stat().st_size
-    wav2c_size = wav2c_obu.stat().st_size
+    av2codec_size = av2codec_obu.stat().st_size
     report = build_metrics_report(
         args=args,
         input_path=input_path,
@@ -366,11 +366,11 @@ def run_iteration(
         metrics_text_path=metrics_text_path,
         workdir=work_area.root,
         reference=reference,
-        avmenc_wav2c_y4m=avmenc_wav2c_y4m,
-        wav2c_avmdec_y4m=wav2c_avmdec_y4m,
-        wav2c_wav2c_y4m=wav2c_wav2c_y4m,
+        avmenc_av2codec_y4m=avmenc_av2codec_y4m,
+        av2codec_avmdec_y4m=av2codec_avmdec_y4m,
+        av2codec_av2codec_y4m=av2codec_av2codec_y4m,
         avmenc_size=avmenc_size,
-        wav2c_size=wav2c_size,
+        av2codec_size=av2codec_size,
         run_index=run_index,
     )
     metrics_json_path.write_text(json.dumps(report, indent=2) + "\n")
@@ -383,15 +383,15 @@ def run_iteration(
         images={
             "original": reference.original_png,
             "avmenc_avmdec": reference.avmenc_avmdec_png,
-            "avmenc_wav2c": avmenc_wav2c_png,
-            "wav2c_avmdec": wav2c_avmdec_png,
-            "wav2c_wav2c": wav2c_wav2c_png,
+            "avmenc_av2codec": avmenc_av2codec_png,
+            "av2codec_avmdec": av2codec_avmdec_png,
+            "av2codec_av2codec": av2codec_av2codec_png,
         },
         size=(reference.width, reference.height),
         scale_up=args.scale_up,
         quality=args.quality,
         avmenc_size=avmenc_size,
-        wav2c_size=wav2c_size,
+        av2codec_size=av2codec_size,
         font_path=args.font,
         profile=toolchain.profile,
     )
@@ -420,10 +420,10 @@ def prepare_work_area(args: argparse.Namespace, input_path: Path) -> WorkArea:
             cpu_used=args.cpu_used,
         )
         slug = slugify(input_path.stem) or "input"
-        root = Path("/tmp/wav2c_codec_matrix_cache") / f"{slug}-{key[:12]}"
+        root = Path("/tmp/av2codec_codec_matrix_cache") / f"{slug}-{key[:12]}"
         root.mkdir(parents=True, exist_ok=True)
         return WorkArea(root=root, keep=True, temp_dir=None)
-    temp_dir = tempfile.TemporaryDirectory(prefix="wav2c_codec_matrix.", dir="/tmp")
+    temp_dir = tempfile.TemporaryDirectory(prefix="av2codec_codec_matrix.", dir="/tmp")
     return WorkArea(root=Path(temp_dir.name), keep=args.keep_workdir, temp_dir=temp_dir)
 
 
@@ -557,8 +557,8 @@ def resolve_toolchain(profile: str) -> Toolchain:
         project_dir=project_dir,
         avmenc=avm_build / "avmenc",
         avmdec=avm_build / "avmdec",
-        wav2c=binary_dir / "wav2c",
-        wav2c_decode=binary_dir / "wav2c_decode",
+        av2codec=binary_dir / "av2codec",
+        av2codec_decode=binary_dir / "av2codec_decode",
         profile=profile,
     )
     for tool in ("ffmpeg", "ffprobe", "cargo"):
@@ -572,11 +572,11 @@ def resolve_toolchain(profile: str) -> Toolchain:
 
 
 def ensure_binaries_exist(toolchain: Toolchain) -> None:
-    missing = [path for path in (toolchain.wav2c, toolchain.wav2c_decode) if not path.exists()]
+    missing = [path for path in (toolchain.av2codec, toolchain.av2codec_decode) if not path.exists()]
     if missing:
         joined = ", ".join(str(path) for path in missing)
         raise SystemExit(
-            f"Missing wav2c binaries for profile {toolchain.profile}: {joined}. Run without --no-build first."
+            f"Missing av2codec binaries for profile {toolchain.profile}: {joined}. Run without --no-build first."
         )
 
 
@@ -585,11 +585,11 @@ def ensure_input_exists(path: Path) -> None:
         raise SystemExit(f"Input file not found: {path}")
 
 
-def build_wav2c(project_dir: Path, profile: str) -> None:
+def build_av2codec(project_dir: Path, profile: str) -> None:
     command = ["cargo", "build"]
     if profile == "release":
         command.append("--release")
-    command.extend(["--bin", "wav2c", "--bin", "wav2c_decode", "--quiet"])
+    command.extend(["--bin", "av2codec", "--bin", "av2codec_decode", "--quiet"])
     print(f"[build] {shlex.join(command)}")
     run_command(
         command,
@@ -800,29 +800,29 @@ def build_metrics_report(
     metrics_text_path: Path,
     workdir: Path,
     reference: ReferenceArtifacts,
-    avmenc_wav2c_y4m: Path,
-    wav2c_avmdec_y4m: Path,
-    wav2c_wav2c_y4m: Path,
+    avmenc_av2codec_y4m: Path,
+    av2codec_avmdec_y4m: Path,
+    av2codec_av2codec_y4m: Path,
     avmenc_size: int,
-    wav2c_size: int,
+    av2codec_size: int,
     run_index: int,
 ) -> dict[str, object]:
     original = read_y4m_frame(reference.input_y4m)
     avmenc_avmdec = read_y4m_frame(reference.avmenc_avmdec_y4m)
-    avmenc_wav2c = read_y4m_frame(avmenc_wav2c_y4m)
-    wav2c_avmdec = read_y4m_frame(wav2c_avmdec_y4m)
-    wav2c_wav2c = read_y4m_frame(wav2c_wav2c_y4m)
+    avmenc_av2codec = read_y4m_frame(avmenc_av2codec_y4m)
+    av2codec_avmdec = read_y4m_frame(av2codec_avmdec_y4m)
+    av2codec_av2codec = read_y4m_frame(av2codec_av2codec_y4m)
 
     pairs = [
         compare_frames("orig vs avmenc -> avmdec", original, avmenc_avmdec),
-        compare_frames("orig vs avmenc -> wav2c", original, avmenc_wav2c),
-        compare_frames("orig vs wav2c -> avmdec", original, wav2c_avmdec),
-        compare_frames("orig vs wav2c -> wav2c", original, wav2c_wav2c),
-        compare_frames("avmenc ref vs avmenc -> wav2c", avmenc_avmdec, avmenc_wav2c),
-        compare_frames("wav2c -> avmdec vs wav2c -> wav2c", wav2c_avmdec, wav2c_wav2c),
+        compare_frames("orig vs avmenc -> av2codec", original, avmenc_av2codec),
+        compare_frames("orig vs av2codec -> avmdec", original, av2codec_avmdec),
+        compare_frames("orig vs av2codec -> av2codec", original, av2codec_av2codec),
+        compare_frames("avmenc ref vs avmenc -> av2codec", avmenc_avmdec, avmenc_av2codec),
+        compare_frames("av2codec -> avmdec vs av2codec -> av2codec", av2codec_avmdec, av2codec_av2codec),
     ]
     focus = rank_focus_pairs(pairs)
-    delta_bytes = wav2c_size - avmenc_size
+    delta_bytes = av2codec_size - avmenc_size
     delta_percent = (delta_bytes / avmenc_size * 100.0) if avmenc_size else None
 
     return {
@@ -850,7 +850,7 @@ def build_metrics_report(
         },
         "bitstreams": {
             "avmenc_bytes": avmenc_size,
-            "wav2c_bytes": wav2c_size,
+            "av2codec_bytes": av2codec_size,
             "delta_bytes": delta_bytes,
             "delta_percent": delta_percent,
         },
@@ -985,7 +985,7 @@ def render_metrics_summary(report: dict[str, object]) -> str:
         f"input: {report['input']}",
         f"frame: {frame['width']}x{frame['height']} q={report['quality']} profile={report['profile']} cpu-used={report['cpu_used']}",
         f"reference cache: {'hit' if report['reference']['cache_hit'] else 'refreshed'}",
-        f"bitstreams: avmenc={format_bytes(bitstreams['avmenc_bytes'])} wav2c={format_bytes(bitstreams['wav2c_bytes'])} delta={format_signed_bytes(bitstreams['delta_bytes'])}{format_percent(bitstreams['delta_percent'])}",
+        f"bitstreams: avmenc={format_bytes(bitstreams['avmenc_bytes'])} av2codec={format_bytes(bitstreams['av2codec_bytes'])} delta={format_signed_bytes(bitstreams['delta_bytes'])}{format_percent(bitstreams['delta_percent'])}",
         "",
         "pairs:",
     ]
@@ -1071,7 +1071,7 @@ def render_matrix(
     scale_up: int,
     quality: int,
     avmenc_size: int,
-    wav2c_size: int,
+    av2codec_size: int,
     font_path: Path | None,
     profile: str,
 ) -> None:
@@ -1102,10 +1102,10 @@ def render_matrix(
     canvas = Image.new("RGB", (canvas_width, canvas_height), background)
     draw = ImageDraw.Draw(canvas)
 
-    title_font = pick_font(font_path, 28 * scale_up, "wav2c / avmenc / avmdec matrix")
+    title_font = pick_font(font_path, 28 * scale_up, "av2codec / avmenc / avmdec matrix")
     subtitle_text = (
         f"{source_width}x{source_height}   q={quality}   {profile}   "
-        f"avmenc={format_bytes(avmenc_size)}   wav2c={format_bytes(wav2c_size)}"
+        f"avmenc={format_bytes(avmenc_size)}   av2codec={format_bytes(av2codec_size)}"
     )
     subtitle_font = best_fit_font(
         font_path,
@@ -1116,7 +1116,7 @@ def render_matrix(
     draw_text_centered(
         draw,
         (margin, margin, canvas_width - margin, margin + title_height),
-        "wav2c / avmenc / avmdec matrix",
+        "av2codec / avmenc / avmdec matrix",
         title_font,
         title,
     )
@@ -1132,12 +1132,12 @@ def render_matrix(
         [
             ("Original", images["original"]),
             ("avmenc -> avmdec", images["avmenc_avmdec"]),
-            ("avmenc -> wav2c", images["avmenc_wav2c"]),
+            ("avmenc -> av2codec", images["avmenc_av2codec"]),
         ],
         [
             ("Original", images["original"]),
-            ("wav2c -> avmdec", images["wav2c_avmdec"]),
-            ("wav2c -> wav2c", images["wav2c_wav2c"]),
+            ("av2codec -> avmdec", images["av2codec_avmdec"]),
+            ("av2codec -> av2codec", images["av2codec_av2codec"]),
         ],
     ]
 

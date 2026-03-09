@@ -1,13 +1,13 @@
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::process;
-use wav2c::Decoder;
+use av2codec::Decoder;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: wav2c_decode <input.av2> [-o <output.y4m>]");
+        eprintln!("Usage: av2codec_decode <input.av2> [-o <output.y4m>]");
         process::exit(1);
     }
 
@@ -86,7 +86,7 @@ fn write_y4m(
     mut w: impl Write,
     width: u32,
     height: u32,
-    frames: &[wav2c::DecodedFrame],
+    frames: &[av2codec::DecodedFrame],
 ) -> io::Result<()> {
     writeln!(w, "YUV4MPEG2 W{} H{} F30:1 Ip A1:1 C420", width, height)?;
 

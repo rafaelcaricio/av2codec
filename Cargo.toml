@@ -1,7 +1,10 @@
 [package]
-name = "wav2c"
+name = "av2codec"
 version = "0.1.0"
 edition = "2024"
+authors = ["Rafael Caricio <rafael@caricio.com>"]
+description = "AV2 video codec encoder and decoder"
+license = "MIT"
 publish = ["crates-io"]
 
 [dependencies]

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "wav2c"
+name = "av2codec"
 version = "0.1.0"

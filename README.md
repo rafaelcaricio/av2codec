@@ -1,8 +1,8 @@
-# wav2c
+# av2codec
 
-**Wondrous AV2 Coder** — a clean-room AV2 video encoder and decoder written in pure safe Rust.
+A clean-room AV2 video encoder and decoder written in pure safe Rust.
 
-wav2c encodes raw YUV video into [AV2 (AOM Video 2)](https://aomedia.org/) bitstreams and decodes them back. Encoded bitstreams are compatible with the reference [avmdec](https://gitlab.com/AOMediaCodec/avm) decoder. No unsafe code, no C dependencies, no assembly — just Rust.
+av2codec encodes raw YUV video into [AV2 (AOM Video 2)](https://aomedia.org/) bitstreams and decodes them back. Encoded bitstreams are compatible with the reference [avmdec](https://gitlab.com/AOMediaCodec/avm) decoder. No unsafe code, no C dependencies, no assembly — just Rust.
 
 ## Quick start
 
@@ -11,10 +11,10 @@ wav2c encodes raw YUV video into [AV2 (AOM Video 2)](https://aomedia.org/) bitst
 cargo build --release
 
 # Encode a Y4M file to AV2
-cargo run --release --bin wav2c -- input.y4m output.obu
+cargo run --release --bin av2codec -- input.y4m output.obu
 
 # Decode back to Y4M (using the built-in decoder)
-cargo run --release --bin wav2c_decode -- output.obu -o decoded.y4m
+cargo run --release --bin av2codec_decode -- output.obu -o decoded.y4m
 
 # Or decode with the reference decoder
 avmdec --i420 -o decoded.yuv output.obu
@@ -27,7 +27,7 @@ avmdec --i420 -o decoded.yuv output.obu
 #### Encoding
 
 ```
-wav2c <input.y4m> <output.obu> [--qindex N]
+av2codec <input.y4m> <output.obu> [--qindex N]
 ```
 
 | Argument | Description |
@@ -39,7 +39,7 @@ wav2c <input.y4m> <output.obu> [--qindex N]
 #### Decoding
 
 ```
-wav2c_decode <input.obu> [-o <output.y4m>]
+av2codec_decode <input.obu> [-o <output.y4m>]
 ```
 
 | Argument | Description |
@@ -52,7 +52,7 @@ wav2c_decode <input.obu> [-o <output.y4m>]
 #### Encoding (streaming)
 
 ```rust
-use wav2c::Encoder;
+use av2codec::Encoder;
 
 let mut enc = Encoder::new(640, 480, 50)?;
 let mut output = enc.headers();
@@ -70,7 +70,7 @@ std::fs::write("output.obu", &output)?;
 #### Decoding
 
 ```rust
-use wav2c::{Decoder, DecodedFrame, DecodeError};
+use av2codec::{Decoder, DecodedFrame, DecodeError};
 
 let bitstream = std::fs::read("input.obu")?;
 let frames: Vec<DecodedFrame> = Decoder::decode_all(&bitstream)?;
@@ -107,7 +107,7 @@ The `DecodedFrame` struct provides direct access to the decoded YUV 4:2:0 planes
 #### Encode-decode roundtrip
 
 ```rust
-use wav2c::{Encoder, Decoder};
+use av2codec::{Encoder, Decoder};
 
 // Encode
 let mut enc = Encoder::new(128, 128, 50).unwrap();
@@ -133,7 +133,7 @@ ffmpeg -f lavfi -i testsrc2=size=64x64:duration=1:rate=25 \
   -pix_fmt yuv420p -f rawvideo - | cargo run --example encode -- output.obu
 
 # Decode with the built-in decoder
-cargo run --release --bin wav2c_decode -- output.obu -o decoded.y4m
+cargo run --release --bin av2codec_decode -- output.obu -o decoded.y4m
 
 # Or decode with the reference decoder
 avmdec --i420 -o decoded.yuv output.obu
@@ -141,7 +141,7 @@ avmdec --i420 -o decoded.yuv output.obu
 
 ## What it does
 
-wav2c reads Y4M video frames and produces an all-intra AV2 bitstream where every frame is an independent keyframe. It also includes a pure Rust decoder that can decode any AV2-compliant bitstream (not limited to wav2c-produced streams).
+av2codec reads Y4M video frames and produces an all-intra AV2 bitstream where every frame is an independent keyframe. It also includes a pure Rust decoder that can decode any AV2-compliant bitstream (not limited to av2codec-produced streams).
 
 The encoding pipeline for each frame:
 
@@ -170,7 +170,7 @@ A sequence header OBU is prepended once at the start of the bitstream.
 - Intra prediction: DC, Smooth, Smooth_V, Smooth_H, Paeth (best mode selected per superblock)
 - Full DC + AC coefficient coding with forward/inverse DCT
 - Multi-frame video encoding (each frame as a CLK OBU)
-- **Pure Rust decoder** — decodes any AV2-compliant bitstream, not just wav2c-produced ones
+- **Pure Rust decoder** — decodes any AV2-compliant bitstream, not just av2codec-produced ones
 - Spec-compliant sequence header parsing (both `single_picture_header_flag=0` and `=1`)
 - Streaming encoder API (`send_frame` / `receive_packet`)
 - Batch encoding API (`encode_video_yuv`) and decoding API (`Decoder::decode_all`)
@@ -200,7 +200,7 @@ Integration tests that encode video, decode with avmdec, and verify pixel values
 cargo test --test avmdec_integration -- --ignored
 ```
 
-The integration suite covers single-frame, multi-frame, multiple colors (green, red, gray), all three YUV planes, gradient/testsrc2 patterns with PSNR validation, decoder agreement between wav2c and avmdec, and CLI roundtrip encoding.
+The integration suite covers single-frame, multi-frame, multiple colors (green, red, gray), all three YUV planes, gradient/testsrc2 patterns with PSNR validation, decoder agreement between av2codec and avmdec, and CLI roundtrip encoding.
 
 Visual encoder/decoder matrix with burned-in labels:
 
@@ -212,24 +212,24 @@ Visual encoder/decoder matrix with burned-in labels:
 The script:
 
 - Converts one input image into a single prepared Y4M frame
-- Encodes that same frame with both `avmenc` and `wav2c`
-- Decodes both bitstreams with both `avmdec` and `wav2c_decode`
+- Encodes that same frame with both `avmenc` and `av2codec`
+- Decodes both bitstreams with both `avmdec` and `av2codec_decode`
 - Produces a labeled 2x3 PNG grid with:
-  - top row: `Original`, `avmenc -> avmdec`, `avmenc -> wav2c`
-  - bottom row: `Original`, `wav2c -> avmdec`, `wav2c -> wav2c`
+  - top row: `Original`, `avmenc -> avmdec`, `avmenc -> av2codec`
+  - bottom row: `Original`, `av2codec -> avmdec`, `av2codec -> av2codec`
 
 Useful flags:
 
 - `-s WxH` resizes and center-crops the source image before encode
-- `-q N` applies the same quality value to `avmenc --qp` and `wav2c --qindex`
+- `-q N` applies the same quality value to `avmenc --qp` and `av2codec --qindex`
 - `--cpu-used N` controls avmenc speed
-- `--profile debug|release` selects the wav2c cargo profile for the run (`debug` by default for faster iteration)
+- `--profile debug|release` selects the av2codec cargo profile for the run (`debug` by default for faster iteration)
 - `--cache-dir DIR` keeps prepared input, `avmenc.obu`, and `avmenc -> avmdec` artifacts stable across runs
 - `--watch` reruns on source changes and keeps going after build/decode failures
 - `--metrics-text PATH` and `--metrics-json PATH` write per-run numeric summaries next to the matrix PNG
 - `--scale-up N` enlarges the comparison cells for easier inspection
 - `--keep-workdir` preserves intermediate OBUs, Y4Ms, PNGs, and logs
-- `--no-build` skips rebuilding `wav2c` binaries for the selected profile
+- `--no-build` skips rebuilding `av2codec` binaries for the selected profile
 
 Fast inner loop during encoder or decoder work:
 
@@ -238,17 +238,17 @@ Fast inner loop during encoder or decoder work:
   -s 192x192 \
   -q 30 \
   --profile debug \
-  --cache-dir /tmp/wav2c_iter/jellyfish \
+  --cache-dir /tmp/av2codec_iter/jellyfish \
   --watch \
-  -o /tmp/wav2c_iter/jellyfish/matrix.png \
+  -o /tmp/av2codec_iter/jellyfish/matrix.png \
   photo.jpg
 ```
 
 That loop:
 
 - reuses the prepared probe frame plus cached `avmenc -> avmdec` reference artifacts
-- rebuilds only `wav2c` and `wav2c_decode`
-- refreshes `avmenc -> wav2c`, `wav2c -> avmdec`, and `wav2c -> wav2c` on every save
+- rebuilds only `av2codec` and `av2codec_decode`
+- refreshes `avmenc -> av2codec`, `av2codec -> avmdec`, and `av2codec -> av2codec` on every save
 - writes `matrix.png`, `matrix.txt`, and `matrix.json` so visual inspection is paired with PSNR/MAE and bitstream-size deltas
 
 Use `--profile release` for final confirmation, then run the normal regression gate:
@@ -278,8 +278,8 @@ src/
   cdf_tables.rs       Initial CDF tables for entropy coding
   y4m.rs              Y4M file parser
   bin/
-    wav2c.rs          Encoder CLI binary
-    wav2c_decode.rs   Decoder CLI binary
+    av2codec.rs           Encoder CLI binary
+    av2codec_decode.rs    Decoder CLI binary
   decode/
     mod.rs            Decoder orchestrator, frame reconstruction
     bitreader.rs      Bit-level reader (MSB-first, UVLC, LEB128)
@@ -306,7 +306,7 @@ docs/
 
 ## Building the reference decoder
 
-wav2c validates against the AVM reference decoder. To build it:
+av2codec validates against the AVM reference decoder. To build it:
 
 ```sh
 git clone https://gitlab.com/AoMediaCodec/avm.git ../av2
@@ -328,4 +328,4 @@ make -j$(nproc) avmdec
 
 ## License
 
-TBD
+MIT
