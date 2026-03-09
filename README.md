@@ -146,12 +146,13 @@ av2codec reads Y4M video frames and produces an all-intra AV2 bitstream where ev
 The encoding pipeline for each frame:
 
 1. Read YUV 4:2:0 pixel data (Y, U, V planes)
-2. Select best intra prediction mode per superblock (DC, Smooth, Smooth_V, Smooth_H, Paeth)
-3. Compute residual against the selected prediction
-4. Forward 2D DCT (64x64 for Y, 32x32 for U/V)
-5. Quantization using AV2 dequant tables
-6. Entropy-code coefficients using Daala arithmetic coding (base levels, BR, sign, adaptive HR)
-7. Pack into a CLK OBU (implicit keyframe)
+2. Adaptive block partitioning with RD optimization (8x8 to 32x32)
+3. Select best intra prediction mode per block (DC, V, H, Smooth, Smooth_V, Smooth_H, Paeth)
+4. Compute residual against the selected prediction
+5. Forward 2D DCT
+6. Quantization using AV2 dequant tables
+7. Entropy-code coefficients using Daala arithmetic coding (base levels, BR, sign, adaptive HR)
+8. Pack into a CLK OBU (implicit keyframe)
 
 The decoding pipeline reverses these steps:
 
@@ -167,7 +168,8 @@ A sequence header OBU is prepended once at the start of the bitstream.
 
 - Profile 0, 8-bit, 4:2:0 (YCbCr)
 - All-intra encoding (every frame is a keyframe)
-- Intra prediction: DC, Smooth, Smooth_V, Smooth_H, Paeth (best mode selected per superblock)
+- Adaptive block partitioning with RD optimization (8x8 to 32x32)
+- Intra prediction: DC, V, H, Smooth, Smooth_V, Smooth_H, Paeth (best mode selected per block)
 - Full DC + AC coefficient coding with forward/inverse DCT
 - Multi-frame video encoding (each frame as a CLK OBU)
 - **Pure Rust decoder** — decodes any AV2-compliant bitstream, not just av2codec-produced ones
@@ -180,7 +182,7 @@ A sequence header OBU is prepended once at the start of the bitstream.
 
 ## Limitations
 
-- Dimensions must be multiples of 64 (superblock aligned)
+- Input dimensions must be multiples of 4 (internally padded to superblock-aligned)
 - Fixed QP only (no rate control)
 - 8-bit 4:2:0 only
 - No deblocking filters (CDEF/GDF) — expect visible block boundaries at higher quantization
@@ -324,7 +326,9 @@ make -j$(nproc) avmdec
 | 2 | AC coefficient support | Done |
 | 3 | Pure Rust decoder | Done |
 | — | Spec-compliant sequence header parsing | Done |
-| — | Intra prediction modes (DC, Smooth, Paeth) | Done |
+| — | Intra prediction modes (DC, V, H, Smooth, Paeth) | Done |
+| — | CDF adaptation engine | Done |
+| — | Adaptive block partitioning (8-32px) with RD optimization | Done |
 
 ## License
 
